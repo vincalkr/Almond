@@ -70,7 +70,10 @@ case $MODEL in
     glm)
         SHIM="$R/tools/glm/serve/serve_glm.py"
         [ -n "$CFG" ] || CFG="$R/local/glm-local.json"
-        [ -x "$R/build-maya-hip/maya" ] || { echo "run.sh: build-maya-hip/maya is not built (./build.sh builds it)" >&2; exit 1; } ;;
+        [ -x "$R/build-maya-hip/maya" ] || { echo "run.sh: build-maya-hip/maya is not built (./build.sh builds it)" >&2; exit 1; }
+        # the expert profile the engine starts its VRAM pools from and saves what it learns into: project-maya's
+        # until this machine has its own
+        [ -s "$R/local/glm-expert-profile.bin" ] || cp "$R/engines/maya/data/expert-profile-glm.bin" "$R/local/glm-expert-profile.bin" ;;
     *) echo "run.sh: --model takes ds41 or glm (got '$MODEL')" >&2; exit 1 ;;
 esac
 cards=$(echo "${GPU:-0,1}" | tr ',' '\n' | wc -l)

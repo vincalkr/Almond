@@ -8,7 +8,11 @@
     "--prefill",
     "auto",
     "--vram-reserve-mib",
-    "576"
+    "576",
+    "--expert-profile",
+    "local/glm-expert-profile.bin",
+    "--expert-profile-save",
+    "local/glm-expert-profile.bin"
   ],
   "env": {
     "STRATA_GLM_RESERVE_MB": "576",

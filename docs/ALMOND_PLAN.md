@@ -132,6 +132,22 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    (tok/s.) Greedy output is not token for token the one without drafts: on the 128-token doc the two part at token
    12, "64" against "128" (a near tie: the verify window's batched kernels round differently from the one-token
    path, as the prompt path does). Tool calls checked again with drafts on (3 of 3, the integer argument typed).
+   **The expert profile (2026-10-29, on by default):** the engine starts each card's VRAM pool from a profile (the
+   most routed experts first, and each layer's share of slots) and saves what it routed into it on quit and every
+   10 minutes; the pools stay LRU while it runs. `local/glm-local.json` passes `--expert-profile` and
+   `--expert-profile-save` on `local/glm-expert-profile.bin`, which run.sh seeds with project-maya's
+   (`engines/maya/data/expert-profile-glm.bin`). A fresh start each arm, six 600-token requests (temperature 0,
+   thinking off, MTP on), tok/s:
+
+   | arm | 1st | 2nd | 3rd | 4th | 5th | 6th | mean |
+   | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+   | no profile | 24.1 | 33.8 | 26.2 | 38.1 | 34.3 | 27.7 | 30.7 |
+   | project-maya's | 31.9 | 34.1 | 37.2 | 38.1 | 34.6 | 28.3 | 34.0 |
+   | learning, first start | 32.1 | 33.8 | 38.0 | 37.9 | 33.4 | 27.5 | 33.8 |
+   | no profile, another first prompt | 31.2 | 33.0 | 37.3 | 36.2 | 33.8 | 25.9 | 32.9 |
+   | learned, the same | 30.8 | 33.9 | 38.8 | 38.2 | 35.2 | 28.1 | 34.2 |
+
+   (One run an arm: +4-11% on the mean, most of it in the first answers after a start.)
 4. **Qwen3.8-Flash-Next**, the same way (Xolotl, Strata and ds4 as references).
 5. **The server stays in Python** (`serve/`, ~9,900 lines: OpenAI / Anthropic API, streaming, chat templates, tool
    calls, web app, MCP, the engine's process). A token's time is all in the engine; the server only moves text and
