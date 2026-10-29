@@ -11,7 +11,7 @@
 // --enc-skip (layer-major batches only; DEFAULT for one-shot runs, --no-enc-skip = full path): prompt tokens before the last --enc-replay (default 2560 = 128 * 20) stop
 // after layer 20's persistent-KV writes; only the last 2560 tokens run layers 21-39.  Same last-token logits / decode.
 //
-// --serve speaks Almond's engine line protocol (~/AI/Almond/serve/server.py AlmondEngine, as glm_generate):
+// --serve speaks Almond's engine line protocol (~/AI/Strata/serve/server.py AlmondEngine, as glm_generate):
 //   in:  GEN <max_new> [temperature=.. top_p=.. top_k=.. min_p=.. seed=..] <ids csv> | STOP | QUIT
 //        GENI <max_new> [k=v ..] <image file> <ids csv>   (--vision: a prompt with images, see VisionInput below)
 //   out: READY <ctx> stop, RESUME <reused>, PP <read> <total> <ms> <tok/s>, T <id>, DONE ..., ERR <text>
@@ -660,17 +660,20 @@ int main(int argc, char ** argv) {
     dc.kv_type = a.kv_type;
     if (a.kv_type >= 0) std::fprintf(stderr, "kv: compressed KV + indexer keys as %s (--kv-q8/--kv-type)\n",
                                      ggml_type_name((ggml_type) a.kv_type));
-    Ds41Dense dense;
     std::string err;
+    // the model's trunk (moe_trunk.hpp): DeepSeek-V4.1 today
+    std::unique_ptr<MoeTrunk> trunk = make_trunk(a.model, err);
+    if (!trunk) { std::fprintf(stderr, "ds41_generate: %s\n", err.c_str()); return 1; }
+    MoeTrunk & dense = *trunk;
     const double t_load = now_ms();
     if (!dense.init(a.model, dc, err)) { std::fprintf(stderr, "ds41_generate: dense init: %s\n", err.c_str()); return 1; }
-    const Ds41Geometry & G = dense.geom();
+    const TrunkInfo & G = dense.info();
     const int n_layer = (int) dense.n_layer(), n_embd = (int) G.n_embd, top_k = (int) G.n_used, nv = (int) G.vocab;
     // enc-skip's layer 20: the LAST kv source (every compressed-KV / index-key write is owned by a kv source, and the
     // layers above it only read that owner's state, so the cut belongs there).  Also the window reach R = swa *
     // (n_layer - cut_layer) is what --enc-replay defaults to.
-    int CL = 0;
-    for (int64_t s : G.kv_sources) CL = std::max<int>(CL, (int) s);
+    const int CL = std::max(0, G.enc_cut_layer);
+    if (enc_skip && G.enc_cut_layer < 0) { std::fprintf(stderr, "ds41_generate: --enc-skip: this model has no cut layer\n"); return 2; }
     // exactness needs every later layer's window reach to stay inside the replay: reach = swa * (n_layer - CL)
     const int64_t reach = (int64_t) G.n_swa * (int64_t) (n_layer - CL);
     if (enc_skip && ER < reach) {

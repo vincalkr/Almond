@@ -16,9 +16,9 @@
 
 namespace almond::v41 {
 
-inline bool ds41_pool_from_dense(const Ds41Dense & d, int64_t ctx_max, Ds41PoolLayout & lay, Ds41PoolTargets & snap,
+inline bool ds41_pool_from_dense(const MoeTrunk & d, int64_t ctx_max, Ds41PoolLayout & lay, Ds41PoolTargets & snap,
                                  Ds41PoolTargets & live) {
-    std::vector<Ds41Dense::PoolRegion> st, rs, rl;
+    std::vector<MoeTrunk::PoolRegion> st, rs, rl;
     d.pool_regions(true, st, rs);
     d.pool_regions(false, st, rl);   // the same streams again; only the regions differ
     lay = {};

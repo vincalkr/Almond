@@ -6,10 +6,10 @@
 // position (prompt or generated), else img_ident(key, row) (never 0) with key = the server's img_keys= entry for that
 // picture (the hash of its normalized bytes; serve/server.py #2228) or, without keys, an FNV-1a of its grid + rows.
 //
-// The store keeps conversations at a TURN BOUNDARY: the state Ds41Dense::snapshot() took at the end of a prompt (the
+// The store keeps conversations at a TURN BOUNDARY: the state MoeTrunk::snapshot() took at the end of a prompt (the
 // window ring and ratio-2 compressor state there + every position-indexed compressed-KV / indexer-key row before it),
 // the boundary's last-row logits, its tokens and identities.  Ds41ConvStoreHost is the synchronous host-memory store
-// (copies of Ds41Dense::state_regions, LRU under a byte budget, supersede-on-extend); the pinned / async store
+// (copies of MoeTrunk::state_regions, LRU under a byte budget, supersede-on-extend); the pinned / async store
 // (ds41_conv_pool) has the same calls.
 #pragma once
 
@@ -90,7 +90,7 @@ struct ConvRestore {
     bool live_clobbered = false;///< a failure after the device was written: the live state is garbage
 };
 
-/// The synchronous host store (std::vector copies of Ds41Dense::state_regions; ggml_backend_tensor_get / set).
+/// The synchronous host store (std::vector copies of MoeTrunk::state_regions; ggml_backend_tensor_get / set).
 class Ds41ConvStoreHost {
 public:
     Ds41ConvStoreHost(size_t budget_bytes, size_t slots) : budget_(budget_bytes), slots_(slots) {}
@@ -98,7 +98,7 @@ public:
 
     /// Save the boundary n (the snapshot tensors hold its state). 0 = not saved (too big for the budget even empty).
     /// The same tokens + identities again only refresh the LRU; a record whose tokens are a prefix of these goes.
-    int64_t save(Ds41Dense & dense, const int * tokens, const uint64_t * ident, size_t ident_n, int64_t n,
+    int64_t save(MoeTrunk & dense, const int * tokens, const uint64_t * ident, size_t ident_n, int64_t n,
                  const float * logits, size_t n_logits, std::string & err) {
         if (!enabled() || n < 1) { err = "disabled"; return 0; }
         for (size_t i = 0; i < recs_.size(); ++i) {
@@ -170,7 +170,7 @@ public:
 
     /// Write record `rec`'s boundary state into the device (the snapshot tensors + the position caches).  `from`:
     /// positions [0, from) already hold the same rows (skipped).  The caller then does rearm(pos) + restore().
-    bool restore(Ds41Dense & dense, const ConvMatch & m, int64_t from, ConvRestore & out, std::string & err) {
+    bool restore(MoeTrunk & dense, const ConvMatch & m, int64_t from, ConvRestore & out, std::string & err) {
         out = ConvRestore();
         const int64_t rec = m.rec;
         auto it = std::find_if(recs_.begin(), recs_.end(), [&](const Rec & r) { return r.id == rec; });
@@ -214,7 +214,7 @@ private:
         size_t bytes = 0;
         bool pinned = false;
     };
-    static void dense_sync(Ds41Dense & d) { ggml_backend_synchronize(d.backend()); }
+    static void dense_sync(MoeTrunk & d) { ggml_backend_synchronize(d.backend()); }
     std::deque<Rec> recs_;   // least recently used first
     size_t budget_ = 0, slots_ = 0, bytes_ = 0, evictions_ = 0, superseded_ = 0, restores_ = 0;
     int64_t next_id_ = 0;
@@ -225,7 +225,7 @@ private:
 /// async copies on its own stream) behind the same calls.  cuda = false on the CPU backend (the tensors are host memory).
 class Ds41ConvStorePinned {
 public:
-    bool init(const Ds41Dense & d, int64_t ctx, size_t budget, bool cuda, std::string & err) {
+    bool init(const MoeTrunk & d, int64_t ctx, size_t budget, bool cuda, std::string & err) {
         Ds41PoolLayout lay;
         if (!ds41_pool_from_dense(d, ctx, lay, snap_, live_)) { err = "pool layout from the dense half failed"; return false; }
         Ds41PoolConfig c;
@@ -233,7 +233,7 @@ public:
         c.cuda = cuda;
         return pool_.init(lay, c, err);
     }
-    int64_t save(Ds41Dense & dense, const int * tokens, const uint64_t * ident, size_t ident_n, int64_t n,
+    int64_t save(MoeTrunk & dense, const int * tokens, const uint64_t * ident, size_t ident_n, int64_t n,
                  const float * logits, size_t n_logits, std::string & err) {
         const uint64_t * ids = pad(ident, ident_n, n);
         ggml_backend_synchronize(dense.backend());   // the device data is final (the save reads it on the pool's stream)
@@ -269,7 +269,7 @@ public:
         }
         return m;
     }
-    bool restore(Ds41Dense &, const ConvMatch & m, int64_t from, ConvRestore & out, std::string & err) {
+    bool restore(MoeTrunk &, const ConvMatch & m, int64_t from, ConvRestore & out, std::string & err) {
         out = ConvRestore();
         const bool at_pos = m.pos > 0 && m.resume() == m.pos;
         const int b = at_pos ? m.boundary : m.next_boundary_idx;
@@ -306,7 +306,7 @@ private:
 /// The serve loop's store: the pinned pool when built with it (ALMOND_CONV_POOL=host: the synchronous host store).
 class Ds41ConvStore {
 public:
-    bool init(const Ds41Dense & d, int64_t ctx, size_t budget, size_t slots, bool cuda, std::string & err) {
+    bool init(const MoeTrunk & d, int64_t ctx, size_t budget, size_t slots, bool cuda, std::string & err) {
         if (budget == 0) return true;
         const char * e = std::getenv("ALMOND_CONV_POOL");
 #if defined(DS41_POOL_CUDA)
@@ -328,11 +328,11 @@ public:
 #else
 #define DS41_STORE_CALL(x) (host_->x)
 #endif
-    int64_t save(Ds41Dense & d, const int * t, const uint64_t * id, size_t idn, int64_t n, const float * lg, size_t nl, std::string & err) {
+    int64_t save(MoeTrunk & d, const int * t, const uint64_t * id, size_t idn, int64_t n, const float * lg, size_t nl, std::string & err) {
         return DS41_STORE_CALL(save(d, t, id, idn, n, lg, nl, err));
     }
     ConvMatch best_prefix(const int * t, const uint64_t * id, size_t idn, int64_t n) { return DS41_STORE_CALL(best_prefix(t, id, idn, n)); }
-    bool restore(Ds41Dense & d, const ConvMatch & m, int64_t from, ConvRestore & out, std::string & err) {
+    bool restore(MoeTrunk & d, const ConvMatch & m, int64_t from, ConvRestore & out, std::string & err) {
         return DS41_STORE_CALL(restore(d, m, from, out, err));
     }
     bool fence(std::string * err = nullptr) { return DS41_STORE_CALL(fence(err)); }

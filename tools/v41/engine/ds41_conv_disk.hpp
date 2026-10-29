@@ -1,7 +1,7 @@
 // tools/v41/engine/ds41_conv_disk.hpp - ds41_generate --serve: conversations kept on disk (--conversation-disk DIR), so a
 // restarted engine resumes them instead of reading their whole prompt again.
 //
-// A record is one conversation at a turn boundary n: the state Ds41Dense::snapshot() took at the end of its prompt -
+// A record is one conversation at a turn boundary n: the state MoeTrunk::snapshot() took at the end of its prompt -
 // every position-indexed stream's rows [0, n / ratio) (the compressed KV and indexer keys, the rows the conversation
 // pool copies) and the snapshot rings (window K/V, ratio-2 compressor states) - plus its tokens, image keys and the
 // boundary's last-row logits.  One directory a record:
@@ -44,7 +44,7 @@ public:
     ~Ds41ConvDisk() { stop(); }
 
     /// Open (create) dir and index the records there whose layout matches this engine.  budget: bytes on disk.
-    bool init(const std::string & dir, size_t budget, const Ds41Dense & dense, const std::string & model_id,
+    bool init(const std::string & dir, size_t budget, const MoeTrunk & dense, const std::string & model_id,
               std::string & err) {
         namespace fs = std::filesystem;
         std::error_code aec;
@@ -89,7 +89,7 @@ public:
     }
 
     /// Save the conversation whose state the snapshot tensors hold at boundary n (the engine is between requests).
-    bool save(Ds41Dense & dense, const int * tokens, const uint64_t * ident, size_t ident_n, int64_t n,
+    bool save(MoeTrunk & dense, const int * tokens, const uint64_t * ident, size_t ident_n, int64_t n,
               const float * logits, size_t n_logits, std::string & err) {
         if (!on_ || n < 1) return false;
         std::lock_guard<std::mutex> lk(m_);
@@ -167,7 +167,7 @@ public:
 
     /// Write record i's state into the device (the stream rows and the snapshot tensors): the caller then does
     /// rearm(n) + restore().  logits: the boundary's last-row logits (empty if none were saved).
-    bool restore(Ds41Dense & dense, int i, std::vector<float> & logits, std::string & err) {
+    bool restore(MoeTrunk & dense, int i, std::vector<float> & logits, std::string & err) {
         flush();
         Entry e;
         {
@@ -401,7 +401,7 @@ private:
     bool on_ = false;
     std::string dir_, fp_;
     size_t budget_ = 0, region_bytes_ = 0, evictions_ = 0;
-    std::vector<Ds41Dense::StreamTensor> streams_;
+    std::vector<MoeTrunk::StreamTensor> streams_;
     std::vector<ggml_tensor *> regions_;
     mutable std::mutex m_;               // entries_
     std::vector<Entry> entries_;

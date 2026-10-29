@@ -13,7 +13,7 @@ export DS41_META="${DS41_META-local/rco-iq2xxs-meta/meta.gguf}"
 RANK="${RANK:-local/rank.bin}"
 ENGRAM="${ENGRAM:-models/engram-1017/layers14:models/engram-1017/layers1}"
 ARENA="${ARENA:-90}"
-PY=/run/media/vincenzo/Dati/projects/other/Almond/.venv/bin/python
+PY="$PWD/.venv/bin/python"
 mkdir -p "$OUT" ~/.quetza-data/conductor
 pn=$(basename "$PROMPT" .i32)
 ref="$OUT/ref-$pn.ids"

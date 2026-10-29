@@ -112,6 +112,7 @@ bool is_routed(const std::string & n) {
 // ================================================================== Impl
 
 struct Ds41Dense::Impl {
+    TrunkInfo info;   ///< MoeTrunk::info(), filled on first use after init
     std::function<bool()> oom_hook;       // set_oom_hook: frees device memory when a graph buffer does not fit
     Ds41DenseConfig cfg;
     Ds41Geometry g;
@@ -1044,6 +1045,37 @@ Ds41Dense::~Ds41Dense() = default;
 const Ds41Geometry & Ds41Dense::geom() const { return p_->g; }
 ggml_tensor * Ds41Dense::weight(const std::string & name) const { return p_->w.get(name); }
 int64_t Ds41Dense::n_layer() const { return p_->nl; }
+
+const TrunkInfo & Ds41Dense::info() const {
+    TrunkInfo & i = p_->info;
+    if (i.arch.empty()) {
+        const Ds41Geometry & g = p_->g;
+        i.arch = "deepseek41";
+        i.n_embd = g.n_embd;
+        i.n_layer = p_->nl;
+        i.n_used = g.n_used;
+        i.vocab = g.vocab;
+        i.eos = g.eos;
+        i.n_swa = g.n_swa;
+        // the last kv source: every compressed-KV / index-key write is owned by a kv source, the layers above it only
+        // read their own window (ds41_generate's --enc-skip cuts there)
+        int cl = 0;
+        for (int64_t s : g.kv_sources) cl = std::max<int>(cl, (int) s);
+        i.enc_cut_layer = cl;
+    }
+    return i;
+}
+
+std::unique_ptr<MoeTrunk> make_trunk(const std::string & gguf, std::string & err) {
+    // One architecture today.  The GSQ-RCO pack carries llama.cpp's metadata and is read through the DS41_META overlay,
+    // so the architecture is not detected from the file yet: ALMOND_ARCH names it when there is more than one.
+    (void) gguf;
+    const char * a = std::getenv("ALMOND_ARCH");
+    const std::string arch = a && *a ? a : "deepseek41";
+    if (arch == "deepseek41") return std::make_unique<Ds41Dense>();
+    err = "architecture '" + arch + "' is not one Almond runs (deepseek41)";
+    return nullptr;
+}
 ggml_backend_t Ds41Dense::backend() const { return p_->backend; }
 const std::string & Ds41Dense::last_error() const { return p_->err; }
 

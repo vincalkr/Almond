@@ -43,6 +43,16 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    compressed attention, HC mixes, Engram, router). A `Model` with `load`, `prefill`, `decode_step`, `route(layer)`,
    `expert_layout`; DeepSeek becomes the first implementation. Gate: the same tok/s as ds41e (3 alternated runs,
    Promessi Sposi and 17K) and the same forced-token argmax.
+   **Done (2026-10-29):** `tools/v41/engine/moe_trunk.hpp` (`MoeTrunk`, `TrunkConfig`, `TrunkInfo`, `make_trunk`);
+   `Ds41Dense` implements it; the driver and the conversation stores use only the interface.  Measured with
+   `local/bench-v41/ab-ds41e.sh` (ab-hip-spin.sh's chat flags, power-tune on, forced on the reference streams):
+
+   | arm | 17K, 128 tokens (tok/s) | Promessi Sposi, 300 tokens (tok/s) | argmax diffs (17K / Sposi) |
+   | --- | --- | --- | --- |
+   | ds41e | 19.18 / 19.15 / 19.09 | 23.44 / 23.52 / 23.50 | 1 / 2 |
+   | Almond | 19.02 / 19.00 / 19.12 | 23.14 / 23.03 / 23.49 | 1 / 0-2 |
+
+   Within the run-to-run noise (Almond -0.5% / -1.1% on the means, its third round equal); the same diffs.
 3. **GLM-5.3-Flash.** Port project-maya's GLM layers onto the interface, experts through Almond's tiers. Read GGUF
    (GSQ-RCO 3.0bit, 117.5 GB; Maya-M for comparison). Gate: KL / top-1 against project-maya on the same pack, then speed
    against project-maya on this box.

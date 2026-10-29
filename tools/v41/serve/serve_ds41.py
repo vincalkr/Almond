@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Almond's API server (~/AI/Almond/serve/server.py: OpenAI + Anthropic endpoints, streaming, sessions, llama.cpp-style
+"""Almond's API server (~/AI/Strata/serve/server.py: OpenAI + Anthropic endpoints, streaming, sessions, llama.cpp-style
 metrics) in front of the DeepSeek-V4.1-Flash engine (`ds41_generate --serve`).  The server is generic; this shim
 swaps in V4.1's pieces:
 
@@ -24,9 +24,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 V41 = HERE.parent
-# Almond's server this shim sits in front of.  Default: the installed layout (~/AI/Almond).  ALMOND_HOME points it at
+# Almond's server this shim sits in front of.  Default: the installed layout (~/AI/Strata).  ALMOND_HOME points it at
 # another tree, and this checkout is one (a Almond fork ships its own serve/), so a self-contained install needs no
-# ~/AI/Almond at all.
+# ~/AI/Strata at all.
 # ALMOND_HOME names the checkout that provides serve/, tools/ and almond_tokenizer.  This repository is one, so
 # that is the default; the upstream flow pointed it at an ambient ~/AI/Strata install instead.
 ALMOND = Path(os.environ.get("ALMOND_HOME") or Path(__file__).resolve().parents[3])
