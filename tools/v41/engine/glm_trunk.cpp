@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <vector>
@@ -594,8 +595,10 @@ bool GlmTrunk::attn_router(int il, int * ids, float * wts, const float ** fn_hos
     ggml_tensor * x = im.cols3(c, im.x_state);
     // attention half
     Impl::HcPre ah = im.hc_pre(c, x, im.BL(il, "hc_attn_fn.weight"), im.BL(il, "hc_attn_scale.weight"), im.BL(il, "hc_attn_base.weight"));
-    ggml_tensor * cur = im.rms(c, ah.cur, im.BL(il, "attn_norm.weight"));
-    cur = im.recr[(size_t) il] ? im.kda(g, cur, il) : im.dsa(g, cur, il);
+    ggml_tensor * an = im.rms(c, ah.cur, im.BL(il, "attn_norm.weight"));
+    ggml_tensor * cur = im.recr[(size_t) il] ? im.kda(g, an, il) : im.dsa(g, an, il);
+    static const bool dbg = std::getenv("ALMOND_GLM_DEBUG") != nullptr;
+    if (dbg) { ggml_set_output(an); ggml_set_output(cur); ggml_build_forward_expand(g.gf, an); ggml_build_forward_expand(g.gf, cur); }
     ggml_tensor * x1 = im.hc_post(c, cur, x, ah.post, ah.comb);
     ggml_build_forward_expand(g.gf, ggml_cpy(c, x1, im.cols3(c, im.hres)));
     // FFN half up to the routed experts' input
@@ -618,16 +621,29 @@ bool GlmTrunk::attn_router(int il, int * ids, float * wts, const float ** fn_hos
         // build_moe_ffn's router: sigmoid, the selection bias for picking only, weights from the unbiased probs
         ggml_tensor * probs = ggml_sigmoid(c, ggml_mul_mat(c, im.BL(il, "ffn_gate_inp.weight"), fn));      // [NE, n]
         ggml_tensor * sp = ggml_add(c, probs, im.BL(il, "exp_probs_b.bias"));
+        // argsort_top_k is a view (the first NU of each sorted row): contiguous before it is read back
         sel = ggml_argsort_top_k(c, sp, (int) im.NU);                                                        // [NU, n]
         w = ggml_reshape_2d(c, ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, im.NE, n), sel), im.NU, n);
         if (im.w_norm) w = ggml_div(c, w, ggml_sum_rows(c, w));
         w = ggml_scale(c, w, im.w_scale);
+        sel = ggml_cont(c, sel);
         ggml_set_output(sel);
         ggml_set_output(w);
         ggml_build_forward_expand(g.gf, sel);
         ggml_build_forward_expand(g.gf, w);
     }
     if (!im.run(g)) return false;
+    if (dbg) {
+        auto sum = [](ggml_tensor * t) {
+            std::vector<float> v((size_t) ggml_nelements(t));
+            ggml_backend_tensor_get(t, v.data(), 0, v.size() * 4);
+            double s = 0;
+            for (float f : v) s += f;
+            return s;
+        };
+        std::fprintf(stderr, "glmdbg L%d attn_norm %.6f mixer_out %.6f hc_attn_post %.6f ffn_norm %.6f\n", il, sum(an), sum(cur),
+                     sum(x1), sum(fn));
+    }
     im.host_fn.resize((size_t) (im.D * n));
     ggml_backend_tensor_get(fn, im.host_fn.data(), 0, im.host_fn.size() * 4);
     if (dense) {
@@ -637,6 +653,11 @@ bool GlmTrunk::attn_router(int il, int * ids, float * wts, const float ** fn_hos
         ggml_backend_tensor_get(w, wts, 0, (size_t) (im.NU * n) * 4);
     }
     *fn_host = im.host_fn.data();
+    if (dbg && !dense) {
+        double si = 0, sw = 0;
+        for (int64_t i = 0; i < im.NU * n; ++i) { si += ids[i]; sw += wts[i]; }
+        std::fprintf(stderr, "glmdbg L%d topk %.0f weights %.6f\n", il, si, sw);
+    }
     return true;
 }
 
@@ -650,11 +671,25 @@ bool GlmTrunk::finish(int il, const float * routed_sum) {
     if (il >= im.NDENSE) {
         if (!routed_sum) { im.err = "glm: the routed sum must come from the host"; return false; }
         std::vector<float> r(routed_sum, routed_sum + (size_t) (im.D * n));
+        static const bool dbg0 = std::getenv("ALMOND_GLM_DEBUG") != nullptr;
+        if (dbg0) { double s = 0; for (float f : r) s += f; std::fprintf(stderr, "glmdbg L%d moe_out %.6f\n", il, s); }
         out = ggml_add(c, out, im.input(g, GGML_TYPE_F32, { im.D, n }, r));
     }
     ggml_tensor * x = im.hc_post(c, out, im.cols3(c, im.hres), im.cols2(c, im.post_f), im.cols2(c, im.comb_f));
     ggml_build_forward_expand(g.gf, ggml_cpy(c, x, im.cols3(c, im.x_state)));
-    return im.run(g);
+    static const bool dbg = std::getenv("ALMOND_GLM_DEBUG") != nullptr;
+    if (dbg) { ggml_set_output(x); ggml_set_output(out); }
+    if (!im.run(g)) return false;
+    if (dbg) {
+        std::vector<float> v((size_t) ggml_nelements(x)), o((size_t) ggml_nelements(out));
+        ggml_backend_tensor_get(x, v.data(), 0, v.size() * 4);
+        ggml_backend_tensor_get(out, o.data(), 0, o.size() * 4);
+        double s = 0, so = 0;
+        for (float f : v) s += f;
+        for (float f : o) so += f;
+        std::fprintf(stderr, "glmdbg L%d ffn_out %.6f l_out %.6f\n", il, so, s);
+    }
+    return true;
 }
 
 bool GlmTrunk::logits(int row0, int nrows, float * out) {

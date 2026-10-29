@@ -56,6 +56,21 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
 3. **GLM-5.3-Flash.** Port project-maya's GLM layers onto the interface, experts through Almond's tiers. Read GGUF
    (GSQ-RCO 3.0bit, 117.5 GB; Maya-M for comparison). Gate: KL / top-1 against project-maya on the same pack, then speed
    against project-maya on this box.
+   **First version done (2026-10-29), exact, not yet fast:** `tools/v41/engine/glm_trunk.cpp` (llama.cpp's glm5-next
+   graph as a MoeTrunk), the experts through Ds41MoeTier (`Ds41FileBlobs` reads llama.cpp's stacked expert tensors;
+   Q4_K down added to the grouped GPU kernel). Checked on GSQ-RCO 3.0bit (`pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF`,
+   117.5 GB, `models/glm53-gsq-rco`) against llama.cpp (c3df4b7, HIP, `llama-perplexity -c 512 --chunks 1`) on the
+   first 512 tokens of `docs/ds4/V41_EXACT_FAST.md`, the second half scored as llama-perplexity scores it:
+
+   | engine | PPL | top-1 |
+   | --- | ---: | ---: |
+   | llama.cpp | 7.1997 (+/- 1.13) | |
+   | Almond | 7.2401 | 0.574 |
+
+   Per-layer sums (`ALMOND_GLM_DEBUG=1` against `llama-eval-callback`, 20 tokens) agree within ~1% through layer 7.
+   Prompt 12.1 tok/s (chunked, --prefill-chunk 64, arena 20 GiB, graphs rebuilt per call, no VRAM cache during the
+   prompt). Missing: the layer-major batch, the next-layer prediction, cached graphs, conversation reuse, the serve
+   path's chat template, project-maya's packs (`glm5next`: their GGUF names one key prefix differently, read already).
 4. **Qwen3.8-Flash-Next**, the same way (Xolotl, Strata and ds4 as references).
 5. **The server stays in Python** (`serve/`, ~9,900 lines: OpenAI / Anthropic API, streaming, chat templates, tool
    calls, web app, MCP, the engine's process). A token's time is all in the engine; the server only moves text and
