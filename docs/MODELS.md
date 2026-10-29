@@ -24,8 +24,8 @@ it is.  An Anthropic `budget_tokens` under 8K asks for high, else max.
 
 Beyond the API (in the configuration, not DeepSeek's):
 
-- `reasoning_budget_by_effort` {low 1024, high 4096, max none}: at the cap the server closes the thinking and the model
-  answers.  The API has no such cap.  Never measured.
+- No thinking cap, as the API (the configurations' `reasoning_budget_by_effort` {low 1024, high 4096}, never measured,
+  went in this review); a request's own `reasoning_budget_tokens` still caps it.
 - `reasoning_close_retry`: a reply that ends inside its thinking is continued once with the thinking closed.
 - `reasoning_loop_recovery: "recover"` does nothing for DeepSeek (it swaps a Qwen template sentence the prompt does
   not have).
