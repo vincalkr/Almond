@@ -1,0 +1,7 @@
+{
+  "models": [
+    {"model": "glm"},
+    {"model": "ds41"}
+  ],
+  "default": "glm"
+}

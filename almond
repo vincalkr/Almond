@@ -1,0 +1,6 @@
+#!/bin/sh
+# almond - the terminal chat (tools/cli/almond_cli.py); ./almond --help
+R=$(cd "$(dirname "$0")" && pwd) || exit 1
+PY=${ALMOND_PY:-$R/.venv/bin/python}
+[ -x "$PY" ] || PY=python3
+exec "$PY" "$R/tools/cli/almond_cli.py" "$@"

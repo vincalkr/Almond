@@ -336,13 +336,23 @@ class ConversationCacheCard(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
-    def test_the_card_is_on_the_page(self):
-        web = Path(__file__).parent / "web"
-        html, js = (web / "index.html").read_text(encoding="utf-8"), (web / "app.js").read_text(encoding="utf-8")
-        for el in ("cc-card", "cc-slots-text", "cc-mem-text", "cc-facts", "cc-note", "cc-disk", "cc-disk-text",
-                   "cc-disk-bar", "cc-disk-facts", "cc-clear-btn"):
-            self.assertIn(f'id="{el}"', html)
-            self.assertIn(f'"{el}"', js)
+    def test_the_cli_shows_it(self):
+        # no web page: ./almond's /stats and --monitor draw /metrics, the conversation cache among it
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("almond_cli", Path(__file__).parents[1] / "tools/cli/almond_cli.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        m = {"live": {"state": "idle"}, "engine": {"model": "m", "max_context": 4096, "expert_slots": 12},
+             "hardware": {"gpus": [{"index": 0, "util": 50, "mem_used": 2e9, "temp": 40}], "cpu": 10, "ram_used": 1e9,
+                          "ram_total": 2e9},
+             "conversation_cache": {"requests": 3, "requests_reused": 2, "reused_tokens": 900, "enabled": True,
+                                    "parked": 1, "slots": 4},
+             "requests": [{"time": 0, "finish": "stop", "prompt_tokens": 10, "reused": 5, "output_tokens": 7,
+                           "decode_tok_s": 20.0, "hit_rate": 0.5, "duration_s": 1.0}],
+             "totals": {"requests": 3, "prompt_tokens": 30, "reused": 5, "output_tokens": 21, "decode_ms": 1000}}
+        text = cli.monitor_text(m)
+        for want in ("2 of 3 requests reused", "1 / 4 parked", "GPU 0", "12 in VRAM", "50%", "20.0"):
+            self.assertIn(want, text)
 
 
 if __name__ == "__main__":

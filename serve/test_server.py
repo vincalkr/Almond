@@ -2576,16 +2576,19 @@ class WebApp(unittest.TestCase):
             return e.code, e.headers.get("Content-Type", ""), e.read()
 
     def test_page_and_files(self):
+        # no web chat (./almond is the chat): "/" says what the address serves; the API monitor's files stay
         code, ctype, body = self.get("/")
         self.assertEqual(code, 200)
-        self.assertIn("text/html", ctype)
-        self.assertIn(b"\"web/app.js\"", body)   # relative since #82 (works behind a path-prefixed proxy)
-        for path, want in (("/web/app.js", "javascript"), ("/web/app.css", "text/css"), ("/web/tokens.css", "text/css"),
-                           ("/web/components.css", "text/css"), ("/web/sprite.svg", "image/svg+xml")):
+        self.assertIn("application/json", ctype)
+        self.assertEqual(json.loads(body)["api"], "/v1")
+        for path, want in (("/web/monitor.js", "javascript"), ("/web/tokens.css", "text/css")):
             with self.subTest(path=path):
                 code, ctype, _ = self.get(path)
                 self.assertEqual(code, 200)
                 self.assertIn(want, ctype)
+        for path in ("/web/app.js", "/web/app.css", "/web/components.css", "/web/sprite.svg"):
+            with self.subTest(path=path):
+                self.assertEqual(self.get(path)[0], 404)
 
     def test_only_the_app_files_are_served(self):
         for path in ("/web/..%2Fserver.py", "/web/index.html", "/web/test.py", "/fonts/..%2F..%2Fsetup.py",

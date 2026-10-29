@@ -62,10 +62,42 @@ local/fetch-rco-1017.sh                                               # everythi
 - `./run.sh` uses cards 0 and 1; `./run.sh --gpu 0` (or `--gpu 1`) one card, `--gpu 0,1` both. The number of cards
   picks the configuration: `local/ds41-local.json` (two cards) or `local/ds41-local-1gpu.json` (one);
   `--config FILE` uses that file. Other arguments go to the server (`./run.sh --port 8151`). `./stop.sh` stops a
-  server started in the background (as Ctrl+C would; `--force` kills it if it does not end in 60 s). Loading takes about a minute; the web chat and monitor
-  are at `http://127.0.0.1:8150/`, the API at `/v1`. Never expose the server beyond `127.0.0.1` without `--api-key`.
+  server started in the background (as Ctrl+C would; `--force` kills it if it does not end in 60 s). Loading takes about a minute; the API is at
+  `http://127.0.0.1:8150/v1` (OpenAI and Anthropic), the chat is `./almond` (below). Never expose the server beyond
+  `127.0.0.1` without `--api-key`.
 
-Reasoning effort follows DeepSeek's encoder: `low` (50), `high` (75, default), `max` (100), a number 1-100, or `none`;
+## Models, the router and the chat
+
+Almond serves DeepSeek-V4.1-Flash (`./run.sh`, the default) and GLM-5.3-Flash (`./run.sh --model glm`, on
+project-maya's engine in `engines/maya`; `local/glm-pack.sh` and `local/glm-mtp-extract.py` prepare its files, see
+docs/ALMOND_PLAN.md). `./run.sh --router` puts every model of `local/router.json` behind one address, as llama-server's
+router mode does: `GET /v1/models` lists them with their status (loaded / loading / unloaded), context and thinking
+levels (`reasoning_levels`, `reasoning_default`); `POST /models/load` / `/models/unload {"model": NAME}`; a request that
+names another model loads it, stopping the one running once its requests are done (the cards hold one at a time:
+GLM loaded in 32 s, DeepSeek in 38 s from the file cache). The others go to the loaded model; `--no-autoload` refuses
+instead.
+
+`./almond` is the chat in the terminal, in the manner of antirez's ds4 CLI (it starts the router when nothing answers):
+
+```sh
+./almond                                   # a conversation; /help lists the commands
+./almond -m glm --think-level low -p "..." # one prompt, the answer on stdout (the thinking on stderr)
+./almond --monitor                         # what the old web monitor showed, refreshed every second
+```
+
+- thinking: each model's own levels, from the client's words. GLM-5.3: none / low / high / max (its default; `medium`
+  is high, `xhigh` max, an Anthropic budget under 2K low, under 8K high, else max). DeepSeek-V4.1: none / low (50) /
+  high (75, default) / max (100) or a number. `--nothink`, `--think`, `--think-max`, `--think-level L`; `/think L`,
+  `/nothink` in the chat. `/health` and `/v1/models` say which levels a model has.
+- sampling: `--temp`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--presence-penalty`, `--seed`,
+  `--max-tokens`; `/set KEY VALUE` in the chat, `/set` alone shows them next to the model's defaults (`/props`).
+- `/stats` (or `--monitor`): `GET /metrics` as text - state, speed, context, experts in VRAM, each GPU's load, VRAM,
+  temperature and power, PCIe, CPU, RAM, disk, the conversation cache, the last requests and the totals.
+  `/forget` clears the conversation cache.
+- `/models`, `/model NAME` (switches through the router), `/clear`, `/read FILE`, `/system TEXT`, `/ctx`, `/hide`,
+  `/show`; a line ending in `\` goes on, `"""` opens a block; Ctrl+C stops an answer.
+
+For DeepSeek, reasoning effort follows its encoder: `low` (50), `high` (75, default), `max` (100), a number 1-100, or `none`;
 as `reasoning_effort`, `reasoning.effort` (OpenAI) or `output_config.effort` / `thinking` (Anthropic).
 The level goes into the model's prompt (`Reasoning Effort: N`); the server also caps the thinking by level
 (`reasoning_budget_by_effort` in the configuration: low 1024 tokens, high 4096, max none - at the cap it closes the

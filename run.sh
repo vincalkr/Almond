@@ -3,6 +3,9 @@
 #   ./run.sh                 two cards (0 and 1, card 1 as the expert tier), images on when the encoder is there
 #   ./run.sh --gpu 1         one card (0 or 1)
 #   ./run.sh --gpu 0,1       two cards, as the default
+#   ./run.sh --router        every model in local/router.json behind one address (tools/router/almond_router.py): the
+#                            request's "model" loads it (stopping the other); /v1/models lists them with their
+#                            thinking levels.  The chat: ./almond (starts the router itself when nothing answers)
 #   ./run.sh --model glm     GLM-5.3-Flash (GSQ-RCO 3.0bit) on project-maya's engine (engines/maya, build-maya-hip/maya),
 #                            the layers split over both cards: local/glm-local.json, tools/glm/serve/serve_glm.py
 # --gpu picks the configuration: local/ds41-local-vision.json for two cards, local/ds41-local-1gpu-vision.json for
@@ -36,7 +39,7 @@ fi
 echo "run.sh: ALMOND_HOME=$ALMOND_HOME, python $PY"
 
 # --gpu and --config are taken out of the arguments; the rest go to the server as they are.
-GPU=""; CFG=""; MODEL=ds41
+GPU=""; CFG=""; MODEL=ds41; ROUTER=""
 n=$#
 while [ "$n" -gt 0 ]; do
     a=$1; shift; n=$((n - 1))
@@ -46,6 +49,7 @@ while [ "$n" -gt 0 ]; do
             case $a in --gpu) GPU=$1 ;; --config) CFG=$1 ;; *) MODEL=$1 ;; esac
             shift; n=$((n - 1)); continue ;;
         --model=*) MODEL=${a#--model=}; continue ;;
+        --router) ROUTER=1; continue ;;
         --gpu=*) GPU=${a#--gpu=}; continue ;;
         --config=*) CFG=${a#--config=}; continue ;;
     esac
@@ -54,6 +58,12 @@ done
 case ${GPU:-0,1} in
     *[!0-9,]*|,*|*,|*,,*) echo "run.sh: --gpu takes card numbers: 0, 1 or 0,1 (got '$GPU')" >&2; exit 1 ;;
 esac
+# --describe (the router's listing: the model's name and thinking levels, nothing loaded) needs no power-tune
+for x in "$@"; do [ "$x" = --describe ] && DS41_POWER_TUNE=0; done
+if [ -n "$ROUTER" ]; then
+    # the router starts each model through this script (power-tune with it), so it needs nothing else here
+    exec "$PY" "$R/tools/router/almond_router.py" "$@"
+fi
 SHIM="$R/tools/v41/serve/serve_ds41.py"
 case $MODEL in
     ds41|deepseek) ;;

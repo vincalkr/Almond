@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Almond's API server (serve/server.py) in front of GLM-5.3-Flash on project-maya's engine (`build-maya-hip/maya
 --serve`, vendored in engines/maya).  The server is generic and the pack's tokenizer directory carries the model's own
-Jinja chat template; this shim swaps in GLM's one difference:
+Jinja chat template; this shim swaps in GLM's differences:
+
+- reasoning effort: GLM's own four levels - Off, Low, High, Max (its default) - from any client spelling
+  (OpenAI's none / minimal / low / medium / high / xhigh, Anthropic's thinking budget); the web app shows those four
 
 - tool calls: GLM writes `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...</tool_call>`; the server's
   parser reads `<tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>`.  The stream is
@@ -64,6 +67,63 @@ def glm_rewrite(buf: str, final: bool) -> tuple[str, str]:
     out.append(buf)
     return "".join(out), ""
 
+
+# ---- reasoning effort: GLM-5.x's own levels (project-maya's rule).  Its template knows reasoning_effort "low" and
+# "high"; anything else, an absent one included, is "Max", the most thorough; and it always opens <think>.  Thinking
+# off is Low with the think block closed at once.  Every client spelling maps onto the four: OpenAI's "medium" (GLM
+# has none) is High, "xhigh" is Max; "auto" / "default" is the template's own default (Max).
+GLM_EFFORT = {"none": None, "off": None, "minimal": None, "disabled": None, "false": None,
+              "low": "low", "medium": "high", "high": "high", "xhigh": "max", "max": "max", "maximum": "max",
+              "auto": "max", "default": "max"}
+
+
+def effort_kwargs(value) -> dict:
+    """A reasoning effort as a client gives it -> the template's kwargs; an unknown one is a 400."""
+    if value is None or value == "":
+        return {}
+    if value is False:
+        return {"enable_thinking": False}
+    key = str(value).strip().lower()
+    if key not in GLM_EFFORT:
+        raise ValueError(f"unknown reasoning effort {value!r}: use none, low, high or max (medium = high, xhigh = max)")
+    level = GLM_EFFORT[key]
+    return {"enable_thinking": False} if level is None else {"reasoning_effort": level}
+
+
+def budget_effort(tokens) -> dict:
+    """Anthropic's thinking budget (budget_tokens) -> a level: under 2K Low, under 8K High, else Max."""
+    try:
+        n = int(tokens)
+    except (TypeError, ValueError):
+        return {}
+    return {"reasoning_effort": "low" if n < 2048 else "high" if n < 8192 else "max"}
+
+
+for mod in (F, S):
+    if hasattr(mod, "effort_kwargs"):
+        mod.effort_kwargs = effort_kwargs
+    if hasattr(mod, "budget_effort"):
+        mod.budget_effort = budget_effort
+S.REASONING_LEVELS = [["none", "Off", "answers right away"], ["low", "Low", "short"],
+                      ["high", "High", "thorough"], ["max", "Max", "the most thorough (the model's default)"]]
+S.REASONING_DEFAULT = "high"
+
+_render = F.ChatTemplate.render
+
+
+def _render_glm(self, messages, tools=None, add_generation_prompt=True, **kwargs):
+    """The template told the level in its own words; thinking off = Low with <think></think> (the way the template
+    writes a turn without reasoning)."""
+    off = kwargs.pop("enable_thinking", True) is False
+    level = kwargs.pop("reasoning_effort", None)
+    kwargs["reasoning_effort"] = "low" if off else level if level in ("low", "high") else "max"
+    out = _render(self, messages, tools, add_generation_prompt, **kwargs)
+    if off and add_generation_prompt and out.endswith("<think>"):
+        out += "</think>"
+    return out
+
+
+F.ChatTemplate.render = _render_glm
 
 _op_init, _op_feed, _op_finish = F.OutputParser.__init__, F.OutputParser.feed, F.OutputParser.finish
 

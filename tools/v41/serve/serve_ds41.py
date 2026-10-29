@@ -100,6 +100,10 @@ for mod in (F, S):
         mod.effort_kwargs = effort_kwargs
     if hasattr(mod, "budget_effort"):
         mod.budget_effort = budget_effort
+# the web app's buttons: V4.1's three levels and thinking off (the encoder's default is High)
+S.REASONING_LEVELS = [["none", "Off", "answers right away"], ["low", "Low", "short (50)"],
+                      ["high", "High", "thorough (75, the default)"], ["max", "Max", "the most thorough (100)"]]
+S.REASONING_DEFAULT = "high"
 
 
 def _level(effort):

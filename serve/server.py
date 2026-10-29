@@ -138,6 +138,12 @@ EFFORT_TEXT = {"low": "Reasoning effort is set to low. Keep your thinking brief 
                         "assumptions, consider plausible alternatives, and prioritize correctness, consistency, and "
                         "clarity in the final answer."}
 VISION_START = "<|vision_start|>"
+# The thinking levels the model's template knows, as clients offer them (/health "reasoning_levels", ./almond's /think): [value the
+# API takes, button label, what it does].  These are the Qwen template's; a model's shim (serve_ds41.py, serve_glm.py)
+# sets its own, together with the effort_kwargs that maps every client spelling onto them.
+REASONING_LEVELS = [["none", "Off", "answers right away"], ["low", "Low", "short"], ["medium", "Medium", "medium"],
+                    ["high", "High", "thorough (default)"]]
+REASONING_DEFAULT = "high"          # a client's level until the user picks one
 # #606: a reply that repeats one token this many times in a row is ended there ("length"): a model in a loop, or a
 # broken state that answers one token forever (an issue saw 36,689 tokens of "!"). The config's "repeat_stop_tokens"
 # sets it; 0 turns it off.
@@ -4665,7 +4671,7 @@ def make_handler(svc: Service):
                 self.wfile.write(body)
                 return
             if path.startswith("/web/"):
-                # the web app's own files (serve/web): styles, script, icon sprite - same origin, no CDN
+                # the API monitor's own files (serve/web): its style and script - same origin, no CDN
                 name = path[len("/web/"):]
                 types = {".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                          ".svg": "image/svg+xml"}
@@ -4719,8 +4725,14 @@ def make_handler(svc: Service):
                 if self._authorized():
                     self._json(200, svc.mcp.status() if svc.mcp else {"servers": [], "tools": 0})
                 return
-            if path == "" or (path == "/api-monitor" and svc.api_monitor):
-                body = (ROOT / "serve" / "web" / ("monitor.html" if path else "index.html")).read_bytes()
+            if path == "":
+                # no web chat (the chat is ./almond, tools/cli/almond_cli.py): what this address serves
+                self._json(200, {"service": "almond", "model": svc.model, "api": "/v1",
+                                 "endpoints": ["/v1/chat/completions", "/v1/messages", "/v1/models", "/health", "/metrics"],
+                                 "chat": "./almond (the terminal chat)",
+                                 **({"api_monitor": "/api-monitor"} if svc.api_monitor else {})})
+            elif path == "/api-monitor" and svc.api_monitor:
+                body = (ROOT / "serve" / "web" / "monitor.html").read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -4729,7 +4741,8 @@ def make_handler(svc: Service):
             elif path in ("/health", "/api/health"):
                 self._json(200, {"status": "ok", "max_context": svc.reported_ctx(), "model": svc.model,
                                  "images": svc.vision is not None, "api_key": bool(svc.api_key),
-                                 "loaded": svc.loaded(), "service": "almond"})
+                                 "loaded": svc.loaded(), "service": "almond",
+                                 "reasoning_levels": REASONING_LEVELS, "reasoning_default": REASONING_DEFAULT})
             elif path == "/status":
                 if not self._authorized():                  # #212: it shows the end of the last answer
                     return
@@ -5858,8 +5871,19 @@ def main() -> int:
     ap.add_argument("--slot-save-path", default=None, metavar="DIR",
                     help="enable POST /slots/0?action=save|restore {\"filename\": NAME} (llama-server's API): the "
                          "conversation the engine holds, to or from DIR/NAME (also \"slot_save_path\" in the config)")
+    ap.add_argument("--describe", action="store_true",
+                    help="print the model this server would serve (name, context, thinking levels) as JSON and exit, "
+                         "without loading it: the router's listing (tools/router/almond_router.py)")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}   # Notepad adds a BOM
+    if a.describe:
+        args = cfg.get("args") or []
+        ctx = next((args[i + 1] for i, x in enumerate(args[:-1]) if x in ("--ctx", "--max-context")), None)
+        print(json.dumps({"model": cfg.get("model_name", "qwen3.8-flash-next"),
+                          "max_context": int(ctx) if ctx and str(ctx).isdigit() else None,
+                          "images": bool(cfg.get("vision")), "reasoning_levels": REASONING_LEVELS,
+                          "reasoning_default": REASONING_DEFAULT}))
+        return 0
     if a.gpu is not None:
         cfg["gpu"] = int(a.gpu) if a.gpu.strip().isdigit() else a.gpu
     a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
