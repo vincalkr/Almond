@@ -83,6 +83,7 @@ struct GlmTrunk::Impl {
     ggml_tensor * post_f = nullptr;    // [HC, NC]
     ggml_tensor * comb_f = nullptr;    // [HC, HC, NC]
     ggml_tensor * fout = nullptr;      // [D, NC] shared expert (or the dense FFN) of the current layer
+    ggml_tensor * routed = nullptr;    // [D, NC] the routed experts' sum, written by the tier on the card (routed_dev)
     ggml_tensor * sel_buf = nullptr;   // [CTX * NC] the last full indexer's selection mask, [n_kv, n] contiguous
     struct Layer {
         ggml_tensor * conv = nullptr;  // KDA: [3 * (DCONV-1) * DIN] the q | k | v conv windows
@@ -565,6 +566,7 @@ bool GlmTrunk::init(const std::string & path, const TrunkConfig & cfg, std::stri
     im.post_f = ggml_new_tensor_2d(im.sctx, GGML_TYPE_F32, im.HC, im.NC);
     im.comb_f = ggml_new_tensor_3d(im.sctx, GGML_TYPE_F32, im.HC, im.HC, im.NC);
     im.fout = ggml_new_tensor_2d(im.sctx, GGML_TYPE_F32, im.D, im.NC);
+    im.routed = ggml_new_tensor_2d(im.sctx, GGML_TYPE_F32, im.D, im.NC);
     im.sel_buf = ggml_new_tensor_1d(im.sctx, GGML_TYPE_F32, im.CTX * im.NC);
     for (int64_t l = 0; l < im.NL; ++l) {
         Impl::Layer & L = im.ly[(size_t) l];
@@ -706,16 +708,16 @@ bool GlmTrunk::finish(int il, const float * routed_sum) {
     Impl & im = *p_;
     const int n = im.n;
     const bool routed = il >= im.NDENSE;
-    if (routed) {
-        if (!routed_sum) { im.err = "glm: the routed sum must come from the host"; return false; }
-        im.host_routed.assign(routed_sum, routed_sum + (size_t) (im.D * n));
-    }
+    // routed_sum null: the tier already wrote the sum into `routed` on the card (routed_dev)
+    const bool on_dev = routed && !routed_sum;
+    if (routed && !on_dev) im.host_routed.assign(routed_sum, routed_sum + (size_t) (im.D * n));
     static const bool dbg = std::getenv("ALMOND_GLM_DEBUG") != nullptr;
     std::unique_ptr<Impl::G> tmp;
-    Impl::G * g = im.graph(Impl::K_FIN, il, 0, tmp, [&](Impl::G & g) {
+    Impl::G * g = im.graph(Impl::K_FIN, il, on_dev ? 1 : 0, tmp, [&](Impl::G & g) {
         ggml_context * c = g.ctx;
         ggml_tensor * out = im.cols2(c, im.fout);
-        if (routed) out = ggml_add(c, out, im.input(g, GGML_TYPE_F32, { im.D, n }, im.host_routed));
+        if (on_dev) out = ggml_add(c, out, im.cols2(c, im.routed));
+        else if (routed) out = ggml_add(c, out, im.input(g, GGML_TYPE_F32, { im.D, n }, im.host_routed));
         ggml_tensor * x = im.hc_post(c, out, im.cols3(c, im.hres), im.cols2(c, im.post_f), im.cols2(c, im.comb_f));
         ggml_build_forward_expand(g.gf, ggml_cpy(c, x, im.cols3(c, im.x_state)));
         if (dbg) { ggml_set_output(x); ggml_set_output(out); g.out = { x, out }; }
@@ -729,7 +731,7 @@ bool GlmTrunk::finish(int il, const float * routed_sum) {
             for (float f : v) s += f;
             return s;
         };
-        if (routed) { double s = 0; for (float f : im.host_routed) s += f; std::fprintf(stderr, "glmdbg L%d moe_out %.6f\n", il, s); }
+        if (routed && !on_dev) { double s = 0; for (float f : im.host_routed) s += f; std::fprintf(stderr, "glmdbg L%d moe_out %.6f\n", il, s); }
         std::fprintf(stderr, "glmdbg L%d ffn_out %.6f l_out %.6f\n", il, sum(g->out[1]), sum(g->out[0]));
     }
     return true;
@@ -786,7 +788,7 @@ const float * GlmTrunk::batch_wts() const { return nullptr; }
 const float * GlmTrunk::batch_fn() const { return nullptr; }
 int GlmTrunk::batch_size() const { return 0; }
 bool GlmTrunk::upload_routed(const float *, int) { return false; }
-float * GlmTrunk::routed_dev() { return nullptr; }
+float * GlmTrunk::routed_dev() { return p_->routed ? (float *) p_->routed->data : nullptr; }
 bool GlmTrunk::finish_span(int, int, int) { return false; }
 bool GlmTrunk::set_columns(int nc) { return nc <= p_->NC; }
 int GlmTrunk::columns() const { return (int) p_->NC; }
