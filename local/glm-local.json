@@ -1,0 +1,28 @@
+{
+  "exe": "build-maya-hip/maya",
+  "args": [
+    "--glm-pack",
+    "models/glm53-gsq-rco/pack",
+    "--max-context",
+    "131072",
+    "--prefill",
+    "auto",
+    "--vram-reserve-mib",
+    "576"
+  ],
+  "env": {
+    "STRATA_GLM_RESERVE_MB": "576",
+    "STRATA_GLM_RAM_HEADROOM_GB": "16",
+    "STRATA_GLM_PREFILL_SUB": "1024",
+    "STRATA_GLM_PREFILL_MB": "4096",
+    "STRATA_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-glm-hipblaslt-100401-local.txt"
+  },
+  "cwd": ".",
+  "tokenizer": "models/glm53-gsq-rco/pack/tokenizer",
+  "model_name": "glm-5.3-flash",
+  "log": "local/serve-glm-engine.log",
+  "port": 8150,
+  "backend": "hip",
+  "gpu": [0, 1],
+  "sampling": {"temperature": 1.0, "top_p": 0.95}
+}

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# build.sh - builds ggml (third_party/llama.cpp/build-hip) and the engine (build-hip-fused/ds41_generate), HIP only.
+# build.sh - builds ggml (third_party/llama.cpp/build-hip), the DeepSeek engine (build-hip-fused/ds41_generate) and the
+# GLM engine (build-maya-hip/maya, from engines/maya), HIP only.
 # The same commands as the README's "2. Build".  ggml is built once (tens of minutes: many HIP kernels); a second run
 # only rebuilds what changed.  Environment:
 #   ROCM=/opt/rocm      the ROCm install
@@ -36,4 +37,9 @@ cmake -S . -B build-hip-fused "${COMMON[@]}" \
     -DALMOND_GGML_DIR="$PWD/third_party/llama.cpp" -DALMOND_GGML_PREBUILT="$PWD/third_party/llama.cpp/build-hip" \
     -DALMOND_DSV41_HC_MIX=ON -DALMOND_DSV41_FQ_OP=ON
 cmake --build build-hip-fused -j "$JOBS"
-echo "=== done: build-hip-fused/ds41_generate"
+echo "=== GLM engine (engines/maya, project-maya's, -> build-maya-hip/maya)"
+cmake -S engines/maya -B build-maya-hip "${COMMON[@]}" \
+    -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_PREFILL_MMQ=ON -DSTRATA_NATIVE_EXPERTS=ON \
+    -DSTRATA_BUILD_TESTS=OFF -DSTRATA_GGML_DIR="$PWD/engines/maya/third_party/llama.cpp"
+cmake --build build-maya-hip --target maya -j "$JOBS"
+echo "=== done: build-hip-fused/ds41_generate, build-maya-hip/maya"

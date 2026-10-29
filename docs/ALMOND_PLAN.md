@@ -93,6 +93,27 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    layer (rocprofv3) against ~1.0-1.3 ms of wall time: the rest is the dispatch gap of ~80 kernels a layer; ggml's
    HIP graphs change nothing (`GGML_CUDA_DISABLE_GRAPHS=1`: 1.03 vs 1.05 ms a KDA layer). Missing: the layer-major batch, the next-layer prediction, cached graphs, conversation reuse, the serve
    path's chat template, project-maya's packs (`glm5next`: their GGUF names one key prefix differently, read already).
+   **project-maya's engine, vendored (2026-10-29): the GLM path that runs.** The trunk above has a floor: ~45 ms a
+   token of attention and router alone, where project-maya's whole token on this box is ~28 ms (Maya-M, 82% VRAM
+   hits, `NOTES-AMD-2x7900.md`). Its engine reads our GGUF as it is, through its pack (`local/glm-pack.sh`, 1 GB, a few
+   seconds), so it is vendored instead of ported piece by piece: `engines/maya` (project-maya v1.1.37, 7ee8f27, MIT,
+   with its pinned ggml), built by `./build.sh` into `build-maya-hip/maya`, served by Almond's server through
+   `tools/glm/serve/serve_glm.py` (GLM's `<arg_key>` tool calls translated into the server's form, as serve_ds41.py
+   does for DSML) and `./run.sh --model glm` (`local/glm-local.json`, 128K context). It splits the layers over the two
+   cards (0-22 / 23-44), each card's experts in its own LRU pool (~4300 slots), a pinned RAM tier and a CPU lane.
+   Exact routing (no `TRUNK_KEEP`). Same GGUF, the 512-token doc, 510 positions scored:
+
+   | engine | PPL | top-1 | second half |
+   | --- | ---: | ---: | ---: |
+   | llama.cpp | | | 7.1997 |
+   | Almond trunk (above) | 10.3334 | 0.547 | 7.2401 |
+   | project-maya's engine | 10.3788 | 0.545 | 7.0003 |
+
+   (KL from the Almond trunk 0.063 mean, 0.035 median; argmax agree 88.4%.) Decode, 128-token prompt, 130 tokens,
+   greedy, a cold start: 7.77 -> 20.71 tok/s (VRAM hits 11% -> 66%, CPU experts 210 -> 97 a token). Through the
+   server (`./run.sh --model glm`, power-tune on, thinking off, 700 tokens of code three times): 21.1, 25.1, 25.4
+   tok/s; a short Italian answer 24.7 then 28.8 (85% hits). Tool calls (OpenAI, streamed, the tool's result back),
+   Anthropic thinking: checked by hand. The Almond trunk (`--trunk glm` in ds41_generate) stays as the reference.
 4. **Qwen3.8-Flash-Next**, the same way (Xolotl, Strata and ds4 as references).
 5. **The server stays in Python** (`serve/`, ~9,900 lines: OpenAI / Anthropic API, streaming, chat templates, tool
    calls, web app, MCP, the engine's process). A token's time is all in the engine; the server only moves text and

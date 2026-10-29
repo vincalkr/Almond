@@ -3,6 +3,8 @@
 #   ./run.sh                 two cards (0 and 1, card 1 as the expert tier), images on when the encoder is there
 #   ./run.sh --gpu 1         one card (0 or 1)
 #   ./run.sh --gpu 0,1       two cards, as the default
+#   ./run.sh --model glm     GLM-5.3-Flash (GSQ-RCO 3.0bit) on project-maya's engine (engines/maya, build-maya-hip/maya),
+#                            the layers split over both cards: local/glm-local.json, tools/glm/serve/serve_glm.py
 # --gpu picks the configuration: local/ds41-local-vision.json for two cards, local/ds41-local-1gpu-vision.json for
 # one; without the vision encoder in models/vision-1017 (or the image routing bias local/rco-iq2xxs-meta/vl-bias.gguf)
 # the text-only ones (local/ds41-local.json, local/ds41-local-1gpu.json).  The encoder is loaded on card 0 only for a
@@ -34,15 +36,16 @@ fi
 echo "run.sh: ALMOND_HOME=$ALMOND_HOME, python $PY"
 
 # --gpu and --config are taken out of the arguments; the rest go to the server as they are.
-GPU=""; CFG=""
+GPU=""; CFG=""; MODEL=ds41
 n=$#
 while [ "$n" -gt 0 ]; do
     a=$1; shift; n=$((n - 1))
     case $a in
-        --gpu|--config)
+        --gpu|--config|--model)
             [ "$n" -gt 0 ] || { echo "run.sh: $a needs a value" >&2; exit 1; }
-            [ "$a" = --gpu ] && GPU=$1 || CFG=$1
+            case $a in --gpu) GPU=$1 ;; --config) CFG=$1 ;; *) MODEL=$1 ;; esac
             shift; n=$((n - 1)); continue ;;
+        --model=*) MODEL=${a#--model=}; continue ;;
         --gpu=*) GPU=${a#--gpu=}; continue ;;
         --config=*) CFG=${a#--config=}; continue ;;
     esac
@@ -50,6 +53,15 @@ while [ "$n" -gt 0 ]; do
 done
 case ${GPU:-0,1} in
     *[!0-9,]*|,*|*,|*,,*) echo "run.sh: --gpu takes card numbers: 0, 1 or 0,1 (got '$GPU')" >&2; exit 1 ;;
+esac
+SHIM="$R/tools/v41/serve/serve_ds41.py"
+case $MODEL in
+    ds41|deepseek) ;;
+    glm)
+        SHIM="$R/tools/glm/serve/serve_glm.py"
+        [ -n "$CFG" ] || CFG="$R/local/glm-local.json"
+        [ -x "$R/build-maya-hip/maya" ] || { echo "run.sh: build-maya-hip/maya is not built (./build.sh builds it)" >&2; exit 1; } ;;
+    *) echo "run.sh: --model takes ds41 or glm (got '$MODEL')" >&2; exit 1 ;;
 esac
 cards=$(echo "${GPU:-0,1}" | tr ',' '\n' | wc -l)
 if [ -z "$CFG" ]; then
@@ -79,9 +91,10 @@ cfg, root = sys.argv[1], sys.argv[2]
 c = json.load(open(cfg))
 a = c.get("args", [])
 model = a[a.index("-m") + 1] if "-m" in a else ""
+pack = a[a.index("--glm-pack") + 1] if "--glm-pack" in a else ""
 engram = a[a.index("--engram") + 1].split(":") if "--engram" in a else []
 meta = (c.get("env") or {}).get("DS41_META")          # the geometry overlay a foreign pack reads
-need = ([model] if model else []) + engram + ([c["tokenizer"]] if c.get("tokenizer") else []) + ([meta] if meta else [])
+need = ([model] if model else []) + ([pack] if pack else []) + engram + ([c["tokenizer"]] if c.get("tokenizer") else []) + ([meta] if meta else [])
 def whole(p):
     q = p if os.path.isabs(p) else os.path.join(root, p)
     return os.path.exists(q) and not (os.path.isfile(q) and os.path.getsize(q) == 0)
@@ -118,7 +131,7 @@ elif [ "${DS41_POWER_TUNE:-1}" != 0 ] && [ ! -x "$PT" ]; then
 fi
 
 if [ "$tuned" = 0 ]; then
-    exec "$PY" "$R/tools/v41/serve/serve_ds41.py" \
+    exec "$PY" "$SHIM" \
          "--engine" "almond" \
          "--port" "8150" "$@"
 fi
@@ -127,12 +140,12 @@ fi
 # inherited by the server).
 trap ':' INT TERM HUP
 rc=0
-"$PY" "$R/tools/v41/serve/serve_ds41.py" \
+"$PY" "$SHIM" \
     "--engine" "almond" \
     "--port" "8150" "$@" || rc=$?
 # Another ds41e server may have started meanwhile (a restart, an A/B that stops one and starts the next): it switched
 # power-tune on and still needs it, so it stays on until the last server ends.
-if pgrep -f "[t]ools/v41/serve/serve_ds41.py" >/dev/null 2>&1; then
+if pgrep -f "[t]ools/(v41/serve/serve_ds41|glm/serve/serve_glm).py" >/dev/null 2>&1; then
     echo "run.sh: another Almond server is running: power-tune stays on"
 else
     sudo -n "$PT" off >/dev/null 2>&1 && echo "run.sh: power-tune off"

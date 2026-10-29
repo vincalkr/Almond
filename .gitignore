@@ -115,3 +115,5 @@ core.[0-9]*
 /local/reports/
 /models
 /.venv
+# engines/maya: project-maya's source directories named core (not core dumps)
+!engines/maya/**/core

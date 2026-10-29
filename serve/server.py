@@ -2753,8 +2753,14 @@ class Service:
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
         self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
-        self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
-                            tokenizer.encode("<|endoftext|>", parse_special=True))
+        # The ids that end an answer (project-maya's rule): only strings that are ONE special token in this
+        # vocabulary - GLM-5.3 has no <|im_end|>, and its text pieces occur inside ordinary answers.  GLM ends a turn
+        # with the next role's token (<|user|> / <|observation|>).
+        def _special_ids(s: str) -> list[int]:
+            ids = tokenizer.encode(s, parse_special=True)
+            return ids if len(ids) == 1 else []
+        self.stop_ids = set(_special_ids(IM_END) + _special_ids("<|endoftext|>") + _special_ids("<|user|>") +
+                            _special_ids("<|observation|>"))
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
