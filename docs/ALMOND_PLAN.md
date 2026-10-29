@@ -78,7 +78,14 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    **The routed sum on the card (2026-10-29):** `GlmTrunk::routed_dev()` gives the tier a device tensor, so decode
    takes the tier's `run_to_dev` path, the one where the peer card computes its experts (it computed none before).
    PPL the same (10.5520). Decode, same command: 3.58 -> 6.04 tok/s (peer 4964 rows over 64 tokens; file reads
-   5973 -> 1009). Missing: the layer-major batch, the next-layer prediction, cached graphs, conversation reuse, the serve
+   5973 -> 1009).
+   **Fused HC ops (2026-10-29):** the hyper-connection mixes, Sinkhorn and post through ggml's DeepSeek-V4 ops
+   (`ggml_dsv4_hc_comb/pre/post`, `ggml_dsv41_hc_mixes`; llama.cpp's glm5-next has the same fused path), instead of
+   ~300 stock-op kernels a layer. `ALMOND_GLM_HC_COMPOSITE=1` = the stock ops. PPL 10.5520 -> 10.5312 (top-1 0.546 ->
+   0.548: the fused kernels round differently). `ALMOND_GLM_PROF=1`, 130 tokens: a KDA layer's graph 1.81 -> 1.26 ms,
+   an MLA layer's 2.21 -> 1.32 ms, finish 0.16 -> 0.06 ms; decode 6.45 -> 7.77 tok/s (both with the profiler on).
+   An expert rank from the 17K prompt's routes (`tools/v41/engine/glm_rank.py`, `local/glm-rank.bin`: 30 GiB cover
+   87% of the selections) measured no faster (5.62 against 6.04/5.70 tok/s without), so it is not used. Missing: the layer-major batch, the next-layer prediction, cached graphs, conversation reuse, the serve
    path's chat template, project-maya's packs (`glm5next`: their GGUF names one key prefix differently, read already).
 4. **Qwen3.8-Flash-Next**, the same way (Xolotl, Strata and ds4 as references).
 5. **The server stays in Python** (`serve/`, ~9,900 lines: OpenAI / Anthropic API, streaming, chat templates, tool

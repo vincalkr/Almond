@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <tuple>
@@ -170,6 +171,12 @@ struct GlmTrunk::Impl {
         g.inputs.push_back({ x, [src]() { return (const void *) src->data(); } });
         return x;
     }
+    static double pnow() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+    int prof_tag = 3;
+    const bool hc_composite = std::getenv("ALMOND_GLM_HC_COMPOSITE") != nullptr;
+    double pw[4] = {}, pc[4] = {};
+    int64_t pn[4] = {}, pcalls = 0;
+    int pnodes[4] = {};
     bool run(G & g, bool kept) {
         if (kept) {   // allocated once, in its own buffer: nothing else runs there
             if (!g.ga) {
@@ -180,8 +187,23 @@ struct GlmTrunk::Impl {
             if (!galloc) galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
             if (!ggml_gallocr_alloc_graph(galloc, g.gf)) { err = "glm: graph allocation failed"; return false; }
         }
+        // ALMOND_GLM_PROF=1 (diagnostic): the time waiting for earlier work, then this graph's, per tag
+        static const bool prof = std::getenv("ALMOND_GLM_PROF") != nullptr;
+        double t0 = 0, t1 = 0;
+        if (prof) { t0 = pnow(); ggml_backend_synchronize(backend); t1 = pnow(); }
         for (auto & in : g.inputs) ggml_backend_tensor_set(in.first, in.second(), 0, ggml_nbytes(in.first));
         if (ggml_backend_graph_compute(backend, g.gf) != GGML_STATUS_SUCCESS) { err = "glm: graph compute failed"; return false; }
+        if (prof) {
+            ggml_backend_synchronize(backend);
+            const double t2 = pnow();
+            pw[prof_tag] += t1 - t0; pc[prof_tag] += t2 - t1; ++pn[prof_tag]; pnodes[prof_tag] = ggml_graph_n_nodes(g.gf);
+            if (++pcalls % (45 * 2 * 64) == 0)
+                for (int i = 0; i < 4; ++i)
+                    std::fprintf(stderr, "glmprof %s: %lld calls, wait %.3f ms, graph %.3f ms per call (%d nodes)\n",
+                                 i == 0 ? "kda" : i == 1 ? "mla" : i == 2 ? "finish" : "other", (long long) pn[i],
+                                 pw[i] / std::max<int64_t>(pn[i], 1), pc[i] / std::max<int64_t>(pn[i], 1), pnodes[i]);
+        }
+        prof_tag = 3;
         return true;
     }
 
@@ -204,6 +226,24 @@ struct GlmTrunk::Impl {
         const int64_t nt = x->ne[2];
         ggml_tensor * flat = ggml_reshape_2d(c, ggml_cont(c, x), HC * D, nt);
         ggml_tensor * mixes = ggml_mul_mat(c, fn, ggml_rms_norm(c, flat, eps_rms));   // [(2+HC)*HC, nt]
+        if (!hc_composite) {
+            // the fused DeepSeek-V4 HC ops (llama.cpp's fused_dsv4_hc_* path of glm5-next): the Sinkhorn alone is ~130
+            // tiny kernels per call as stock ops.  ALMOND_GLM_HC_COMPOSITE=1: the stock-op composite below.
+            ggml_tensor * pre, * post;
+#if defined(ALMOND_DSV41_HC_MIX)
+            ggml_tensor * mix = ggml_dsv41_hc_mixes(c, ggml_cont(c, ggml_view_2d(c, mixes, 2 * HC, nt, mixes->nb[1], 0)),
+                                                    ggml_view_1d(c, scale, 2, 0), ggml_view_1d(c, base, 2 * HC, 0), hc_eps);
+            pre = ggml_view_2d(c, mix, HC, nt, mix->nb[1], 0);
+            post = ggml_view_2d(c, mix, HC, nt, mix->nb[1], (size_t) nt * mix->nb[1]);
+#else
+            auto w1 = [&](ggml_tensor * t, int64_t ne0, int64_t i0) { return ggml_view_1d(c, t, ne0, ggml_row_size(t->type, i0)); };
+            auto w2 = [&](int64_t ne0, int64_t i0) { return ggml_view_2d(c, mixes, ne0, nt, mixes->nb[1], ggml_row_size(mixes->type, i0)); };
+            pre = ggml_scale_bias(c, ggml_sigmoid(c, ggml_add(c, ggml_mul(c, w2(HC, 0), w1(scale, 1, 0)), w1(base, HC, 0))), 1.0f, hc_eps);
+            post = ggml_scale(c, ggml_sigmoid(c, ggml_add(c, ggml_mul(c, w2(HC, HC), w1(scale, 1, 1)), w1(base, HC, HC))), 2.0f);
+#endif
+            ggml_tensor * comb = ggml_dsv4_hc_comb(c, mixes, scale, base, hc_eps, (int32_t) SINK);
+            return { ggml_dsv4_hc_pre(c, x, ggml_cont(c, pre)), post, comb };
+        }
         auto v1 = [&](ggml_tensor * t, int64_t ne0, int64_t i0) { return ggml_view_1d(c, t, ne0, ggml_row_size(t->type, i0)); };
         auto v2 = [&](int64_t ne0, int64_t i0) { return ggml_view_2d(c, mixes, ne0, nt, mixes->nb[1], ggml_row_size(mixes->type, i0)); };
         ggml_tensor * pre = ggml_add(c, ggml_mul(c, v2(HC, 0), v1(scale, 1, 0)), v1(base, HC, 0));
@@ -236,6 +276,7 @@ struct GlmTrunk::Impl {
     }
     // build_hc_post: [D, HC, n]
     ggml_tensor * hc_post(ggml_context * c, ggml_tensor * x, ggml_tensor * residual, ggml_tensor * post, ggml_tensor * comb) const {
+        if (!hc_composite) return ggml_dsv4_hc_post(c, x, residual, ggml_cont(c, post), ggml_cont(c, comb));
         const int64_t nt = x->ne[1];
         ggml_tensor * out = nullptr;
         for (int64_t dst = 0; dst < HC; ++dst) {
@@ -674,6 +715,7 @@ bool GlmTrunk::attn_router(int il, int * ids, float * wts, const float ** fn_hos
             for (ggml_tensor * t : { an, cur, x1 }) { ggml_set_output(t); ggml_build_forward_expand(g.gf, t); g.out.push_back(t); }
         }
     });
+    im.prof_tag = im.recr[(size_t) il] ? 0 : 1;
     if (!im.run(*g, !tmp)) return false;
     ggml_tensor * fn = g->out[0];
     if (dbg) {
@@ -722,6 +764,7 @@ bool GlmTrunk::finish(int il, const float * routed_sum) {
         ggml_build_forward_expand(g.gf, ggml_cpy(c, x, im.cols3(c, im.x_state)));
         if (dbg) { ggml_set_output(x); ggml_set_output(out); g.out = { x, out }; }
     });
+    im.prof_tag = 2;
     if (!im.run(*g, !tmp)) return false;
     if (dbg) {
         auto sum = [](ggml_tensor * t) {
