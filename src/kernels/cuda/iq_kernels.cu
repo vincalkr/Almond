@@ -613,10 +613,11 @@ template<> struct Fmt<8> { static constexpr int qk = 32, ipb = QI8_0 / VDR_Q8_0,
 #else
 #define ALMOND_GU_FMTS(X) X(16) X(17) X(18) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(6) X(2) X(3) X(8)
 #endif
+// Q4_K down: the GSQ-RCO GLM-5.3 pack keeps three layers' experts in Q4_K (gate, up and down alike).
 // IQ1_M/IQ2_XXS/IQ2_XS down: the GSQ-RCO pack quantizes expert down matrices to IQ1_M, IQ2_XXS or
 // IQ2_XS per layer, and Fmt<>/Split<> already exist for those types (gate/up use them); without them
 // native_expert_supported3 refuses the pack at tier init.
-#define ALMOND_D_FMTS(X) X(16) X(17) X(20) X(23) X(29) X(42) X(7) X(6) X(2) X(3) X(8)
+#define ALMOND_D_FMTS(X) X(16) X(17) X(20) X(23) X(29) X(42) X(12) X(7) X(6) X(2) X(3) X(8)
 #define ALMOND_MMVQ_FMTS(X) X(16) X(17) X(18) X(20) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(7) X(6) X(2) X(3) X(8)
 #include "fork/fork_fmt.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
 

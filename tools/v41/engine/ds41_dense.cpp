@@ -3,6 +3,7 @@
 
 #include "ds41_engram.hpp"
 #include "ds41_ops.hpp"
+#include "glm_trunk.hpp"
 
 #include "ggml-alloc.h"
 #include "ggml-cpu.h"
@@ -1067,14 +1068,19 @@ const TrunkInfo & Ds41Dense::info() const {
 }
 
 std::unique_ptr<MoeTrunk> make_trunk(const std::string & gguf, std::string & err) {
-    // One architecture today.  The GSQ-RCO pack carries llama.cpp's metadata and is read through the DS41_META overlay,
-    // so the architecture is not detected from the file yet: ALMOND_ARCH names it when there is more than one.
-    (void) gguf;
-    const char * a = std::getenv("ALMOND_ARCH");
-    const std::string arch = a && *a ? a : "deepseek41";
-    if (arch == "deepseek41") return std::make_unique<Ds41Dense>();
-    err = "architecture '" + arch + "' is not one Almond runs (deepseek41)";
-    return nullptr;
+    // The architecture from the file: llama.cpp's GLM-5.3 GGUFs say "glm5-next", project-maya's "glm5next".  DeepSeek's
+    // GSQ-RCO pack carries llama.cpp's own name and is read through the DS41_META overlay: anything else is DeepSeek.
+    // ALMOND_ARCH overrides.
+    std::string arch;
+    if (const char * a = std::getenv("ALMOND_ARCH"); a && *a) arch = a;
+    else {
+        try {
+            const GgufFile f(gguf);
+            if (const MetaValue * v = f.get("general.architecture")) arch = v->s;
+        } catch (const std::exception & e) { err = e.what(); return nullptr; }
+    }
+    if (arch == "glm5-next" || arch == "glm5next" || arch == "glm53") return std::make_unique<GlmTrunk>();
+    return std::make_unique<Ds41Dense>();
 }
 ggml_backend_t Ds41Dense::backend() const { return p_->backend; }
 const std::string & Ds41Dense::last_error() const { return p_->err; }

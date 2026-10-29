@@ -5463,7 +5463,7 @@ bool Ds41MoeTier::run(int64_t layer, const int32_t* ids6, const float* w6, const
     if (!im_->inited || !im_->pool) return false;
     if (!ids6 || !w6 || !x || !out) return false;
     rebal_count(*im_, layer, ids6, im_->g.top_k);
-    if (!im_->g.routed(layer)) return false;
+    if (!im_->g.routed(layer)) return true;   // no routed experts here (GLM's leading dense layers): nothing to run, out untouched
     if (im_->cfg.cpu_only) return cpu_run(*im_, layer, ids6, w6, x, out);
 #if defined(DS4_MOE_CUDA)
     return gpu_run(*im_, layer, ids6, w6, x, nullptr, out);
@@ -5476,7 +5476,8 @@ bool Ds41MoeTier::run_to_dev(int64_t layer, const int32_t* ids6, const float* w6
     if (!im_->inited || !im_->pool) return false;
     if (!ids6 || !w6 || !x || !out_dev) return false;
     rebal_count(*im_, layer, ids6, im_->g.top_k);
-    if (!im_->g.routed(layer) || im_->cfg.cpu_only) return false;
+    if (!im_->g.routed(layer)) return true;   // no routed experts: nothing to run
+    if (im_->cfg.cpu_only) return false;
 #if defined(DS4_MOE_CUDA)
     return gpu_run(*im_, layer, ids6, w6, x, nullptr, nullptr, out_dev);
 #else
@@ -5488,7 +5489,7 @@ bool Ds41MoeTier::run_multi(int64_t layer, int nt, const int32_t* ids, const flo
     if (!im_->inited || !im_->pool) return false;
     if (!ids || !w || !x || !out || nt < 1 || nt > kMaxTok) return false;
     rebal_count(*im_, layer, ids, (int64_t) nt * im_->g.top_k);
-    if (!im_->g.routed(layer)) return false;
+    if (!im_->g.routed(layer)) return true;   // no routed experts here (GLM's leading dense layers): nothing to run, out untouched
     if (im_->cfg.cpu_only) {   // the CPU tier: token by token (no sharing; it is not the verify path)
         const int64_t K = im_->g.top_k, H = im_->g.n_embd;
         for (int t = 0; t < nt; ++t)
@@ -5521,7 +5522,7 @@ bool Ds41MoeTier::run_multi_to_dev(int64_t layer, int nt, const int32_t* ids, co
     if (!im_->inited || !im_->pool) return false;
     if (!ids || !w || !x || !out_dev || nt < 1 || nt > kMaxTok) return false;
     rebal_count(*im_, layer, ids, (int64_t) nt * im_->g.top_k);
-    if (!im_->g.routed(layer)) return false;
+    if (!im_->g.routed(layer)) return true;   // no routed experts here (GLM's leading dense layers): nothing to run, out untouched
     if (std::getenv("DS41_DBG_X")) std::fprintf(stderr, "[dbg_x] ENTER run_multi_to_dev layer=%lld nt=%d\n", (long long) layer, nt);
 #if defined(DS4_MOE_CUDA)
     if (!im_->cfg.cpu_only) {
@@ -5683,7 +5684,7 @@ void Ds41MoeTier::release_chunk() {
 
 bool Ds41MoeTier::run_chunk(int64_t layer, int n, const int32_t* ids, const float* w, const float* x, float* out) {
     if (!im_->inited || !ids || !w || !x || !out || n < 1) return false;
-    if (!im_->g.routed(layer)) return false;
+    if (!im_->g.routed(layer)) return true;   // no routed experts here (GLM's leading dense layers): nothing to run, out untouched
 #if defined(DS4_MOE_CUDA)
     if (im_->gpu && !im_->cfg.cpu_only) return chunk_classes(*im_, layer, n, ids, w, x, out, nullptr);
 #endif
@@ -5696,7 +5697,7 @@ bool Ds41MoeTier::run_chunk(int64_t layer, int n, const int32_t* ids, const floa
 
 bool Ds41MoeTier::run_chunk_dev(int64_t layer, int n, const int32_t* ids, const float* w, const float* x, void* out_dev) {
     if (!im_->inited || !ids || !w || !x || !out_dev || n < 1) return false;
-    if (!im_->g.routed(layer)) return false;
+    if (!im_->g.routed(layer)) return true;   // no routed experts here (GLM's leading dense layers): nothing to run, out untouched
 #if defined(DS4_MOE_CUDA)
     if (im_->gpu && !im_->cfg.cpu_only) return chunk_classes(*im_, layer, n, ids, w, x, nullptr, out_dev);
 #endif
@@ -5707,7 +5708,7 @@ bool Ds41MoeTier::run_dev(int64_t layer, const int32_t* ids6, const float* w6, c
     if (!im_->inited) return false;
     if (!ids6 || !w6 || !x_dev || !out) return false;
     rebal_count(*im_, layer, ids6, im_->g.top_k);
-    if (!im_->g.routed(layer)) return false;
+    if (!im_->g.routed(layer)) return true;   // no routed experts here (GLM's leading dense layers): nothing to run, out untouched
     if (im_->cfg.cpu_only) return false;   // there is no device input without a device tier
 #if defined(DS4_MOE_CUDA)
     return gpu_run(*im_, layer, ids6, w6, nullptr, x_dev, out);
@@ -6212,9 +6213,51 @@ bool Ds41FileBlobs::open(std::string& err) {
     try { m = std::make_unique<GgufModel>(GgufModel::open(path_)); }
     catch (const std::exception& e) { err = e.what(); return false; }
     Ds41Geometry G;
-    if (!(err = ds41_read_geometry(*m, G)).empty()) return false;
-    const std::vector<int64_t> layers = ds41_file_layers(*m, G);
-    if (!(err = ds41_check_tensors(*m, G, layers)).empty()) return false;
+    std::vector<int64_t> layers;
+    // GLM-5.3 (glm5-next / glm5next): llama.cpp's stacked blk.L.ffn_{gate,up,down}_exps, one type per tensor; the
+    // leading dense layers have none (an empty map: not routed).  DeepSeek: its own geometry reader.
+    const MetaValue* av = m->meta().get("general.architecture");
+    const std::string arch = av ? av->s : "";
+    const bool glm = arch == "glm5-next" || arch == "glm5next";
+    if (glm) {
+        auto kn = [&](const char* k, double d) {
+            const MetaValue* v = m->meta().get(arch + "." + k);
+            if (!v) return d;
+            if (v->type == MetaType::ARRAY) return v->items.empty() ? d : v->items[0].num();
+            return v->num();
+        };
+        G.n_embd = (int64_t) kn("embedding_length", 0);
+        G.n_expert = (int64_t) kn("expert_count", 0);
+        G.n_used = (int64_t) kn("expert_used_count", 0);
+        G.n_ff = (int64_t) kn("expert_feed_forward_length", 0);
+        G.swiglu_limit = kn("swiglu_clamp_exp", 0);
+        const int64_t nb = (int64_t) kn("block_count", 0);
+        G.experts.resize((size_t) nb);
+        for (int64_t l = 0; l < nb; ++l) {
+            layers.push_back(l);
+            const std::string b = "blk." + std::to_string(l) + ".";
+            const TensorInfo* tg = m->find(b + "ffn_gate_exps.weight");
+            const TensorInfo* tu = m->find(b + "ffn_up_exps.weight");
+            const TensorInfo* td = m->find(b + "ffn_down_exps.weight");
+            if (!tg && !tu && !td) continue;
+            if (!tg || !tu || !td) { err = "layer " + std::to_string(l) + ": incomplete expert tensors"; return false; }
+            if (tg->type != tu->type) { err = "layer " + std::to_string(l) + ": gate and up of different types"; return false; }
+            Ds41ExpertMap& X = G.experts[(size_t) l];
+            X.gu_type.assign((size_t) G.n_expert, (int) tg->type);
+            X.d_type.assign((size_t) G.n_expert, (int) td->type);
+            X.gu_slot.resize((size_t) G.n_expert);
+            X.d_slot.resize((size_t) G.n_expert);
+            for (int64_t e = 0; e < G.n_expert; ++e) X.gu_slot[(size_t) e] = X.d_slot[(size_t) e] = (int) e;
+            X.gate_t[(int) tg->type] = tg->name;
+            X.up_t[(int) tu->type] = tu->name;
+            X.down_t[(int) td->type] = td->name;
+        }
+    } else {
+        if (!(err = ds41_read_geometry(*m, G)).empty()) return false;
+        layers = ds41_file_layers(*m, G);
+        if (!(err = ds41_check_tensors(*m, G, layers)).empty()) return false;
+    }
+    auto routed_l = [&](int64_t l) { return !G.experts[(size_t) l].gu_type.empty(); };
     const int64_t NL = (int64_t) layers.size(), NE = G.n_expert, D = G.n_embd, FF = G.n_ff;
     g_ = Ds41MoeGeom();
     g_.n_embd = D;
@@ -6226,7 +6269,7 @@ bool Ds41FileBlobs::open(std::string& err) {
     g_.eclass.assign((size_t) (NL * NE), 0);
     std::map<std::pair<int, int>, int> cid;
     for (int64_t l = 0; l < NL; ++l)
-        for (int64_t e = 0; e < NE; ++e) {
+        for (int64_t e = 0; e < NE && routed_l(l); ++e) {
             const std::pair<int, int> k{G.experts[(size_t) l].gu_type[(size_t) e], G.experts[(size_t) l].d_type[(size_t) e]};
             auto it = cid.find(k);
             if (it == cid.end()) {
@@ -6238,6 +6281,14 @@ bool Ds41FileBlobs::open(std::string& err) {
         }
     g_.gu_type = g_.cls_gu[0];
     g_.d_type = g_.cls_d[0];
+    if (glm) {   // per-layer types, -1 = no routed experts (Ds41MoeGeom::routed)
+        for (int64_t l = 0; l < NL; ++l) {
+            const bool r = routed_l(l);
+            g_.gate_types.push_back(r ? G.experts[(size_t) l].gu_type[0] : -1);
+            g_.up_types.push_back(r ? G.experts[(size_t) l].gu_type[0] : -1);
+            g_.down_types.push_back(r ? G.experts[(size_t) l].d_type[0] : -1);
+        }
+    }
     const size_t NS = m->size();
     std::vector<uint64_t> dstart(NS);
     for (size_t s = 0; s < NS; ++s) dstart[s] = m->shard(s).data_start();
@@ -6258,7 +6309,7 @@ bool Ds41FileBlobs::open(std::string& err) {
     down_sh_.assign((size_t) (NL * NE), 0);
     for (int64_t l = 0; l < NL; ++l) {
         const Ds41ExpertMap& X = G.experts[(size_t) l];
-        for (int64_t e = 0; e < NE; ++e) {
+        for (int64_t e = 0; e < NE && routed_l(l); ++e) {
             const int gt = X.gu_type[(size_t) e], dt = X.d_type[(size_t) e];
             size_t sg = 0, su = 0, sd = 0;
             const TensorInfo* tg = m->find(X.gate_t.at(gt), &sg);
