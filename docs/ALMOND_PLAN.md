@@ -114,6 +114,24 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    server (`./run.sh --model glm`, power-tune on, thinking off, 700 tokens of code three times): 21.1, 25.1, 25.4
    tok/s; a short Italian answer 24.7 then 28.8 (85% hits). Tool calls (OpenAI, streamed, the tool's result back),
    Anthropic thinking: checked by hand. The Almond trunk (`--trunk glm` in ds41_generate) stays as the reference.
+   **MTP drafts (2026-10-29, on by default):** the GSQ-RCO GGUF has no draft block (nextn 0); project-maya's Maya-M
+   has one (blk.45, NextN), and the engine takes a block from another quant of the same model (`STRATA_GLM_MTP_GGUF`:
+   it reads the trunk's hidden state and the embedding). `local/glm-mtp-extract.py` copies blk.45 out of Maya-M's third
+   shard into `models/glm53-gsq-rco/GLM-5.3-Flash-Maya-M-NextN.gguf` (3.6 GB, 29 tensors), and `local/glm-local.json`
+   names it. The second card drafts, the first verifies. Server, power-tune on, temperature 0, thinking off, 600
+   tokens each, a fresh start each arm (three times the same code prompt, an Italian history prompt, an English
+   explanation):
+
+   | arm | code 1 | code 2 | code 3 | Italian | English | drafts accepted |
+   | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+   | no drafts | 23.6 | 26.3 | 26.3 | 27.3 | 25.6 | |
+   | Maya-M's shard | 29.8 | 36.1 | 36.2 | 33.5 | 28.5 | 82.1% |
+   | the extracted block | 24.7 | 35.7 | 35.8 | 32.3 | 27.8 | 81.3% |
+   | the same, default config | 29.9 | 36.4 | 35.5 | 33.4 | 29.8 | 82.6% |
+
+   (tok/s.) Greedy output is not token for token the one without drafts: on the 128-token doc the two part at token
+   12, "64" against "128" (a near tie: the verify window's batched kernels round differently from the one-token
+   path, as the prompt path does). Tool calls checked again with drafts on (3 of 3, the integer argument typed).
 4. **Qwen3.8-Flash-Next**, the same way (Xolotl, Strata and ds4 as references).
 5. **The server stays in Python** (`serve/`, ~9,900 lines: OpenAI / Anthropic API, streaming, chat templates, tool
    calls, web app, MCP, the engine's process). A token's time is all in the engine; the server only moves text and

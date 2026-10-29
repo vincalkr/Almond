@@ -94,7 +94,8 @@ model = a[a.index("-m") + 1] if "-m" in a else ""
 pack = a[a.index("--glm-pack") + 1] if "--glm-pack" in a else ""
 engram = a[a.index("--engram") + 1].split(":") if "--engram" in a else []
 meta = (c.get("env") or {}).get("DS41_META")          # the geometry overlay a foreign pack reads
-need = ([model] if model else []) + ([pack] if pack else []) + engram + ([c["tokenizer"]] if c.get("tokenizer") else []) + ([meta] if meta else [])
+mtp = (c.get("env") or {}).get("STRATA_GLM_MTP_GGUF")  # GLM's draft block (local/glm-mtp-extract.py makes it)
+need = ([model] if model else []) + ([pack] if pack else []) + engram + ([c["tokenizer"]] if c.get("tokenizer") else []) + ([meta] if meta else []) + ([mtp] if mtp else [])
 def whole(p):
     q = p if os.path.isabs(p) else os.path.join(root, p)
     return os.path.exists(q) and not (os.path.isfile(q) and os.path.getsize(q) == 0)

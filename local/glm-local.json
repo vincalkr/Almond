@@ -15,7 +15,8 @@
     "STRATA_GLM_RAM_HEADROOM_GB": "16",
     "STRATA_GLM_PREFILL_SUB": "1024",
     "STRATA_GLM_PREFILL_MB": "4096",
-    "STRATA_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-glm-hipblaslt-100401-local.txt"
+    "STRATA_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-glm-hipblaslt-100401-local.txt",
+    "STRATA_GLM_MTP_GGUF": "models/glm53-gsq-rco/GLM-5.3-Flash-Maya-M-NextN.gguf"
   },
   "cwd": ".",
   "tokenizer": "models/glm53-gsq-rco/pack/tokenizer",
@@ -23,6 +24,12 @@
   "log": "local/serve-glm-engine.log",
   "port": 8150,
   "backend": "hip",
-  "gpu": [0, 1],
-  "sampling": {"temperature": 1.0, "top_p": 0.95}
+  "gpu": [
+    0,
+    1
+  ],
+  "sampling": {
+    "temperature": 1.0,
+    "top_p": 0.95
+  }
 }
