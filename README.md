@@ -85,14 +85,18 @@ instead.
 ./almond --monitor                         # what the old web monitor showed, refreshed every second
 ```
 
-- thinking: each model's own levels, from the client's words. GLM-5.3: none / low / high / max (its default; `medium`
-  is high, `xhigh` max, an Anthropic budget under 2K low, under 8K high, else max). DeepSeek-V4.1: none / low (50) /
+- thinking: each model's own levels, from the client's words. GLM-5.3-Flash: low / high / max (its default; an
+  Anthropic budget under 2K low, under 8K high, else max). DeepSeek-V4.1: none / low (50) /
   high (75, default) / max (100) or a number. `--nothink`, `--think`, `--think-max`, `--think-level L`; `/think L`,
   `/nothink` in the chat. `/health` and `/v1/models` say which levels a model has.
 - DeepSeek's sampling follows its cloud API (deepseek-flash): with thinking the temperature has no effect (1.0) and
   top_p is 0.95-1.0 (default 1.0); without thinking temperature 0-2 (default 1.0) and top_p 1.0; no top_k, min_p or
   penalties; an unset max_tokens is 8K without thinking, 64K with it, 128K at max effort.
-  `ALMOND_DS41_FREE_SAMPLING=1` passes a request's values as they are. GLM's defaults are its GGUF's (1.0 / 0.95).
+  `ALMOND_DS41_FREE_SAMPLING=1` passes a request's values as they are.
+- GLM-5.3-Flash follows Z.ai's API: it always thinks, at low / high / max (default max; none, minimal and
+  Anthropic's disabled are low, medium high, xhigh max); temperature 0-1 (default 1.0), top_p 0.01-1 (0.95), no
+  penalties, top_k or min_p, at most 128K tokens out. `ALMOND_GLM_FREE_SAMPLING=1` and `ALMOND_GLM_THINK_OFF=1`
+  (an Off level that closes the thinking at once: not Z.ai's, not measured) step outside it.
 - sampling: `--temp`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--presence-penalty`, `--seed`,
   `--max-tokens`; `/set KEY VALUE` in the chat, `/set` alone shows them next to the model's defaults (`/props`).
 - `/stats` (or `--monitor`): `GET /metrics` as text - state, speed, context, experts in VRAM, each GPU's load, VRAM,

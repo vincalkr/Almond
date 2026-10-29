@@ -6,7 +6,7 @@
   ./almond -m glm                the model (a name from /models, or the start of one: glm, deepseek)
 
 Thinking: --nothink, --think (the model's default), --think-max, --think-level LEVEL - the levels are the model's own
-(GLM-5.3: none / low / high / max; DeepSeek-V4.1: none / low / high / max = 0 / 50 / 75 / 100).  In the conversation:
+(GLM-5.3-Flash: low / high / max, it always thinks; DeepSeek-V4.1: none / low / high / max = 0 / 50 / 75 / 100).  In the conversation:
 
   /help  /quit  /models  /model NAME  /think [LEVEL]  /nothink  /clear  /read FILE  /system TEXT  /ctx
   /set [KEY VALUE]   sampling: temp, top_p, top_k, min_p, repeat_penalty, presence_penalty, seed, max_tokens
@@ -129,7 +129,7 @@ class Chat:
     # ---- models and levels
     def refresh(self):
         data = self.api.get("/v1/models").get("data") or []
-        if data and "status" not in data[0]:            # one model's server: its levels from /health
+        if data and "reasoning_levels" not in data[0]:  # one model's server (not the router): its levels from /health
             h = self.api.get("/health")
             data = [dict(data[0], status={"value": "loaded"}, reasoning_levels=h.get("reasoning_levels"),
                          reasoning_default=h.get("reasoning_default"), max_context=h.get("max_context"))]
@@ -179,6 +179,9 @@ class Chat:
     def set_level(self, word: str) -> bool:
         vals = self.values()
         w = {"0": "none", "off": "none", "nothink": "none"}.get(word.lower(), word.lower())
+        if w == "none" and "none" not in vals and vals:      # a model that always thinks (GLM-5.3): its lowest level
+            say(f"{DIM}{self.model['id']} always thinks: {vals[0]}, its lowest level{RESET}")
+            w = vals[0]
         if w.isdigit() and vals == ["none", "low", "high", "max"]:   # ds4's 1-100: the nearest named level
             n = int(w)
             w = "none" if n == 0 else "low" if n <= 50 else "high" if n <= 75 else "max"
