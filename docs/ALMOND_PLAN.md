@@ -85,7 +85,13 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    0.548: the fused kernels round differently). `ALMOND_GLM_PROF=1`, 130 tokens: a KDA layer's graph 1.81 -> 1.26 ms,
    an MLA layer's 2.21 -> 1.32 ms, finish 0.16 -> 0.06 ms; decode 6.45 -> 7.77 tok/s (both with the profiler on).
    An expert rank from the 17K prompt's routes (`tools/v41/engine/glm_rank.py`, `local/glm-rank.bin`: 30 GiB cover
-   87% of the selections) measured no faster (5.62 against 6.04/5.70 tok/s without), so it is not used. Missing: the layer-major batch, the next-layer prediction, cached graphs, conversation reuse, the serve
+   87% of the selections) measured no faster (5.62 against 6.04/5.70 tok/s without), so it is not used: GLM's routing
+   follows the text. The rank's first 35 GiB cover 28.5% of the doc prompt's routes (a uniform pick: ~35%), and the
+   per-expert counts of the two texts (a C++ review, 17K tokens; this markdown, 192) correlate at -0.05 to -0.22 by layer.
+   Where a token goes now (130 tokens, `ALMOND_DEC_PROF=1`): attn_router 41-53 ms, the expert tier 63-78 ms (CPU
+   experts ~31 ms: 210 of the 336 picks a token; 11% VRAM hits), finish 2.6 ms. The trunk's GPU work is ~0.55 ms a
+   layer (rocprofv3) against ~1.0-1.3 ms of wall time: the rest is the dispatch gap of ~80 kernels a layer; ggml's
+   HIP graphs change nothing (`GGML_CUDA_DISABLE_GRAPHS=1`: 1.03 vs 1.05 ms a KDA layer). Missing: the layer-major batch, the next-layer prediction, cached graphs, conversation reuse, the serve
    path's chat template, project-maya's packs (`glm5next`: their GGUF names one key prefix differently, read already).
 4. **Qwen3.8-Flash-Next**, the same way (Xolotl, Strata and ds4 as references).
 5. **The server stays in Python** (`serve/`, ~9,900 lines: OpenAI / Anthropic API, streaming, chat templates, tool

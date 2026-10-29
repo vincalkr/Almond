@@ -196,6 +196,15 @@ struct GlmTrunk::Impl {
         if (prof) {
             ggml_backend_synchronize(backend);
             const double t2 = pnow();
+            static int dumped[4] = {};
+            if (std::getenv("ALMOND_GLM_PROF_OPS") && !dumped[prof_tag]++) {
+                std::fprintf(stderr, "glmops tag %d:", prof_tag);
+                for (int i = 0; i < ggml_graph_n_nodes(g.gf); ++i) {
+                    ggml_tensor * t = ggml_graph_node(g.gf, i);
+                    std::fprintf(stderr, " %s%s", ggml_op_desc(t), t->op == GGML_OP_MUL_MAT ? (std::string("/") + ggml_type_name(t->src[0]->type)).c_str() : "");
+                }
+                std::fprintf(stderr, "\n");
+            }
             pw[prof_tag] += t1 - t0; pc[prof_tag] += t2 - t1; ++pn[prof_tag]; pnodes[prof_tag] = ggml_graph_n_nodes(g.gf);
             if (++pcalls % (45 * 2 * 64) == 0)
                 for (int i = 0; i < 4; ++i)
@@ -216,7 +225,8 @@ struct GlmTrunk::Impl {
         return ggml_view_3d(c, t, t->ne[0], t->ne[1], n, t->nb[1], t->nb[2], 0);
     }
     ggml_tensor * cols2(ggml_context * c, ggml_tensor * t) const {   // [ne0, n] (or [HC, HC, n] for comb)
-        if (ggml_n_dims(t) == 3) return ggml_view_3d(c, t, t->ne[0], t->ne[1], n, t->nb[1], t->nb[2], 0);
+        // by the tensor, not ggml_n_dims: with one column (--prefill-chunk 1) comb_f [HC, HC, 1] counts as 2-D
+        if (t == comb_f) return ggml_view_3d(c, t, t->ne[0], t->ne[1], n, t->nb[1], t->nb[2], 0);
         return ggml_view_2d(c, t, t->ne[0], n, t->nb[1], 0);
     }
 
@@ -654,6 +664,7 @@ bool GlmTrunk::begin(const int * tids, int n, int pos0) {
     }
     im.n_kv = n == 1 ? std::min<int64_t>(im.CTX, (pos0 + 1 + Impl::kKvStep - 1) / Impl::kKvStep * Impl::kKvStep) : pos0 + n;
     im.kpool_inputs();
+    if (std::getenv("ALMOND_GLM_PROF_OPS")) std::fprintf(stderr, "glm begin pos0 %d n %d n_kv %lld n_new %lld\n", pos0, n, (long long) im.n_kv, (long long) im.n_new);
     std::unique_ptr<Impl::G> tmp;
     Impl::G * g = im.graph(Impl::K_BEGIN, 0, 0, tmp, [&](Impl::G & g) {
         ggml_context * c = g.ctx;
