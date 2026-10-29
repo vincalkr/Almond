@@ -337,7 +337,14 @@ def main() -> int:
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8"))
     models = Models(cfg.get("models") or [], cfg.get("default"), a.child_port, keys[0] if keys else "",
                     a.start_timeout)
-    server = ThreadingHTTPServer((a.host, a.port), make_handler(models, keys, not a.no_autoload))
+    class Server(ThreadingHTTPServer):
+        def handle_error(self, request, client_address):
+            # a client that goes away mid-request (the chat's Ctrl+C) is not an error worth a traceback
+            if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
+                return
+            super().handle_error(request, client_address)
+
+    server = Server((a.host, a.port), make_handler(models, keys, not a.no_autoload))
     server.daemon_threads = True
     if a.load is not None:
         threading.Thread(target=models.ensure, args=(a.load or models.default,), daemon=True).start()
