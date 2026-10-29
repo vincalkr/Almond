@@ -33,6 +33,9 @@ from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
+# GET endpoints that only look (the monitor, llama.cpp's props / slots): with no model loaded they say so instead of
+# loading one
+LOOKS = ("/metrics", "/status", "/props", "/slots", "/api/requests", "/settings", "/config", "/mcp")
 HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authenticate",
        "proxy-connection", "content-length"}
 
@@ -222,6 +225,10 @@ def make_handler(models: Models, api_keys: list, autoload: bool):
             if u.path == "/router/health" or (u.path in ("/health", "/api/health") and not models.alive()):
                 self._json(200, {"status": "ok", "service": "almond-router", "loaded": models.alive(),
                                  "model": models.current, "models": list(models.models)})
+                return
+            if u.path in LOOKS and not models.alive():  # a look loads nothing
+                self._json(503, {"error": {"message": "no model is loaded", "type": "unavailable_error"},
+                                 "models": list(models.models)})
                 return
             want = q.get("model", [None])[0]            # llama.cpp's ?model= on GET endpoints
             if not self._route(want, q):

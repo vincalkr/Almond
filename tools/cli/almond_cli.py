@@ -483,11 +483,23 @@ def monitor_text(m: dict, model: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+def idle_text(api: Api) -> str:
+    """The router with no model loaded: its models, nothing else to show."""
+    data = api.get("/v1/models").get("data") or []
+    lines = [f"{BOLD}no model loaded{RESET} - the first request (or ./almond -m NAME) loads one"]
+    for x in data:
+        st = (x.get("status") or {}).get("value", "?")
+        lines.append(f"  {x['id']:<40} {st:<9} context {x.get('max_context') or '?'}")
+    return "\n".join(lines)
+
+
 def run_monitor(api: Api):
     try:
         while True:
             try:
-                text = monitor_text(api.get("/metrics"))
+                h = api.get("/health")
+                text = idle_text(api) if h.get("service") == "almond-router" and not h.get("loaded") else \
+                    monitor_text(api.get("/metrics"))
             except (OSError, RuntimeError, ValueError, http.client.HTTPException) as e:
                 text = f"{RED}{e}{RESET}"
             sys.stdout.write("\x1b[H\x1b[2J" + text + f"\n{DIM}(Ctrl+C leaves){RESET}\n" if TTY else text + "\n")
@@ -495,6 +507,8 @@ def run_monitor(api: Api):
             time.sleep(1)
     except KeyboardInterrupt:
         print()
+    except BrokenPipeError:             # (piped into head, say)
+        pass
 
 
 def read_input(prompt: str) -> str:
@@ -561,15 +575,15 @@ def main() -> int:
 
     api = Api(a.url, a.api_key)
     started = None
+    if a.monitor:                       # a look, never a start: nothing is loaded for it
+        if not api.up():
+            raise SystemExit(f"almond: nothing answers at {a.url} (./run.sh --router, or ./almond, starts it)")
+        run_monitor(api)
+        return 0
     if not api.up():
         if a.no_start or api.host not in ("127.0.0.1", "localhost"):
             raise SystemExit(f"almond: nothing answers at {a.url}")
         started = start_router(api, api.port)
-    if a.monitor:
-        if not api.up():
-            raise SystemExit(f"almond: nothing answers at {a.url}")
-        run_monitor(api)
-        return 0
     chat = Chat(api, a)
     try:
         chat.pick(a.model)
