@@ -13,7 +13,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <tuple>
 #include <vector>
 
 using namespace almond;
@@ -92,7 +94,11 @@ struct GlmTrunk::Impl {
 
     // ---- the pass
     int pos0 = 0, n = 0;
-    std::vector<float> host_emb, host_fn, host_wts, host_x;
+    std::vector<float> host_emb, host_fn, host_wts, host_x, host_routed;
+    // the cells the pass's attention reads: pos0 + n, rounded up to a multiple of kKvStep for a one-token pass so
+    // its cached graphs are rebuilt once every kKvStep tokens (the extra cells are masked: never selected)
+    static constexpr int64_t kKvStep = 256;
+    int64_t n_kv = 0;
     std::vector<int32_t> host_ids;
     // k-pool inputs of the pass (set_input_kpool for one sequence: cell = position, pools of KP consecutive cells)
     int64_t n_pool = 0, n_new = 0, n_top = 0, n_sel = 0;
@@ -103,6 +109,7 @@ struct GlmTrunk::Impl {
     ggml_gallocr_t galloc = nullptr;
 
     ~Impl() {
+        cache.clear();
         if (galloc) ggml_gallocr_free(galloc);
         if (sbuf) ggml_backend_buffer_free(sbuf);
         if (sctx) ggml_free(sctx);
@@ -118,12 +125,35 @@ struct GlmTrunk::Impl {
     ggml_tensor * BL(int il, const char * s) const { return W("blk." + std::to_string(il) + "." + s); }
 
     // ---------------------------------------------------------------- graph helpers
+    // A graph and the host buffers its inputs are read from at every run (Impl members: their contents change per
+    // pass, the objects do not).  A one-token pass's graphs are kept (`cache`, each with its own allocator) and run
+    // again; a longer pass builds its graphs per call on the shared allocator.
     struct G {
         ggml_context * ctx = nullptr;
         ggml_cgraph * gf = nullptr;
-        std::vector<std::pair<ggml_tensor *, std::vector<uint8_t>>> inputs;
-        ~G() { if (ctx) ggml_free(ctx); }
+        ggml_gallocr_t ga = nullptr;
+        std::vector<std::pair<ggml_tensor *, std::function<const void *()>>> inputs;
+        std::vector<ggml_tensor *> out;
+        ~G() { if (ga) ggml_gallocr_free(ga); if (ctx) ggml_free(ctx); }
     };
+    enum Kind { K_BEGIN, K_AR, K_FIN, K_LOGITS };
+    std::map<std::tuple<int, int, int64_t>, std::unique_ptr<G>> cache;
+    // the graph for (kind, il): the cached one for a one-token pass (built by `build` the first time), else a new one
+    G * graph(int kind, int il, int64_t kv, std::unique_ptr<G> & tmp, const std::function<void(G &)> & build) {
+        if (n == 1) {
+            std::unique_ptr<G> & slot = cache[{ kind, il, kv }];
+            if (!slot) {
+                slot = std::make_unique<G>();
+                open(*slot);
+                build(*slot);
+            }
+            return slot.get();
+        }
+        tmp = std::make_unique<G>();
+        open(*tmp);
+        build(*tmp);
+        return tmp.get();
+    }
     void open(G & g) {
         ggml_init_params ip = { ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(16384, false), nullptr, true };
         g.ctx = ggml_init(ip);
@@ -135,14 +165,21 @@ struct GlmTrunk::Impl {
         for (int64_t x : ne) d[k++] = x;
         ggml_tensor * x = ggml_new_tensor(g.ctx, t, k, d);
         ggml_set_input(x);
-        std::vector<uint8_t> b((uint8_t *) v.data(), (uint8_t *) v.data() + ggml_nbytes(x));
-        g.inputs.push_back({ x, std::move(b) });
+        const std::vector<T> * src = &v;
+        g.inputs.push_back({ x, [src]() { return (const void *) src->data(); } });
         return x;
     }
-    bool run(G & g) {
-        if (!galloc) galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-        if (!ggml_gallocr_alloc_graph(galloc, g.gf)) { err = "glm: graph allocation failed"; return false; }
-        for (auto & in : g.inputs) ggml_backend_tensor_set(in.first, in.second.data(), 0, in.second.size());
+    bool run(G & g, bool kept) {
+        if (kept) {   // allocated once, in its own buffer: nothing else runs there
+            if (!g.ga) {
+                g.ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+                if (!ggml_gallocr_alloc_graph(g.ga, g.gf)) { err = "glm: graph allocation failed"; return false; }
+            }
+        } else {
+            if (!galloc) galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+            if (!ggml_gallocr_alloc_graph(galloc, g.gf)) { err = "glm: graph allocation failed"; return false; }
+        }
+        for (auto & in : g.inputs) ggml_backend_tensor_set(in.first, in.second(), 0, ggml_nbytes(in.first));
         if (ggml_backend_graph_compute(backend, g.gf) != GGML_STATUS_SUCCESS) { err = "glm: graph compute failed"; return false; }
         return true;
     }
@@ -272,17 +309,15 @@ struct GlmTrunk::Impl {
 
     // ---------------------------------------------------------------- the k-pool indexer (build_kpool_select)
     // the selection mask [n_kv, n] (0 = attended, -inf = not)
-    ggml_tensor * kpool_select(G & g, ggml_tensor * cur, ggml_tensor * qr, int il) {
+    ggml_tensor * kpool_select(G & g, ggml_tensor * cur, ggml_tensor * qr, ggml_tensor * kid, int il) {
         ggml_context * c = g.ctx;
         const Layer & L = ly[(size_t) il];
-        const int64_t n_kv = pos0 + n;
         ggml_tensor * iq = ggml_reshape_3d(c, ggml_mul_mat(c, BL(il, "indexer.attn_q_b.weight"), qr), ID, IH, n);
         ggml_tensor * ik = ggml_mul_mat(c, BL(il, "indexer.attn_k.weight"), cur);
         ik = ggml_add(c, ggml_mul(c, ggml_norm(c, ik, eps_norm), BL(il, "indexer.k_norm.weight")), BL(il, "indexer.k_norm.bias"));
         ggml_tensor * ig = ggml_mul_mat(c, BL(il, "indexer_compressor_gate.weight"), cur);
         ggml_tensor * pz = ggml_fill(c, ggml_new_tensor_2d(c, GGML_TYPE_F32, ID, n), 0.0f);
         ggml_tensor * packed = ggml_concat(c, ggml_concat(c, ik, ig, 0), pz, 0);   // [3*ID, n]
-        ggml_tensor * kid = input(g, GGML_TYPE_I64, { n }, k_idxs);
         ggml_build_forward_expand(g.gf, ggml_set_rows(c, L.idx, packed, kid));
         ggml_tensor * key_gate = ggml_view_2d(c, L.idx, 2 * ID, CTX, L.idx->nb[1], 0);
         ggml_tensor * pooledv = ggml_view_2d(c, L.idx, ID, CTX, L.idx->nb[1], ggml_row_size(L.idx->type, 2 * ID));
@@ -331,20 +366,19 @@ struct GlmTrunk::Impl {
     ggml_tensor * dsa(G & g, ggml_tensor * cur, int il) {
         ggml_context * c = g.ctx;
         const Layer & L = ly[(size_t) il];
-        const int64_t n_kv = pos0 + n;
         ggml_tensor * qr = rms(c, ggml_mul_mat(c, BL(il, "attn_q_a.weight"), cur), BL(il, "attn_q_a_norm.weight"));
         ggml_tensor * q = ggml_reshape_3d(c, ggml_mul_mat(c, BL(il, "attn_q_b.weight"), qr), DKM, NH, n);
         ggml_tensor * kv = rms(c, ggml_mul_mat(c, BL(il, "attn_kv_a_mqa.weight"), cur), BL(il, "attn_kv_a_norm.weight"));
-        // the latent cache rows of this pass
-        ggml_tensor * dst = ggml_view_2d(c, L.mla, KVL, n, L.mla->nb[2], (size_t) pos0 * L.mla->nb[2]);
-        ggml_build_forward_expand(g.gf, ggml_cpy(c, kv, dst));
+        // the latent cache rows of this pass (by position: an input, so a kept graph serves every position)
+        ggml_tensor * kid = input(g, GGML_TYPE_I64, { n }, k_idxs);
+        ggml_build_forward_expand(g.gf, ggml_set_rows(c, ggml_reshape_2d(c, L.mla, KVL, CTX), kv, kid));
         // absorb wk_b: the query in latent space [KVL, NH, n]
         ggml_tensor * qa = ggml_mul_mat(c, BL(il, "attn_k_b.weight"), ggml_permute(c, q, 0, 2, 1, 3));   // [KVL, n, NH]
         // the mask: this layer's own indexer, or the last full indexer's (sel_buf)
         ggml_tensor * selv = ggml_view_2d(c, sel_buf, n_kv, n, n_kv * 4, 0);
         ggml_tensor * mask;
         if (idx_full[(size_t) il]) {
-            ggml_tensor * sel = kpool_select(g, cur, qr, il);
+            ggml_tensor * sel = kpool_select(g, cur, qr, kid, il);
             ggml_build_forward_expand(g.gf, ggml_cpy(c, sel, selv));
             mask = sel;
         } else {
@@ -363,9 +397,9 @@ struct GlmTrunk::Impl {
 
     // ---------------------------------------------------------------- the pass's k-pool inputs
     void kpool_inputs() {
-        const int64_t n_kv = pos0 + n;
-        const int64_t complete = n_kv / KP;              // pools whose cells all exist after this pass
-        n_pool = std::max<int64_t>(complete, 1) + 1;     // padded by one, as llama.cpp's always-present dummy
+        const int64_t complete = (pos0 + n) / KP;        // pools whose cells all exist after this pass
+        // padded by one past the cells read (llama.cpp's always-present dummy); the padding pools are masked
+        n_pool = std::max<int64_t>(n_kv / KP, 1) + 1;
         n_top = std::min<int64_t>(n_pool, ITOP / KP);
         n_sel = KP * n_top + (sel_tail ? KP - 1 : 0);
         const int32_t sentinel = (int32_t) n_kv;
@@ -575,64 +609,71 @@ bool GlmTrunk::begin(const int * tids, int n, int pos0) {
         if (tids[i] < 0 || tids[i] >= im.NV) { im.err = "glm: token id out of range"; return false; }
         tr->to_float(im.embd + (size_t) tids[i] * im.embd_row, im.host_emb.data() + (size_t) i * im.D, im.D);
     }
+    im.n_kv = n == 1 ? std::min<int64_t>(im.CTX, (pos0 + 1 + Impl::kKvStep - 1) / Impl::kKvStep * Impl::kKvStep) : pos0 + n;
     im.kpool_inputs();
-    Impl::G g;
-    im.open(g);
-    ggml_context * c = g.ctx;
-    ggml_tensor * e = im.input(g, GGML_TYPE_F32, { im.D, 1, n }, im.host_emb);
-    ggml_tensor * x = ggml_repeat_4d(c, e, im.D, im.HC, n, 1);
-    ggml_build_forward_expand(g.gf, ggml_cpy(c, x, im.cols3(c, im.x_state)));
-    return im.run(g);
+    std::unique_ptr<Impl::G> tmp;
+    Impl::G * g = im.graph(Impl::K_BEGIN, 0, 0, tmp, [&](Impl::G & g) {
+        ggml_context * c = g.ctx;
+        ggml_tensor * e = im.input(g, GGML_TYPE_F32, { im.D, 1, im.n }, im.host_emb);
+        ggml_tensor * x = ggml_repeat_4d(c, e, im.D, im.HC, im.n, 1);
+        ggml_build_forward_expand(g.gf, ggml_cpy(c, x, im.cols3(c, im.x_state)));
+    });
+    return im.run(*g, !tmp);
 }
 
 bool GlmTrunk::attn_router(int il, int * ids, float * wts, const float ** fn_host, ggml_tensor ** fn_dev) {
     Impl & im = *p_;
     if (fn_dev) *fn_dev = nullptr;
     const int n = im.n;
-    Impl::G g;
-    im.open(g);
-    ggml_context * c = g.ctx;
-    ggml_tensor * x = im.cols3(c, im.x_state);
-    // attention half
-    Impl::HcPre ah = im.hc_pre(c, x, im.BL(il, "hc_attn_fn.weight"), im.BL(il, "hc_attn_scale.weight"), im.BL(il, "hc_attn_base.weight"));
-    ggml_tensor * an = im.rms(c, ah.cur, im.BL(il, "attn_norm.weight"));
-    ggml_tensor * cur = im.recr[(size_t) il] ? im.kda(g, an, il) : im.dsa(g, an, il);
-    static const bool dbg = std::getenv("ALMOND_GLM_DEBUG") != nullptr;
-    if (dbg) { ggml_set_output(an); ggml_set_output(cur); ggml_build_forward_expand(g.gf, an); ggml_build_forward_expand(g.gf, cur); }
-    ggml_tensor * x1 = im.hc_post(c, cur, x, ah.post, ah.comb);
-    ggml_build_forward_expand(g.gf, ggml_cpy(c, x1, im.cols3(c, im.hres)));
-    // FFN half up to the routed experts' input
-    Impl::HcPre fh = im.hc_pre(c, x1, im.BL(il, "hc_ffn_fn.weight"), im.BL(il, "hc_ffn_scale.weight"), im.BL(il, "hc_ffn_base.weight"));
-    ggml_build_forward_expand(g.gf, ggml_cpy(c, ggml_cont(c, fh.post), im.cols2(c, im.post_f)));
-    ggml_build_forward_expand(g.gf, ggml_cpy(c, ggml_cont(c, fh.comb), im.cols2(c, im.comb_f)));
-    ggml_tensor * fn = im.rms(c, fh.cur, im.BL(il, "ffn_norm.weight"));
-    ggml_set_output(fn);
-    ggml_build_forward_expand(g.gf, fn);
     const bool dense = il < im.NDENSE;
-    ggml_tensor * sel = nullptr, * w = nullptr;
-    if (dense) {
-        ggml_tensor * o = im.ffn(c, fn, im.BL(il, "ffn_up.weight"), im.BL(il, "ffn_gate.weight"), im.BL(il, "ffn_down.weight"),
-                                 im.clamp_shexp[(size_t) il]);
-        ggml_build_forward_expand(g.gf, ggml_cpy(c, o, im.cols2(c, im.fout)));
-    } else {
-        ggml_tensor * o = im.ffn(c, fn, im.BL(il, "ffn_up_shexp.weight"), im.BL(il, "ffn_gate_shexp.weight"),
-                                 im.BL(il, "ffn_down_shexp.weight"), im.clamp_shexp[(size_t) il]);
-        ggml_build_forward_expand(g.gf, ggml_cpy(c, o, im.cols2(c, im.fout)));
-        // build_moe_ffn's router: sigmoid, the selection bias for picking only, weights from the unbiased probs
-        ggml_tensor * probs = ggml_sigmoid(c, ggml_mul_mat(c, im.BL(il, "ffn_gate_inp.weight"), fn));      // [NE, n]
-        ggml_tensor * sp = ggml_add(c, probs, im.BL(il, "exp_probs_b.bias"));
-        // argsort_top_k is a view (the first NU of each sorted row): contiguous before it is read back
-        sel = ggml_argsort_top_k(c, sp, (int) im.NU);                                                        // [NU, n]
-        w = ggml_reshape_2d(c, ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, im.NE, n), sel), im.NU, n);
-        if (im.w_norm) w = ggml_div(c, w, ggml_sum_rows(c, w));
-        w = ggml_scale(c, w, im.w_scale);
-        sel = ggml_cont(c, sel);
-        ggml_set_output(sel);
-        ggml_set_output(w);
-        ggml_build_forward_expand(g.gf, sel);
-        ggml_build_forward_expand(g.gf, w);
-    }
-    if (!im.run(g)) return false;
+    static const bool dbg = std::getenv("ALMOND_GLM_DEBUG") != nullptr;
+    std::unique_ptr<Impl::G> tmp;
+    // out: fn, [sel, w], [attn_norm, mixer, x1 when debugging]
+    Impl::G * g = im.graph(Impl::K_AR, il, im.recr[(size_t) il] ? 0 : im.n_kv, tmp, [&](Impl::G & g) {
+        ggml_context * c = g.ctx;
+        ggml_tensor * x = im.cols3(c, im.x_state);
+        Impl::HcPre ah = im.hc_pre(c, x, im.BL(il, "hc_attn_fn.weight"), im.BL(il, "hc_attn_scale.weight"), im.BL(il, "hc_attn_base.weight"));
+        ggml_tensor * an = im.rms(c, ah.cur, im.BL(il, "attn_norm.weight"));
+        ggml_tensor * cur = im.recr[(size_t) il] ? im.kda(g, an, il) : im.dsa(g, an, il);
+        ggml_tensor * x1 = im.hc_post(c, cur, x, ah.post, ah.comb);
+        ggml_build_forward_expand(g.gf, ggml_cpy(c, x1, im.cols3(c, im.hres)));
+        Impl::HcPre fh = im.hc_pre(c, x1, im.BL(il, "hc_ffn_fn.weight"), im.BL(il, "hc_ffn_scale.weight"), im.BL(il, "hc_ffn_base.weight"));
+        ggml_build_forward_expand(g.gf, ggml_cpy(c, ggml_cont(c, fh.post), im.cols2(c, im.post_f)));
+        ggml_build_forward_expand(g.gf, ggml_cpy(c, ggml_cont(c, fh.comb), im.cols2(c, im.comb_f)));
+        ggml_tensor * fn = im.rms(c, fh.cur, im.BL(il, "ffn_norm.weight"));
+        ggml_set_output(fn);
+        ggml_build_forward_expand(g.gf, fn);
+        g.out = { fn, nullptr, nullptr };
+        if (dense) {
+            ggml_tensor * o = im.ffn(c, fn, im.BL(il, "ffn_up.weight"), im.BL(il, "ffn_gate.weight"), im.BL(il, "ffn_down.weight"),
+                                     im.clamp_shexp[(size_t) il]);
+            ggml_build_forward_expand(g.gf, ggml_cpy(c, o, im.cols2(c, im.fout)));
+        } else {
+            ggml_tensor * o = im.ffn(c, fn, im.BL(il, "ffn_up_shexp.weight"), im.BL(il, "ffn_gate_shexp.weight"),
+                                     im.BL(il, "ffn_down_shexp.weight"), im.clamp_shexp[(size_t) il]);
+            ggml_build_forward_expand(g.gf, ggml_cpy(c, o, im.cols2(c, im.fout)));
+            // build_moe_ffn's router: sigmoid, the selection bias for picking only, weights from the unbiased probs
+            ggml_tensor * probs = ggml_sigmoid(c, ggml_mul_mat(c, im.BL(il, "ffn_gate_inp.weight"), fn));      // [NE, n]
+            ggml_tensor * sp = ggml_add(c, probs, im.BL(il, "exp_probs_b.bias"));
+            // argsort_top_k is a view (the first NU of each sorted row): contiguous before it is read back
+            ggml_tensor * sel = ggml_argsort_top_k(c, sp, (int) im.NU);                                          // [NU, n]
+            ggml_tensor * w = ggml_reshape_2d(c, ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, im.NE, n), sel), im.NU, n);
+            if (im.w_norm) w = ggml_div(c, w, ggml_sum_rows(c, w));
+            w = ggml_scale(c, w, im.w_scale);
+            sel = ggml_cont(c, sel);
+            ggml_set_output(sel);
+            ggml_set_output(w);
+            ggml_build_forward_expand(g.gf, sel);
+            ggml_build_forward_expand(g.gf, w);
+            g.out[1] = sel;
+            g.out[2] = w;
+        }
+        if (dbg) {
+            for (ggml_tensor * t : { an, cur, x1 }) { ggml_set_output(t); ggml_build_forward_expand(g.gf, t); g.out.push_back(t); }
+        }
+    });
+    if (!im.run(*g, !tmp)) return false;
+    ggml_tensor * fn = g->out[0];
     if (dbg) {
         auto sum = [](ggml_tensor * t) {
             std::vector<float> v((size_t) ggml_nelements(t));
@@ -641,16 +682,16 @@ bool GlmTrunk::attn_router(int il, int * ids, float * wts, const float ** fn_hos
             for (float f : v) s += f;
             return s;
         };
-        std::fprintf(stderr, "glmdbg L%d attn_norm %.6f mixer_out %.6f hc_attn_post %.6f ffn_norm %.6f\n", il, sum(an), sum(cur),
-                     sum(x1), sum(fn));
+        std::fprintf(stderr, "glmdbg L%d attn_norm %.6f mixer_out %.6f hc_attn_post %.6f ffn_norm %.6f\n", il, sum(g->out[3]),
+                     sum(g->out[4]), sum(g->out[5]), sum(fn));
     }
     im.host_fn.resize((size_t) (im.D * n));
     ggml_backend_tensor_get(fn, im.host_fn.data(), 0, im.host_fn.size() * 4);
     if (dense) {
         for (int64_t i = 0; i < im.NU * n; ++i) { ids[i] = -1; wts[i] = 0.0f; }
     } else {
-        ggml_backend_tensor_get(sel, ids, 0, (size_t) (im.NU * n) * 4);
-        ggml_backend_tensor_get(w, wts, 0, (size_t) (im.NU * n) * 4);
+        ggml_backend_tensor_get(g->out[1], ids, 0, (size_t) (im.NU * n) * 4);
+        ggml_backend_tensor_get(g->out[2], wts, 0, (size_t) (im.NU * n) * 4);
     }
     *fn_host = im.host_fn.data();
     if (dbg && !dense) {
@@ -664,50 +705,63 @@ bool GlmTrunk::attn_router(int il, int * ids, float * wts, const float ** fn_hos
 bool GlmTrunk::finish(int il, const float * routed_sum) {
     Impl & im = *p_;
     const int n = im.n;
-    Impl::G g;
-    im.open(g);
-    ggml_context * c = g.ctx;
-    ggml_tensor * out = im.cols2(c, im.fout);
-    if (il >= im.NDENSE) {
+    const bool routed = il >= im.NDENSE;
+    if (routed) {
         if (!routed_sum) { im.err = "glm: the routed sum must come from the host"; return false; }
-        std::vector<float> r(routed_sum, routed_sum + (size_t) (im.D * n));
-        static const bool dbg0 = std::getenv("ALMOND_GLM_DEBUG") != nullptr;
-        if (dbg0) { double s = 0; for (float f : r) s += f; std::fprintf(stderr, "glmdbg L%d moe_out %.6f\n", il, s); }
-        out = ggml_add(c, out, im.input(g, GGML_TYPE_F32, { im.D, n }, r));
+        im.host_routed.assign(routed_sum, routed_sum + (size_t) (im.D * n));
     }
-    ggml_tensor * x = im.hc_post(c, out, im.cols3(c, im.hres), im.cols2(c, im.post_f), im.cols2(c, im.comb_f));
-    ggml_build_forward_expand(g.gf, ggml_cpy(c, x, im.cols3(c, im.x_state)));
     static const bool dbg = std::getenv("ALMOND_GLM_DEBUG") != nullptr;
-    if (dbg) { ggml_set_output(x); ggml_set_output(out); }
-    if (!im.run(g)) return false;
+    std::unique_ptr<Impl::G> tmp;
+    Impl::G * g = im.graph(Impl::K_FIN, il, 0, tmp, [&](Impl::G & g) {
+        ggml_context * c = g.ctx;
+        ggml_tensor * out = im.cols2(c, im.fout);
+        if (routed) out = ggml_add(c, out, im.input(g, GGML_TYPE_F32, { im.D, n }, im.host_routed));
+        ggml_tensor * x = im.hc_post(c, out, im.cols3(c, im.hres), im.cols2(c, im.post_f), im.cols2(c, im.comb_f));
+        ggml_build_forward_expand(g.gf, ggml_cpy(c, x, im.cols3(c, im.x_state)));
+        if (dbg) { ggml_set_output(x); ggml_set_output(out); g.out = { x, out }; }
+    });
+    if (!im.run(*g, !tmp)) return false;
     if (dbg) {
-        std::vector<float> v((size_t) ggml_nelements(x)), o((size_t) ggml_nelements(out));
-        ggml_backend_tensor_get(x, v.data(), 0, v.size() * 4);
-        ggml_backend_tensor_get(out, o.data(), 0, o.size() * 4);
-        double s = 0, so = 0;
-        for (float f : v) s += f;
-        for (float f : o) so += f;
-        std::fprintf(stderr, "glmdbg L%d ffn_out %.6f l_out %.6f\n", il, so, s);
+        auto sum = [](ggml_tensor * t) {
+            std::vector<float> v((size_t) ggml_nelements(t));
+            ggml_backend_tensor_get(t, v.data(), 0, v.size() * 4);
+            double s = 0;
+            for (float f : v) s += f;
+            return s;
+        };
+        if (routed) { double s = 0; for (float f : im.host_routed) s += f; std::fprintf(stderr, "glmdbg L%d moe_out %.6f\n", il, s); }
+        std::fprintf(stderr, "glmdbg L%d ffn_out %.6f l_out %.6f\n", il, sum(g->out[1]), sum(g->out[0]));
     }
     return true;
 }
 
 bool GlmTrunk::logits(int row0, int nrows, float * out) {
     Impl & im = *p_;
-    Impl::G g;
-    im.open(g);
-    ggml_context * c = g.ctx;
-    ggml_tensor * xs = ggml_view_3d(c, im.x_state, im.D, im.HC, nrows, im.x_state->nb[1], im.x_state->nb[2],
-                                    (size_t) row0 * im.x_state->nb[2]);
-    // build_hc_mean
-    ggml_tensor * acc = ggml_view_2d(c, xs, im.D, nrows, xs->nb[2], 0);
-    for (int64_t s = 1; s < im.HC; ++s) acc = ggml_add(c, acc, ggml_view_2d(c, xs, im.D, nrows, xs->nb[2], s * xs->nb[1]));
-    ggml_tensor * h = im.rms(c, ggml_scale(c, acc, 1.0f / (float) im.HC), im.W("output_norm.weight"));
-    ggml_tensor * lg = ggml_mul_mat(c, im.W("output.weight"), h);
-    ggml_set_output(lg);
-    ggml_build_forward_expand(g.gf, lg);
-    if (!im.run(g)) return false;
-    ggml_backend_tensor_get(lg, out, 0, (size_t) nrows * (size_t) im.NV * 4);
+    std::unique_ptr<Impl::G> tmp;
+    auto build = [&](Impl::G & g) {
+        ggml_context * c = g.ctx;
+        ggml_tensor * xs = ggml_view_3d(c, im.x_state, im.D, im.HC, nrows, im.x_state->nb[1], im.x_state->nb[2],
+                                        (size_t) row0 * im.x_state->nb[2]);
+        // build_hc_mean
+        ggml_tensor * acc = ggml_view_2d(c, xs, im.D, nrows, xs->nb[2], 0);
+        for (int64_t s = 1; s < im.HC; ++s) acc = ggml_add(c, acc, ggml_view_2d(c, xs, im.D, nrows, xs->nb[2], s * xs->nb[1]));
+        ggml_tensor * h = im.rms(c, ggml_scale(c, acc, 1.0f / (float) im.HC), im.W("output_norm.weight"));
+        ggml_tensor * lg = ggml_mul_mat(c, im.W("output.weight"), h);
+        ggml_set_output(lg);
+        ggml_build_forward_expand(g.gf, lg);
+        g.out = { lg };
+    };
+    Impl::G * g;
+    if (im.n == 1 && row0 == 0 && nrows == 1) {
+        g = im.graph(Impl::K_LOGITS, 0, 0, tmp, build);
+    } else {
+        tmp = std::make_unique<Impl::G>();
+        im.open(*tmp);
+        build(*tmp);
+        g = tmp.get();
+    }
+    if (!im.run(*g, !tmp)) return false;
+    ggml_backend_tensor_get(g->out[0], out, 0, (size_t) nrows * (size_t) im.NV * 4);
     return true;
 }
 

@@ -69,7 +69,12 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
 
    Per-layer sums (`ALMOND_GLM_DEBUG=1` against `llama-eval-callback`, 20 tokens) agree within ~1% through layer 7.
    Prompt 12.1 tok/s (chunked, --prefill-chunk 64, arena 20 GiB, graphs rebuilt per call, no VRAM cache during the
-   prompt). Missing: the layer-major batch, the next-layer prediction, cached graphs, conversation reuse, the serve
+   prompt).
+   **Cached decode graphs (2026-10-29):** each layer's graphs are built once and kept (the MLA layers per 256 cells
+   of context), allocated once in their own buffers. Exact: the same PPL to four decimals (10.5520 over all 511
+   tokens, top-1 0.546). Decode, 128-token prompt, 64 tokens, arena 60 GiB, peer card 22 GiB: 2.91 -> 3.58 tok/s;
+   the prompt 2.1 -> 15.0 tok/s. Still slow because only 8.7% of the experts hit VRAM (no GLM rank file) and the peer
+   card computes no rows. Missing: the layer-major batch, the next-layer prediction, cached graphs, conversation reuse, the serve
    path's chat template, project-maya's packs (`glm5next`: their GGUF names one key prefix differently, read already).
 4. **Qwen3.8-Flash-Next**, the same way (Xolotl, Strata and ds4 as references).
 5. **The server stays in Python** (`serve/`, ~9,900 lines: OpenAI / Anthropic API, streaming, chat templates, tool
