@@ -1,0 +1,117 @@
+# Generated, not source: deterministic build products of tools/ (see docs/).
+# tiny-qwen4exp.gguf is ~113 MB, over GitHub's 100 MB file limit -- regenerate with
+#   python tools/make_tiny_model.py
+bench/tiny-*.gguf
+bench/wide-*.gguf
+bench/micro/*.exe
+bench/micro/*.obj
+bench/micro/*.bin
+bench/micro/*.dll
+bench/micro/*.txt
+*.log
+build*/
+pack/
+logs/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# plan v0.3 P1 (repository hygiene, review E1): profiler captures and large diagnostic dumps stay out of git.
+*.nsys-rep
+
+# Pi harness metadata (local session state, not project source)
+*.sqlite
+*.npz
+*.occ1
+td.log
+
+# created by setup.py on the user's machine
+/.venv/
+/build/
+/third_party/llama.cpp/*
+!/third_party/llama.cpp/ggml/
+!/third_party/llama.cpp/LICENSE
+!/third_party/llama.cpp/VENDORED.md
+*.orig
+*.rej
+/models/
+/packs/
+/mtp/
+/run-*.bat
+/run-*.sh
+!/run.sh
+!/stop.sh
+/almond-*.json
+/almond-*.log
+/build-almond.bat
+/build-almond-cuda12.bat
+/build-cuda12/
+/.almond-mcp/
+
+# image encoder (setup.py --vision): build output and the generated build script
+build-vision*/
+build-vision.bat
+build-vision-cuda12.bat
+
+# setup.py outputs (engine, downloads) and release builds
+/engine/
+/engine-cuda12/
+/build-release*/
+/dist/
+*.done
+/third_party/*.zip
+
+# IDEs
+.vscode/
+.idea/
+.cursor/
+
+/.ccache/
+/.rocm-win/
+
+# The AMD/HIP port's local run artifacts (docs/ds4/AMD_HIP_NOTES.md): the Engram sources and tables, the prompt
+# dumps and the HF cache are data (hundreds of GB), not source.  local/*.py and local/*.json are kept.
+/local/engram-src/
+/local/engram/
+/local/prompts/
+/local/*.bin
+!/local/rank.bin
+/local/*.ids
+/.hf-cache/
+/.run/
+
+# our launcher is part of this branch (the run-*.sh files the setup generates are not)
+!/run.sh
+/local/calib/stats/
+/local/calib/stats-corpus/
+/local/calib/stats-circles/
+/local/stats-chat-merged/
+
+# the per-run logs of the measurement sweeps stay local; the summaries and the reference tokens are kept
+/local/sweep-*/*
+!/local/sweep-*/summary.txt
+!/local/sweep-*/ref-*.ids
+
+# Measurement and debugging output stays local (2026-10-21): rank builds' merged stats, evaluation runs (only each
+# run's score.json is kept), logit / hidden-state dumps, profiler CSVs, attempt patches, core dumps
+/local/*.stats/
+/local/eval-lucebox/*/*
+!/local/eval-lucebox/*/score.json
+/local/eval-lucebox/eval.out
+*.dump
+*.f32
+/local/**/*.csv
+/local/*.patch
+core
+core.[0-9]*
+/local/ram-bench/*
+!/local/ram-bench/summary.txt
+
+/local/conv-cache-rco/
+/local/routes-rco/
+# rocprofv3 traces (~50 MB a run): the per-token summaries are in the docs
+/local/sweep-prof-rco/trace-*/
+# working notes and reviews, kept on this box
+/local/reports/
+/models
+/.venv

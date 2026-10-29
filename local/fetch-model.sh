@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# fetch-model.sh [DEST] - the checkpoint's FP8 Engram rows (and the image encoder) for DeepSeek-V4.1-Flash-1017:
+#
+#   DEST/engram-1017/layers1/engram-L1.safetensors     the two Engram tables, extracted from a source GGUF that carries
+#   DEST/engram-1017/layers14/engram-L14.safetensors   them (local/ds4-engram-extract.py, 101 GB each) + their index
+#   DEST/engram-src/                                   that source GGUF (366 GB); it can be deleted once both tables
+#                                                      are out
+#   DEST/vision-1017/DeepSeek-V4.1-Flash-1017-Vision.gguf   0.9 GiB, the image encoder, built from the 1017
+#                                                           checkpoint by tools/v41/vision/make_vision_gguf.py
+#
+# The pack's own iq4_nl table (local/fetch-rco-1017.sh) measures the same on Lucebox; these are the checkpoint's own
+# rows. DEST defaults to <repo>/models.  Needs curl, python3 with numpy (the extraction), and aria2c for a fast
+# download; ~570 GB free while both the source and the tables are there.  Resumable: a file counts as complete when its
+# size matches the Hugging Face API's; the source is checked against its sha256 (the API's LFS id) once.
+#
+# Env: CONN=4 (aria2c connections per file), ARIA2=0 (force curl), DRY_RUN=1 (print the plan, change nothing),
+#      SKIP_SHA=1 (skip the 366 GB sha256), HF_TOKEN, VISION=0 (no image encoder).
+set -euo pipefail
+export LC_ALL=C LANG=C
+trap 'trap - INT TERM; kill 0 2>/dev/null' INT TERM
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+DEST=${1:-$HERE/models}
+SRC_REPO=antirez/deepseek-v4.1-flash-gguf
+SRC_FILE=DeepSeek-V4.1-Flash-1017-IQ2_XXS-Q2_K-imatrix.gguf
+CONN=${CONN:-4}
+DRY_RUN=${DRY_RUN:-0}
+TOKEN=${HF_TOKEN:-$(cat "$HOME/.cache/huggingface/token" 2>/dev/null || true)}
+AUTH=(); ARIA2_HDR=()
+if [ -n "$TOKEN" ]; then AUTH=(-H "Authorization: Bearer $TOKEN"); ARIA2_HDR=(--header="Authorization: Bearer $TOKEN"); fi
+ARIA2=${ARIA2:-}; if [ -z "$ARIA2" ]; then if command -v aria2c >/dev/null 2>&1; then ARIA2=1; else ARIA2=0; fi; fi
+PY=python3; [ -x "$HERE/.venv/bin/python" ] && "$HERE/.venv/bin/python" -c 'import numpy' 2>/dev/null && PY="$HERE/.venv/bin/python"
+
+SRC=$DEST/engram-src
+ENG=$DEST/engram-1017
+mkdir -p "$SRC" "$ENG"
+say() { echo "$(date '+%F %T') $*"; }
+size() { stat -c%s "$1" 2>/dev/null || echo 0; }
+meta() {   # meta <repo> <path> -> "<size> <sha256 or ->"
+  curl -sSf "${AUTH[@]}" "https://huggingface.co/api/models/$1/tree/main?recursive=1" | "$PY" -c '
+import json, sys
+for f in json.load(sys.stdin):
+    if f.get("path") == sys.argv[1]: print(f.get("size", 0), (f.get("lfs") or {}).get("oid", "-"))' "$2"
+}
+get() {   # get <repo> <path-in-repo> <dest-file> <size>
+  local repo=$1 path=$2 out=$3 want=$4
+  if [ "$(size "$out")" = "$want" ]; then say "have  $path"; return 0; fi
+  say "get   $path ($(size "$out") of $want B)"
+  [ "$DRY_RUN" = 1 ] && return 0
+  local url="https://huggingface.co/$repo/resolve/main/$path"
+  if [ "$ARIA2" = 1 ] && [ "$want" -ge 52428800 ]; then
+    aria2c -c -x"$CONN" -s"$CONN" -k4M --file-allocation=none --console-log-level=warn --summary-interval=60 \
+           --retry-wait=5 -m5 -d "$(dirname "$out")" -o "$(basename "$out")" "${ARIA2_HDR[@]}" "$url"
+  else
+    curl -L --fail --retry 5 --retry-delay 5 -C - "${AUTH[@]}" -o "$out" "$url"
+  fi
+  [ "$(size "$out")" = "$want" ] || { say "ERROR $path is $(size "$out") B, expected $want - re-run to resume"; return 1; }
+  say "done  $path"
+}
+
+free_gib() { df -BG --output=avail "$1" | tail -1 | tr -dc 0-9; }
+say "=== 1/2 the source GGUF -> $SRC ($(free_gib "$DEST") GB free; it needs 366 GB, the tables 203 more - the pack is only
+the tables' source: once both tables are written it can go, and LAYERS= one layer can be re-extracted from it)"
+read -r want sha < <(meta "$SRC_REPO" "$SRC_FILE")
+# Preflight: never start a 366 GB download that fills the disk.  A disk that runs out mid-extraction leaves a table
+# file whose size was reserved up front and which reads as zeros past the hole - the engine refuses such a file
+# (ds41_engram.hpp's hole sample), but the honest fix is not to create it.
+have=$(size "$SRC/$SRC_FILE"); gib=$((1024*1024*1024))
+need=$(( have == want ? 0 : want ))
+for l in 1 14; do
+  f=$ENG/layers$l/engram-L$l.safetensors; [ -r "$f" ] || need=$(( need + 95 * gib ))
+done
+if [ "$DRY_RUN" != 1 ] && [ $(( $(free_gib "$DEST") * gib )) -lt $(( need + 20 * gib )) ]; then
+  say "refusing: $(free_gib "$DEST") GB free, this run needs $(( need / gib )) GB more for the pack and the Engram tables."
+  say "  free space first (the pack of another model, or the tables you already have); to redo only what is missing:"
+  say "  LAYERS=14 local/ds4-engram-extract.py $SRC/$SRC_FILE $ENG"
+  exit 1
+fi
+get "$SRC_REPO" "$SRC_FILE" "$SRC/$SRC_FILE" "$want"
+if [ "$DRY_RUN" != 1 ] && [ -z "${SKIP_SHA:-}" ] && [ ! -f "$SRC/$SRC_FILE.sha-ok" ]; then
+  say "      sha256 of the GGUF (expected $sha) ..."
+  [ "$(sha256sum "$SRC/$SRC_FILE" | cut -d' ' -f1)" = "$sha" ] || { say "ERROR sha256 mismatch: delete the file and re-run"; exit 1; }
+  touch "$SRC/$SRC_FILE.sha-ok"; say "      sha256 ok"
+fi
+
+say "=== 2/2 the Engram tables -> $ENG"
+if [ "$(size "$ENG/layers1/engram-L1.safetensors")" -gt 100000000000 ] && [ "$(size "$ENG/layers14/engram-L14.safetensors")" -gt 100000000000 ] \
+   && [ -f "$ENG/layers1/model.safetensors.index.json" ]; then
+  say "have  both tables"
+elif [ "$DRY_RUN" != 1 ]; then
+  "$PY" "$HERE/local/ds4-engram-extract.py" "$SRC/$SRC_FILE" "$ENG"
+fi
+# the image encoder (VISION=0 skips it) - the 1017 checkpoint's vision tower as a GGUF, 0.9 GiB of HTTP range reads
+if [ "${VISION:-1}" != 0 ]; then
+  say "=== vision encoder -> $DEST/vision-1017"
+  if [ -s "$DEST/vision-1017/DeepSeek-V4.1-Flash-1017-Vision.gguf" ]; then say "have  the vision GGUF"
+  elif [ "$DRY_RUN" != 1 ]; then
+    "$PY" "$HERE/tools/v41/vision/make_vision_gguf.py" --out "$DEST/vision-1017/DeepSeek-V4.1-Flash-1017-Vision.gguf"
+  fi
+fi
+say "=== done: ./run.sh starts the server on it"

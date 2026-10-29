@@ -1,0 +1,9 @@
+# Python packages for the server (run.sh) and the tools in local/:  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# The download (local/fetch-model.sh) needs only python3; the Engram extraction (local/ds4-engram-extract.py) needs numpy.
+pillow==12.3.0
+psutil==7.2.2
+regex==2026.9.29
+jinja2==3.1.6
+markupsafe==3.0.4
+# numpy: local/eval-lucebox/score.py and a few measurement scripts only
+numpy
