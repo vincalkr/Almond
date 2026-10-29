@@ -100,7 +100,56 @@ for mod in (F, S):
         mod.effort_kwargs = effort_kwargs
     if hasattr(mod, "budget_effort"):
         mod.budget_effort = budget_effort
-# the web app's buttons: V4.1's three levels and thinking off (the encoder's default is High)
+# ---- sampling: DeepSeek's cloud API's rules (api-docs.deepseek.com, create-chat-completion, deepseek-flash):
+# - thinking (the default): temperature has no effect (1.0); top_p 0.95-1.0, default 1.0 (below 0.95 counts as 0.95)
+# - thinking off: temperature 0-2, default 1.0; top_p fixed at 1.0
+# - frequency_penalty / presence_penalty are not supported (no effect); top_k and min_p off (DeepSeek's card)
+# - max_tokens unset: 8K without thinking, 64K with it, 128K at reasoning effort max (the context still bounds it)
+# ALMOND_DS41_FREE_SAMPLING=1 passes a request's sampling through as it is (a measurement with temperature 0, say).
+NEUTRAL = {"top_k": 0, "min_p": 0.0, "repetition_penalty": 1.0, "presence_penalty": 0.0, "frequency_penalty": 0.0}
+
+
+def api_sampling(sampling: dict | None, thinking: bool) -> dict:
+    s = dict(sampling or {})
+    if os.environ.get("ALMOND_DS41_FREE_SAMPLING") == "1":
+        return s
+    s.update(NEUTRAL)
+    if thinking:
+        s["temperature"] = 1.0
+        try:
+            s["top_p"] = min(1.0, max(0.95, float(s.get("top_p", 1.0))))
+        except (TypeError, ValueError):
+            s["top_p"] = 1.0
+    else:
+        try:
+            s["temperature"] = min(2.0, max(0.0, float(s.get("temperature", 1.0))))
+        except (TypeError, ValueError):
+            s["temperature"] = 1.0
+        s["top_p"] = 1.0
+    return s
+
+
+_run, _prepare = S.Service.run, S.Service.prepare
+
+
+def _run_ds41(self, ids, thinking, tools, max_new, sampling, cancel, force=None):
+    merged = {**self.sampling_defaults, **self.shared,
+              **{k: v for k, v in (sampling or {}).items() if v is not None}}
+    return _run(self, ids, thinking, tools, max_new, api_sampling(merged, thinking), cancel, force)
+
+
+def _prepare_ds41(self, messages, tools, kwargs, max_new=None, force=None, req=None):
+    ids, thinking, n = _prepare(self, messages, tools, kwargs, max_new, force, req)
+    if max_new is None or max_new <= 0:
+        level = _level(kwargs.get("reasoning_effort"))
+        n = min(n, 131072 if thinking and level == 100 else 65536 if thinking else 8192)
+    return ids, thinking, n
+
+
+S.Service.run = _run_ds41
+S.Service.prepare = _prepare_ds41
+
+# the thinking levels clients offer (./almond, /health): V4.1's three levels and thinking off (the encoder's default is High)
 S.REASONING_LEVELS = [["none", "Off", "answers right away"], ["low", "Low", "short (50)"],
                       ["high", "High", "thorough (75, the default)"], ["max", "Max", "the most thorough (100)"]]
 S.REASONING_DEFAULT = "high"

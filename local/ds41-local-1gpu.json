@@ -69,10 +69,8 @@
   "backend": "hip",
   "gpu": 0,
   "sampling": {
-    "temperature": 0.8,
-    "top_p": 0.95,
-    "repetition_penalty": 1.1,
-    "penalty_last_n": 256
+    "temperature": 1.0,
+    "top_p": 1.0
   },
   "reasoning_loop_recovery": "recover",
   "reasoning_budget_tokens": 1024,
