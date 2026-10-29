@@ -106,7 +106,8 @@ for mod in (F, S):
 # - frequency_penalty / presence_penalty are not supported (no effect); top_k and min_p off (DeepSeek's card)
 # - max_tokens unset: 8K without thinking, 64K with it, 128K at reasoning effort max (the context still bounds it)
 # ALMOND_DS41_FREE_SAMPLING=1 passes a request's sampling through as it is (a measurement with temperature 0, say).
-NEUTRAL = {"top_k": 0, "min_p": 0.0, "repetition_penalty": 1.0, "presence_penalty": 0.0, "frequency_penalty": 0.0}
+# (no top_k: the server would send 0 as 64, and ds41_generate without one takes its 256 best candidates)
+NEUTRAL = {"min_p": 0.0, "repetition_penalty": 1.0, "presence_penalty": 0.0, "frequency_penalty": 0.0}
 
 
 def api_sampling(sampling: dict | None, thinking: bool) -> dict:
@@ -114,6 +115,7 @@ def api_sampling(sampling: dict | None, thinking: bool) -> dict:
     if os.environ.get("ALMOND_DS41_FREE_SAMPLING") == "1":
         return s
     s.update(NEUTRAL)
+    s.pop("top_k", None)
     if thinking:
         s["temperature"] = 1.0
         try:

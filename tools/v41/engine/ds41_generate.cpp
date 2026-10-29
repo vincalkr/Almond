@@ -1600,6 +1600,11 @@ int main(int argc, char ** argv) {
             std::string w, csv, img_file;
             int max_new = 0, tk = 0;
             float temp = a.temp, top_p = 1.0f, min_p = 0.0f;
+            // a request's penalties are its own: back to the command line's before its keys (they stuck to every
+            // request after one that set them)
+            static const PenaltyState pen_base = g_pen;
+            g_pen.repeat = pen_base.repeat; g_pen.freq = pen_base.freq;
+            g_pen.present = pen_base.present; g_pen.last_n = pen_base.last_n;
             ss >> w >> max_new;
             while (ss >> w) {
                 const size_t eq = w.find('=');
