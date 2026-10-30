@@ -1182,6 +1182,12 @@ int ds41_main(int argc, char ** argv) {
         std::fflush(stdout);
     };
     bool img_prompt = false;   // this prompt fed image rows (a batch within the columns kept ~1.9 GiB on card 0)
+    // After a batch prompt the cache opens while ggml still holds ~2.4 GiB of the batch's buffers on card 0, which it
+    // gives back during the decode (measured 2026-10-30: 15.44 GiB free at the seed, 2.53 GiB unused at the next
+    // request).  The next request, if it reads by passes, opens the cache again into that room once.
+    // ALMOND_VRAM_REGROW=0 leaves it as it was.
+    bool regrow = false;
+    static const bool regrow_on = !std::getenv("ALMOND_VRAM_REGROW") || std::atoi(std::getenv("ALMOND_VRAM_REGROW")) != 0;
     static const bool vram_trace = std::getenv("ALMOND_VRAM_TRACE") != nullptr;
     auto trace_free = [&](const char * where) {
         if (!vram_trace) return;
@@ -1908,6 +1914,21 @@ int ds41_main(int argc, char ** argv) {
                 bcap = sp_tail; dh = delta; force_batch = true; by_step = false;
             }
             (void) force_batch;
+            trace_free(cache_open ? "request start (cache open)" : "request start (cache shut)");
+            if (regrow && by_step && cache_open) {
+                regrow = false;
+                size_t fr = 0, tot = 0;
+                ggml_backend_dev_memory(ggml_backend_get_device(be), &fr, &tot);
+                if ((double) fr > (a.vram_margin_gib + 1.0) * 1073741824.0) {
+                    const double t0 = now_ms();
+                    tier.release_cache();
+                    cache_open = false;
+                    if (!open_cache()) { std::printf("ERR VRAM seed failed: %s\n", err.c_str()); std::fflush(stdout); continue; }
+                    cache_open = true;
+                    std::fprintf(stderr, "serve: VRAM cache opened again into %.2f GiB the last batch gave back (%.2f s)\n",
+                                 fr / 1073741824.0, (now_ms() - t0) / 1000.0);
+                }
+            }
             if (by_step && !cache_open) {
                 if (!open_cache()) { std::printf("ERR VRAM seed failed: %s\n", err.c_str()); std::fflush(stdout); continue; }
                 cache_open = true;
@@ -2126,6 +2147,7 @@ int ds41_main(int argc, char ** argv) {
                     continue;
                 }
                 cache_open = true;
+                regrow = regrow_on && !by_step;
                 std::fprintf(stderr, "serve: VRAM %.2f GiB free -> %lld experts in VRAM (seed %.2f s)\n", seed_free,
                              (long long) tier.resident(), seed_s);
             }

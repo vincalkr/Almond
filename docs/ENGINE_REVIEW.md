@@ -151,5 +151,18 @@ Escluso, una prova ciascuno:
 - i moduli di kernel caricati durante il batch (rocBLAS, 4 moduli): ~24 MiB;
 - `HSA_ENABLE_SCRATCH_ASYNC_RECLAIM=1` e `HSA_SCRATCH_SINGLE_LIMIT=256 MiB`: nessun effetto.
 
-Resta da guardare: la memoria interna del runtime HIP (scratch dei kernel impostata con `hipDeviceSetLimit`, l'esperimento
-si è bloccato), e la memoria di rocBLAS/hipBLASLt non presa con `hipMalloc`.
+Trovato: la memoria torna davvero. La VRAM del processo vista dal kernel (`drm-memory-vram` in `/proc/<pid>/fdinfo`)
+scende di 2,1 GB sulla scheda 0 dopo il batch, e `hipFree` restituisce subito (prova a parte). Il punto è quando:
+all'apertura della cache dopo il batch ci sono 15,44 GiB liberi, all'inizio della richiesta seguente 2,53 GiB restano
+inutilizzati - ggml rende i ~2,4 GiB del batch durante la decodifica, dopo che la cache si è già dimensionata.
+
+Correzione (`ds41_generate.cpp`, `regrow`): la prima richiesta letta a passi dopo un batch, se la scheda 0 ha più di
+1 GiB oltre il margine, riapre la cache una volta in quello spazio. `ALMOND_VRAM_REGROW=0` la spegne. Misurato:
+
+| | VRAM libera scheda 0 | decode tok/s |
+| --- | ---: | ---: |
+| prima di un batch | 0,07-0,59 GiB | 21,6-21,8 |
+| dopo un batch, senza la correzione | 2,5-2,6 GiB | 19-21,5 |
+| dopo un batch (testo, 465 token) o un'immagine, con la correzione | 0,59-0,60 GiB | 20,7-21,9 |
+
+La riapertura costa 1,3-2,9 s una volta (gli esperti ricaricati dalla RAM).
