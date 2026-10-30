@@ -25,7 +25,7 @@ env["DS41_META"] = str(ROOT / env["DS41_META"])
 doc = np.fromfile(ROOT / "local/prompts/huge64k.i32", dtype=np.int32).tolist()
 long_ = (doc * 3)[:int(sys.argv[1]) if len(sys.argv) > 1 else 123416]
 new = (doc[1000:] * 2)[:int(sys.argv[2]) if len(sys.argv) > 2 else 3918]
-eng = C.Engine(ROOT / "build-hip-fused/ds41_generate", args, env, out, "crash", cpu=False)
+eng = C.Engine(ROOT / "build-hip-fused/almond-engine", args, env, out, "crash", cpu=False)
 try:
     for k, ids in enumerate([long_, long_ + new, long_ + new + doc[5000:9000]]):
         r = eng.gen(ids, 16)

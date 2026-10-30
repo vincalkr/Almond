@@ -136,3 +136,16 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/src/ds41/v41_engine.cmake)
 
 # GLM-5.3-Flash (src/glm, from project-maya: docs/ENGINE_PLAN.md) -> almond-glm
 add_subdirectory(src/glm)
+
+# One executable (docs/ENGINE_PLAN.md, step 3): DeepSeek's engine target with GLM's path linked in (glm_program, its
+# usage requirements kept out: each tree force-includes its own hip_compat/cuda_runtime.h), src/engine_main.cpp picks
+# the path from the arguments
+if(TARGET ds41_generate)
+  add_library(glm_program STATIC src/glm/program/generate.cpp)
+  target_include_directories(glm_program PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/glm/include/strata/hip_compat)
+  target_compile_definitions(glm_program PRIVATE STRATA_VERSION="${PROJECT_VERSION}")
+  target_link_libraries(glm_program PUBLIC strata_engine strata_prefill strata_spec strata_hip_runtime)
+  target_sources(ds41_generate PRIVATE src/engine_main.cpp)
+  target_link_libraries(ds41_generate PRIVATE "$<LINK_ONLY:glm_program>")
+  set_target_properties(ds41_generate PROPERTIES OUTPUT_NAME almond-engine)
+endif()

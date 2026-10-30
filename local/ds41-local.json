@@ -48,7 +48,7 @@
   "env": {
     "ALMOND_NO_LARGEPAGES": "1",
     "GGML_NO_BACKTRACE": "1",
-    "DS41_EXE": "build-hip-fused/ds41_generate",
+    "DS41_EXE": "build-hip-fused/almond-engine",
     "ALMOND_PRESTAGE_GIB": "1.5",
     "ALMOND_PRESTAGE_MIN": "512",
     "ALMOND_SERVE_PASS_BIAS": "0",

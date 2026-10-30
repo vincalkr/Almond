@@ -6,7 +6,7 @@ each as a FRESH prefill, to a second engine (park off, a 1-token reset request b
 last-row logits (ALMOND_SERVE_DUMP) are compared: reuse is exact when the reused request's logits match the fresh
 prefill of the same prompt as closely as the batch-shape noise of a known-good continuation does.
 
-  check_conv_reuse.py --bin build-hip-fused/ds41_generate --scenario park_partial [--ref-bin B2] [--tail 20]
+  check_conv_reuse.py --bin build-hip-fused/almond-engine --scenario park_partial [--ref-bin B2] [--tail 20]
 
 The prompts are token runs of README.md / HANDOVER.md / docs/ds4/V41_EXACT_FAST.md, tokenized with the server's
 tokenizer (models/rco-iq2xxs/tokenizer); --model and --engram default to the pack this box runs and its tables.

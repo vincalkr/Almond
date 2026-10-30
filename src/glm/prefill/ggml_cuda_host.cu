@@ -11,12 +11,15 @@
 #include <string>
 #include <vector>
 
-[[noreturn]] void ggml_cuda_error(const char * stmt, const char * func, const char * file, int line, const char * msg) {
+// weak: in almond-engine ggml-hip's own definitions win (DeepSeek's path links all of ggml-cuda), as src/prefill/ggml_cuda_host.cu
+#define GLM_MMQ_HOST_WEAK __attribute__((weak))
+
+GLM_MMQ_HOST_WEAK [[noreturn]] void ggml_cuda_error(const char * stmt, const char * func, const char * file, int line, const char * msg) {
     std::fprintf(stderr, "ggml-cuda (strata mmq): %s: %s\n  in %s at %s:%d\n", msg, stmt, func, file, line);
     std::abort();
 }
 
-int ggml_cuda_get_device() {
+GLM_MMQ_HOST_WEAK int ggml_cuda_get_device() {
     int id = 0;
     CUDA_CHECK(cudaGetDevice(&id));
     return id;
@@ -61,7 +64,7 @@ int ggml_cuda_parse_amd_id(const char* device_name) {
 }  // namespace
 #endif
 
-const ggml_cuda_device_info & ggml_cuda_info() {
+GLM_MMQ_HOST_WEAK const ggml_cuda_device_info & ggml_cuda_info() {
     static ggml_cuda_device_info info = [] {
         ggml_cuda_device_info in = {};
         int n = 0;
@@ -225,8 +228,8 @@ extern "C" void strata_mmq_pool_slab(int dev, void * base, size_t bytes) {
     g_slab[dev] = {(uint8_t *) base, base != nullptr ? bytes : 0, 0};
 }
 
-std::unique_ptr<ggml_cuda_pool> ggml_backend_cuda_context::new_pool_for_device(int device, int) {
+GLM_MMQ_HOST_WEAK std::unique_ptr<ggml_cuda_pool> ggml_backend_cuda_context::new_pool_for_device(int device, int) {
     return std::unique_ptr<ggml_cuda_pool>(new CachingPool(device));
 }
 
-ggml_backend_cuda_context::~ggml_backend_cuda_context() {}
+GLM_MMQ_HOST_WEAK ggml_backend_cuda_context::~ggml_backend_cuda_context() {}

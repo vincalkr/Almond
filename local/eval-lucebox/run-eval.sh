@@ -20,7 +20,7 @@ import numpy as np
 t = np.load('$E/heldout_8x1024.npy')
 for i, s in enumerate(t): s.astype(np.int32).tofile('$O/seq%d.i32' % i)"
 for i in 0 1 2 3 4 5 6 7; do
-  env HIP_VISIBLE_DEVICES=0 ALMOND_PF_NO_DUMMY=1 "$@" ./build-hip-fused/ds41_generate \
+  env HIP_VISIBLE_DEVICES=0 ALMOND_PF_NO_DUMMY=1 "$@" ./build-hip-fused/almond-engine \
     -m "$MODEL" --ids-file "$O/seq$i.i32" -n 1 --temp 0 \
     --backend cuda --experts gpu --arena-gib 75 --ctx 4096 --kv-q8 --threads 12 --rank "$RANK" \
     --engram "$ENGRAM" --route-bias 0 --route-bias-file 0 --ppl --dump-logits "$O/seq$i.f32" \

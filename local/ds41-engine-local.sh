@@ -7,7 +7,7 @@
 # "args" and "env".
 set -euo pipefail
 cd "$(dirname "$0")/.."
-EXE="${DS41_EXE:-$PWD/build-hip-fused/ds41_generate}"
+EXE="${DS41_EXE:-$PWD/build-hip-fused/almond-engine}"
 [ -x "$EXE" ] || { echo "ds41-engine-local: $EXE missing (cmake --build build-hip-fused --target ds41_generate -j)" >&2; exit 1; }
 # Almond's server already passes --serve (serve/server.py's popen); only a standalone call needs it added
 serve=0

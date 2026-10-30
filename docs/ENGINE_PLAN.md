@@ -53,3 +53,9 @@ benches went to the trash. Its Python tools (the pack builder, the hipBLASLt tun
 `tools/glm/`. DeepSeek's engine: `tools/v41/engine` -> `src/ds41` (its Python tools in `tools/v41/`). GLM, `almond-glm`:
 PPL 10.4159, 10.4583, 10.2627 (mean 10.379); server tok/s 32.1 33.2 31.5 / 32.1 31.9 30.1 (mean 31.8). DeepSeek's code
 only moved (the binary differs in its source paths).
+
+**Step 3, one executable (2026-10-30).** `build-hip-fused/almond-engine`: DeepSeek's engine target with GLM's path
+linked in (`glm_program`, link-only so each tree keeps its own forced `hip_compat/cuda_runtime.h`); `src/engine_main.cpp`
+runs GLM's path when the arguments name `--glm-pack`, DeepSeek's otherwise. GLM's ggml-cuda host shim is weak, as
+DeepSeek's: ggml-hip's own definitions win. GLM: PPL 10.3034, 10.4309, 10.4771 (mean 10.404); server tok/s 32.1 32.1
+30.7 / 32.4 33.0 31.1 (mean 31.9). DeepSeek: text 20.9-23.9 tok/s, the two pictures read as before.

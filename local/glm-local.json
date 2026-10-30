@@ -1,5 +1,5 @@
 {
-  "exe": "build-hip-fused/almond-glm",
+  "exe": "build-hip-fused/almond-engine",
   "args": [
     "--glm-pack",
     "models/glm53-gsq-rco/pack",

@@ -20,7 +20,7 @@ for n in 16 80; do
     rm -rf $O/trace-$n
     env $E ALMOND_FORCE_IDS=$O/ref-sposi.ids bash tools/ds4/memguard.sh 110 82 -- \
         rocprofv3 --kernel-trace --memory-copy-trace --output-format csv -d $O/trace-$n -o run -- \
-        ./build-hip-fused/ds41_generate -m models/rco-iq2xxs/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf --ids-file local/prompts/sposi.i32 -n $n --temp 0 \
+        ./build-hip-fused/almond-engine -m models/rco-iq2xxs/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf --ids-file local/prompts/sposi.i32 -n $n --temp 0 \
         --backend cuda --experts gpu --arena-gib 75 --ctx 8192 --kv-q8 --threads 12 --rank local/rank.bin \
         --engram models/engram-1017/layers14:models/engram-1017/layers1 --arena-skip-vram $R > $O/trace-$n.out 2>&1
 done

@@ -1,7 +1,7 @@
 # src/glm - the GLM-5.3-Flash path (from project-maya v1.1.37, MIT: LICENSE), built inside Almond's project
 # (add_subdirectory from the top CMakeLists.txt) on Almond's ggml (the top level's prebuilt ggml-base / ggml-cpu and
 # third_party/llama.cpp/ggml's MMQ sources).  HIP only.  Its targets keep project-maya's names until the rename
-# (docs/ENGINE_PLAN.md, step 4); the executable is `almond-glm`.
+# (docs/ENGINE_PLAN.md, step 4); the executable is `almond-engine` (the top level's).
 add_compile_definitions(STRATA_VERSION="${PROJECT_VERSION}")
 include(cmake/hip_backend.cmake)
 set(_strata_gpu_runtime_target strata_hip_runtime)
@@ -120,7 +120,4 @@ target_link_libraries(strata_engine PUBLIC strata_mmq ${_strata_gpu_blas_target}
 add_library(strata_spec STATIC spec/suffix_drafter.cpp spec/controller.cpp spec/draft_policy.cpp)
 target_include_directories(strata_spec PUBLIC include)
 
-add_executable(almond-glm program/generate.cpp)
-target_include_directories(almond-glm PRIVATE ${_strata_gpu_include_directories})
-target_link_libraries(almond-glm PRIVATE strata_engine strata_prefill strata_spec ${_strata_gpu_runtime_target})
-set_target_properties(almond-glm PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+# (the executable: almond-engine, the top CMakeLists.txt - src/engine_main.cpp)

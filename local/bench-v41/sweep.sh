@@ -20,7 +20,7 @@ ref="$OUT/ref-$pn.ids"
 force=""
 [ -s "$ref" ] && [ -z "${NOFORCE:-}" ] && force="ALMOND_FORCE_IDS=$ref ALMOND_DEC_MARGIN=1"
 o="$OUT/$pn-$TAG"
-env $force $ENVS bash tools/ds4/memguard.sh 110 82 -- ${PIN:+taskset -c $PIN} ./build-hip-fused/ds41_generate -m "$MODEL" \
+env $force $ENVS bash tools/ds4/memguard.sh 110 82 -- ${PIN:+taskset -c $PIN} ./build-hip-fused/almond-engine -m "$MODEL" \
   --ids-file "$PROMPT" -n "$N" --temp 0 --backend cuda --experts gpu --arena-gib "$ARENA" --ctx 8192 --kv-q8 \
   --threads "${THREADS:-12}" --rank "$RANK" --engram "$ENGRAM" --arena-skip-vram "$@" > "$o.out" 2>&1
 grep -E '^[0-9]+$' "$o.out" > "$o.ids"

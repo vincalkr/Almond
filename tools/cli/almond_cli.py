@@ -513,7 +513,7 @@ def sessions_text() -> str:
 
 def clear_sessions() -> int:
     """Move every model's kept conversations to the trash (gio trash); only with no engine running, which holds them."""
-    busy = subprocess.run(["pgrep", "-f", "ds41_generate|build-hip-fused/almond-glm"], capture_output=True).returncode == 0
+    busy = subprocess.run(["pgrep", "-f", "almond-engine"], capture_output=True).returncode == 0
     if busy:
         raise SystemExit("almond: an engine is running and holds its sessions: ./stop.sh first")
     for name, d in session_dirs():

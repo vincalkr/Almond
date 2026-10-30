@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# build.sh - builds ggml (third_party/llama.cpp/build-hip), the DeepSeek engine (build-hip-fused/ds41_generate) and the
-# GLM engine (build-hip-fused/almond-glm, src/glm), HIP only.
+# build.sh - builds ggml (third_party/llama.cpp/build-hip) and the engine (build-hip-fused/almond-engine: DeepSeek, src/ds41,
+# and GLM, src/glm), HIP only.
 # The same commands as the README's "2. Build".  ggml is built once (tens of minutes: many HIP kernels); a second run
 # only rebuilds what changed.  Environment:
 #   ROCM=/opt/rocm      the ROCm install
@@ -49,4 +49,4 @@ python3 tools/glm/vision/glm5next_patch.py "$VL"
 cmake -S tools/glm/vision -B build-maya-vision/build "${COMMON[@]}" -DLLAMA_DIR="$PWD/$VL" \
     -DALMOND_VISION_HIP=ON -DGGML_HIP_NO_VMM=ON
 cmake --build build-maya-vision/build --target maya-vision -j "$JOBS"
-echo "=== done: build-hip-fused/ds41_generate, build-hip-fused/almond-glm, build-maya-vision/build/bin/maya-vision"
+echo "=== done: build-hip-fused/almond-engine, build-maya-vision/build/bin/maya-vision"

@@ -570,7 +570,7 @@ struct VisionInput {
     }
 };
 
-int main(int argc, char ** argv) {
+int ds41_main(int argc, char ** argv) {
     ds41_hip_spin();
     if (!std::getenv("DS41_GGML_DEBUG"))
         ggml_log_set([](ggml_log_level lv, const char * text, void *) { if (lv != GGML_LOG_LEVEL_DEBUG) std::fputs(text, stderr); }, nullptr);

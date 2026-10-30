@@ -4288,7 +4288,7 @@ static int glm_pack_generate(const Options& o) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int glm_main(int argc, char** argv) {
     strata::platform::env_aliases();   // (MAYA_* settings under their older names too)
     // **UNBUFFERED, BECAUSE THE INTERESTING OUTPUT IS THE OUTPUT BEFORE A CRASH.**  `stdout` redirected to a
     // pipe or a file is block-buffered, so a program that dies loses every line it had already printed - which

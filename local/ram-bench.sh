@@ -53,7 +53,7 @@ for huge in 0 1; do
     grep -E "threads" "$O/membw-$TAG-$huge.txt" | sed "s/^/$stamp $TAG pages=$([ $huge = 1 ] && echo THP || echo 4K) /" >> "$O/summary.txt"
 done
 [ "$DECODE" = 1 ] || exit 0
-if pgrep -f "[s]erve_ds41.py" >/dev/null || pgrep -x ds41_generate >/dev/null; then
+if pgrep -f "[s]erve_ds41.py" >/dev/null || pgrep -x almond-engine >/dev/null; then
     echo "ram-bench: the server or an engine is running: stop it for --decode" >&2; exit 1
 fi
 echo "=== $TAG: decode (the default two-card flags)"

@@ -38,12 +38,12 @@ doc = np.fromfile(ROOT / "local/prompts/huge64k.i32", dtype=np.int32).tolist()
 B = doc[30000:55500]
 steps = [B, B + doc[56000:56200], None, B + doc[56000:56400]]
 lines = []
-eng = C.Engine(ROOT / "build-hip-fused/ds41_generate", args, env, out, "disk0", cpu=False)
+eng = C.Engine(ROOT / "build-hip-fused/almond-engine", args, env, out, "disk0", cpu=False)
 try:
     for k, ids in enumerate(steps):
         if ids is None:
             eng.close()
-            eng = C.Engine(ROOT / "build-hip-fused/ds41_generate", args, env, out, "disk1", cpu=False)
+            eng = C.Engine(ROOT / "build-hip-fused/almond-engine", args, env, out, "disk1", cpu=False)
             lines.append("engine restarted")
             print(lines[-1], flush=True)
             continue

@@ -41,7 +41,7 @@ tail = {"A": doc[56000:], "B": doc[58000:]}
 conv = {"A": A, "B": B}
 k = {"A": 0, "B": 0}
 
-eng = C.Engine(ROOT / "build-hip-fused/ds41_generate", args, env, out, f"pool{a.pool}", cpu=False)
+eng = C.Engine(ROOT / "build-hip-fused/almond-engine", args, env, out, f"pool{a.pool}", cpu=False)
 lines = []
 try:
     for turn, c in enumerate(["A", "B", "A", "B", "A", "B"]):
