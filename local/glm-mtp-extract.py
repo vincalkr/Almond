@@ -4,13 +4,13 @@ third shard) into a GGUF of its own: the GSQ-RCO 3.0bit GGUF was published witho
 another quant of the same model (STRATA_GLM_MTP_GGUF, engines/maya/src/core/glm_model.cu: the block reads the trunk's
 hidden state and the embedding, so any quant's block fits).  The metadata is copied as it is; only blk.45's tensors.
 
-  ALMOND_GGUF_PY=engines/maya/third_party/llama.cpp/gguf-py .venv/bin/python local/glm-mtp-extract.py SRC.gguf OUT.gguf
+  ALMOND_GGUF_PY=third_party/llama.cpp/gguf-py .venv/bin/python local/glm-mtp-extract.py SRC.gguf OUT.gguf
 """
 import os
 import sys
 
-sys.path.insert(0, os.environ.get("ALMOND_GGUF_PY", os.path.join(os.path.dirname(__file__), "..", "engines", "maya",
-                                                                 "third_party", "llama.cpp", "gguf-py")))
+sys.path.insert(0, os.environ.get("ALMOND_GGUF_PY", os.path.join(os.path.dirname(__file__), "..", "third_party",
+                                                                 "llama.cpp", "gguf-py")))
 import gguf  # noqa: E402
 
 src, out = sys.argv[1], sys.argv[2]

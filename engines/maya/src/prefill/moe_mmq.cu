@@ -134,21 +134,21 @@ namespace {
 
 void dispatch(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s) {
     switch (a.type_x) {
-        case GGML_TYPE_Q2_0: mul_mat_q_case<GGML_TYPE_Q2_0>(ctx, a, s); break;
-        case GGML_TYPE_IQ2_XXS: mul_mat_q_case<GGML_TYPE_IQ2_XXS>(ctx, a, s); break;
-        case GGML_TYPE_IQ2_XS: mul_mat_q_case<GGML_TYPE_IQ2_XS>(ctx, a, s); break;
-        case GGML_TYPE_IQ2_S: mul_mat_q_case<GGML_TYPE_IQ2_S>(ctx, a, s); break;
-        case GGML_TYPE_IQ3_XXS: mul_mat_q_case<GGML_TYPE_IQ3_XXS>(ctx, a, s); break;
-        case GGML_TYPE_IQ3_S: mul_mat_q_case<GGML_TYPE_IQ3_S>(ctx, a, s); break;
-        case GGML_TYPE_IQ4_NL: mul_mat_q_case<GGML_TYPE_IQ4_NL>(ctx, a, s); break;
-        case GGML_TYPE_IQ4_XS: mul_mat_q_case<GGML_TYPE_IQ4_XS>(ctx, a, s); break;
-        case GGML_TYPE_Q8_0: mul_mat_q_case<GGML_TYPE_Q8_0>(ctx, a, s); break;
-        case GGML_TYPE_IQ1_S: mul_mat_q_case<GGML_TYPE_IQ1_S>(ctx, a, s); break;
-        case GGML_TYPE_Q2_K: mul_mat_q_case<GGML_TYPE_Q2_K>(ctx, a, s); break;
-        case GGML_TYPE_Q3_K: mul_mat_q_case<GGML_TYPE_Q3_K>(ctx, a, s); break;
-        case GGML_TYPE_Q4_K: mul_mat_q_case<GGML_TYPE_Q4_K>(ctx, a, s); break;
-        case GGML_TYPE_Q5_K: mul_mat_q_case<GGML_TYPE_Q5_K>(ctx, a, s); break;
-        case GGML_TYPE_Q6_K: mul_mat_q_case<GGML_TYPE_Q6_K>(ctx, a, s); break;
+        case GGML_TYPE_Q2_0: mul_mat_q_case<GGML_TYPE_Q2_0, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_IQ2_XXS: mul_mat_q_case<GGML_TYPE_IQ2_XXS, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_IQ2_XS: mul_mat_q_case<GGML_TYPE_IQ2_XS, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_IQ2_S: mul_mat_q_case<GGML_TYPE_IQ2_S, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_IQ3_XXS: mul_mat_q_case<GGML_TYPE_IQ3_XXS, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_IQ3_S: mul_mat_q_case<GGML_TYPE_IQ3_S, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_IQ4_NL: mul_mat_q_case<GGML_TYPE_IQ4_NL, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_IQ4_XS: mul_mat_q_case<GGML_TYPE_IQ4_XS, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_Q8_0: mul_mat_q_case<GGML_TYPE_Q8_0, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_IQ1_S: mul_mat_q_case<GGML_TYPE_IQ1_S, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_Q2_K: mul_mat_q_case<GGML_TYPE_Q2_K, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_Q3_K: mul_mat_q_case<GGML_TYPE_Q3_K, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_Q4_K: mul_mat_q_case<GGML_TYPE_Q4_K, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_Q5_K: mul_mat_q_case<GGML_TYPE_Q5_K, GGML_PREC_Q8>(ctx, a, s); break;
+        case GGML_TYPE_Q6_K: mul_mat_q_case<GGML_TYPE_Q6_K, GGML_PREC_Q8>(ctx, a, s); break;
         default:
             std::fprintf(stderr, "prefill mmq: type %d is not covered\n", (int) a.type_x);
             std::exit(1);
@@ -162,11 +162,27 @@ void Context::run(const Product& p, void* stream) {
     if (p.n <= 0 || p.max_rows <= 0) return;
     const ggml_type t = (ggml_type) p.type;
     const int64_t qk = ggml_blck_size(t), bpr = p.w_cols / qk;
+    // Almond's ggml (0.26): mmq_args' last field is the tile width J_best, chosen as ggml's mmq.cu host code does -
+    // the smallest tile count over J = 8..128 among the configs that fit shared memory (src/prefill/moe_mmq.cu)
+    int J_best = 0;
+    {
+        const int dev = ggml_cuda_get_device(), cc = ggml_cuda_info().devices[dev].cc;
+        const size_t smpbo = ggml_cuda_info().devices[dev].smpbo;
+        const bool fallback = ggml_cuda_mmq_needs_fallback(p.w_rows);
+        int64_t ntiles_best = INT64_MAX;
+        for (int J = 8; J <= 128 && ntiles_best > 1; J += 8) {
+            const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(t, J, fallback, cc, GGML_PREC_Q8);
+            if (config.type == GGML_TYPE_COUNT || mmq_get_nbytes_shared(config, cc) > smpbo) continue;
+            const int64_t nt = (p.max_rows + config.J - 1) / config.J;
+            if (nt < ntiles_best) { J_best = J; ntiles_best = nt; }
+        }
+        if (J_best <= 0) { std::fprintf(stderr, "prefill mmq: no MMQ tile fits\n"); std::exit(1); }
+    }
     const mmq_args a = {(const char*) p.w, t, (const int*) p.xq, p.ids, p.bounds, p.dst, nullptr,
                         p.w_cols, p.w_rows, p.total_rows, bpr, p.total_rows, p.ld_dst,
                         p.n, p.n, (int64_t) (p.expert_bytes / ggml_type_size(t)), 0, 0,
                         1, 1, 0, 0, 0,
-                        p.max_rows, p.max_rows};
+                        p.max_rows, J_best};
     dispatch(*(ggml_backend_cuda_context*) ctx_, a, (cudaStream_t) stream);
 }
 

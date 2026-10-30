@@ -82,7 +82,7 @@ fetch() {
                              local src=$M/glm53-gsq-rco/src/GLM-5.3-Flash-Maya-M-IQ2_S-00003-of-00003.gguf
                              get $MAYA_REPO Maya-M/$(basename "$src") "$src"
                              [ "$DRY_RUN" = 1 ] && return
-                             GGUF_ARCH=glm5-next ALMOND_GGUF_PY="$R/engines/maya/third_party/llama.cpp/gguf-py" "$PY" "$R/local/glm-mtp-extract.py" \
+                             GGUF_ARCH=glm5-next ALMOND_GGUF_PY="$R/third_party/llama.cpp/gguf-py" "$PY" "$R/local/glm-mtp-extract.py" \
                                  "$src" "$M/glm53-gsq-rco/GLM-5.3-Flash-Maya-M-NextN.gguf"
                              gio trash "$M/glm53-gsq-rco/src" && echo "the 20.5 GB source went to the trash";;
         glm-vision)          get $MAYA_REPO vision/mmproj-GLM-5.3-Flash-F16.gguf "$M/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf"
