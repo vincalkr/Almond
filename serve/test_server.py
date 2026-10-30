@@ -2576,17 +2576,12 @@ class WebApp(unittest.TestCase):
             return e.code, e.headers.get("Content-Type", ""), e.read()
 
     def test_page_and_files(self):
-        # no web chat (./almond is the chat): "/" says what the address serves; the API monitor's files stay
+        # no web pages (./almond is the chat and the monitor): "/" says what the address serves
         code, ctype, body = self.get("/")
         self.assertEqual(code, 200)
         self.assertIn("application/json", ctype)
         self.assertEqual(json.loads(body)["api"], "/v1")
-        for path, want in (("/web/monitor.js", "javascript"), ("/web/tokens.css", "text/css")):
-            with self.subTest(path=path):
-                code, ctype, _ = self.get(path)
-                self.assertEqual(code, 200)
-                self.assertIn(want, ctype)
-        for path in ("/web/app.js", "/web/app.css", "/web/components.css", "/web/sprite.svg"):
+        for path in ("/web/monitor.js", "/web/tokens.css", "/web/app.js", "/api-monitor"):
             with self.subTest(path=path):
                 self.assertEqual(self.get(path)[0], 404)
 

@@ -183,15 +183,9 @@ class Monitor(unittest.TestCase):
         self.assertLess(records[1]["load_s"], records[0]["load_s"])
         self.assertTrue(all(r["state"] == "completed" for r in records))
 
-    def test_page_and_relative_assets_are_served(self):
-        code, html = self.request("/api-monitor")
-        self.assertEqual(code, 200)
-        self.assertIn('src="/web/monitor.js"', html)
-        code, script = self.request("/web/monitor.js")
-        self.assertEqual(code, 200)
-        self.assertIn("textContent", script)
-        self.assertNotIn("innerHTML", script)
-        self.assertEqual(self.request("/web/../server.py")[0], 404)
+    def test_no_web_page(self):
+        for path in ("/api-monitor", "/web/monitor.js", "/fonts/x.woff2"):
+            self.assertEqual(self.request(path)[0], 404, path)
 
 
 class ConversationCacheCard(unittest.TestCase):

@@ -86,7 +86,7 @@ instead.
 ```sh
 ./almond                                   # a conversation; /help lists the commands
 ./almond -m glm --think-level low -p "..." # one prompt, the answer on stdout (the thinking on stderr)
-./almond --monitor                         # what the old web monitor showed, refreshed every second
+./almond --monitor                         # the server's state, refreshed every second (no web pages)
 ```
 
 - thinking: each model's own levels, from the client's words. GLM-5.3-Flash: low / high / max (its default; an

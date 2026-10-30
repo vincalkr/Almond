@@ -94,7 +94,11 @@ Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
 - DeepSeek: the encoder (0.9 GiB) loads on card 0 for a request with images and is freed after; the VRAM expert cache
   reopens into the room. Measured before the fix below: card 0 held 2172 experts before an image, 1872 / 1855 after
   (15.51 / 15.38 GiB free at the reseed against ~16.1 after a text prompt); text decode 23.2 tok/s before, 21.1, 23.7,
-  23.7, 22.1, 23.5 after (one run each). Open: where the missing ~0.6 GiB goes. Clearing ggml-hip's buffer pool
+  23.7, 22.1, 23.5 after (one run each). Open: where the missing memory goes. Measured 2026-10-30 with
+  ALMOND_VRAM_TRACE=1: a 531-token text prompt (layer-major batch) leaves 17.37 GiB free at the reseed (2104 experts),
+  a 452-token prompt with a picture 15.46 (1865): ~1.9 GiB, taken during the image prompt's batch, not by the encoder
+  (17.26 GiB free right after it was freed). Freeing the dense half's cached graphs and both allocators after it
+  changed nothing (15.45): not kept. Clearing ggml-hip's buffer pool
   after the encoder (tried, 2026-10-30) gave back 112 MiB only and the next decode hit an illegal memory access: removed.
 - GLM: project-maya's encoder (`almond-vision`, llama.cpp's mtmd with GLM-5.3's tower, built by `./build.sh` for HIP;
   `local/fetch.sh glm-vision` gets the mmproj F16 + vocab, 1.1 GB) starts only when a picture arrives, in 2.78 GB the
