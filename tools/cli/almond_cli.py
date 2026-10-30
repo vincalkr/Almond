@@ -268,15 +268,20 @@ def _tool(name, doc, **params):
 
 
 TOOLS = [
-    _tool("read_file", "Read a text file; lines numbered from 1.", path={"type": "string"},
+    _tool("read_file", "Read a text file. Each line comes as its number, a tab, then the line: the number and the tab "
+          "are not in the file. Long files come in parts: ask for the rest with offset.", path={"type": "string"},
           offset={"type": "integer", "description": "the first line (1)", "optional": True},
           limit={"type": "integer", "description": "how many lines (all)", "optional": True}),
-    _tool("write_file", "Write a file (created, or replaced whole).", path={"type": "string"},
+    _tool("write_file", "Write a file (created, or replaced whole). To change part of a file, use edit_file.",
+          path={"type": "string"},
           content={"type": "string"}),
-    _tool("edit_file", "Replace the one occurrence of `old` in a file with `new` (old must occur exactly once).",
-          path={"type": "string"}, old={"type": "string"}, new={"type": "string"}),
+    _tool("edit_file", "Replace `old` in a file with `new`. Copy `old` exactly from read_file's output, without the "
+          "line numbers; it must occur exactly once unless all is true. Read the file again after an edit fails.",
+          path={"type": "string"}, old={"type": "string"}, new={"type": "string"},
+          all={"type": "boolean", "description": "replace every occurrence (false)", "optional": True}),
     _tool("list_dir", "List a directory (subdirectories end in /).", path={"type": "string"}),
-    _tool("run_command", "Run a bash command in the working directory; its output and exit code.",
+    _tool("run_command", "Run a bash command in the working directory (no input: it must not wait for a key); its "
+          "output and exit code. Numbers print with a dot as the decimal point.",
           command={"type": "string"},
           timeout={"type": "integer", "description": "seconds (120)", "optional": True}),
 ]
@@ -329,9 +334,7 @@ class Agent:
             return f"error: no tool {name}"
         try:
             text = fn(**args)
-        except TypeError as e:
-            text = f"error: {e}"
-        except OSError as e:
+        except (TypeError, OSError, ValueError) as e:      # (ValueError: UnicodeDecodeError, a bad number)
             text = f"error: {e}"
         if len(text) > TOOL_OUT:
             text = text[:TOOL_OUT // 2] + f"\n[... {len(text) - TOOL_OUT} characters cut ...]\n" + text[-TOOL_OUT // 2:]
@@ -343,10 +346,21 @@ class Agent:
         p = self.path(path)
         if not self.inside(p) and not self.allow("read_file", f"read {p} (outside {self.root})", True):
             return "denied by the user"
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        raw = p.read_bytes()
+        if b"\0" in raw[:8192]:
+            return f"error: {p} is a binary file ({len(raw)} bytes)"
+        lines = raw.decode("utf-8", errors="replace").splitlines()
         start = max(1, int(offset or 1))
         part = lines[start - 1:start - 1 + int(limit)] if limit else lines[start - 1:]
-        return "\n".join(f"{start + i:6}\t{x}" for i, x in enumerate(part)) or "(empty)"
+        out, size = [], 0
+        for i, x in enumerate(part):            # whole lines up to what the model sees, then where to go on
+            row = f"{start + i:6}\t{x[:2000]}" + (" [line cut]" if len(x) > 2000 else "")
+            if size + len(row) > TOOL_OUT - 200:
+                out.append(f"[lines {start + i}-{len(lines)} of {len(lines)} not shown: read_file with offset {start + i}]")
+                break
+            out.append(row)
+            size += len(row) + 1
+        return "\n".join(out) or ("(empty)" if not lines else f"(the file has {len(lines)} lines)")
 
     def t_list_dir(self, path="."):
         p = self.path(path)
@@ -366,35 +380,43 @@ class Agent:
         p.write_text(content, encoding="utf-8")
         return f"wrote {p} ({len(content)} characters)"
 
-    def t_edit_file(self, path, old, new):
+    def t_edit_file(self, path, old, new, all=False):
         p = self.path(path)
         text = p.read_text(encoding="utf-8")
+        if not old:
+            return "error: `old` is empty (write_file writes a whole file)"
         n = text.count(old)
         if n == 0:                              # read_file's line numbers copied into `old`: without them
             bare = re.sub(r"(?m)^ *\d+\t", "", old)
             if bare != old and text.count(bare) == 1:
                 old, n = bare, 1
-        if n != 1:
-            return f"error: `old` occurs {n} times in {p}; it must occur exactly once" + near_lines(text, old)
+        if n == 0 or (n > 1 and not all):
+            return (f"error: `old` occurs {n} times in {p}; it must occur exactly once (or all: true)"
+                    + (near_lines(text, old) if n == 0 else ""))
         after = text.replace(old, new)
         say(diff_text(text, after, str(p)))
         where = "" if self.inside(p) else f" (outside {self.root})"
         if not self.allow("edit_file", f"edit {p}{where}", bool(where)):
             return "denied by the user"
         p.write_text(after, encoding="utf-8")
-        return f"edited {p}"
+        return f"edited {p}" + (f" ({n} places)" if n > 1 else "")
 
     def t_run_command(self, command, timeout=120):
         say(f"{BOLD}  $ {command}{RESET}")
         if not self.allow("run_command", "run it"):
             return "denied by the user"
+        env = dict(os.environ, LC_NUMERIC="C")     # 1.5G, not 1,5G: the model reads the numbers better
+        q = subprocess.Popen(["bash", "-c", command], cwd=self.root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, env=env, start_new_session=True)
         try:
-            r = subprocess.run(["bash", "-c", command], cwd=self.root, capture_output=True, text=True,
-                               timeout=float(timeout or 120), errors="replace")
-        except subprocess.TimeoutExpired as e:
-            out = (e.stdout or "") + (e.stderr or "")
-            return (out if isinstance(out, str) else out.decode(errors="replace")) + f"\n[timed out after {timeout} s]"
-        return (r.stdout + r.stderr).rstrip() + f"\n[exit code {r.returncode}]"
+            out, _ = q.communicate(timeout=float(timeout or 120))
+        except (subprocess.TimeoutExpired, KeyboardInterrupt) as e:
+            os.killpg(q.pid, signal.SIGKILL)    # the command and whatever it started
+            out, _ = q.communicate()
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            return out.decode(errors="replace").rstrip() + f"\n[timed out after {timeout} s: stopped]"
+        return out.decode(errors="replace").rstrip() + f"\n[exit code {q.returncode}]"
 
 
 def near_lines(text: str, old: str) -> str:
