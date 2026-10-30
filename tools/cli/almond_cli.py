@@ -293,7 +293,8 @@ exactly that.
 
 Accuracy:
 - Report numbers, sizes, paths and names exactly as the tools printed them, with the units they printed. Do not \
-convert units by hand (185G stays 185G, it is not 1.8 TB); if a conversion is needed, compute it with a command.
+convert units by hand; if a conversion is needed, compute it with a command.
+- Tool output is shown to you exactly as the command printed it; nothing is added to it or reformatted.
 - Before the final answer, check every figure in it against the tool output it came from.
 - If something is uncertain or a command failed, say so instead of filling the gap.
 
@@ -322,7 +323,7 @@ TOOLS = [
           all={"type": "boolean", "description": "replace every occurrence (false)", "optional": True}),
     _tool("list_dir", "List a directory (subdirectories end in /).", path={"type": "string"}),
     _tool("run_command", "Run a bash command in the working directory (no input: it must not wait for a key); its "
-          "output and exit code. Numbers print with a dot as the decimal point. It waits for the command: for a slow "
+          "output and exit code. It waits for the command: for a slow "
           "one (du or find over a big tree) pass a longer timeout instead of running it in the background and polling; "
           "keep stderr (no 2>/dev/null) when an empty output would leave you guessing.",
           command={"type": "string"},
@@ -356,7 +357,10 @@ class Agent:
                 return True
             if a in ("n", "no", ""):
                 return False
-            if a in ("a", "always") and not outside:
+            if a in ("a", "always"):
+                if outside:                     # a path outside the working directory asks each time
+                    say(f"{DIM}  outside {self.root} it asks each time: y or n{RESET}")
+                    continue
                 self.always.add(name)
                 return True
 

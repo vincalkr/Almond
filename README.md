@@ -133,7 +133,7 @@ instead.
   an edit (shown as a diff first), a command (shown first) or any path outside asks y / n / a (always, for that
   tool, this session); `--yes` asks only for paths outside, which always ask. Without `--system` the agent gets a
   short English system prompt (`AGENT_PROMPT` in `tools/cli/almond_cli.py`): the machine and directory, how to use the
-  tools, and to report figures as the tools printed them (GLM had converted 185G into "1.8 TB").
+  tools, and to report figures as the tools printed them.
 - Conversations: `/new` (the current one saved first), `/save [NAME]`, `/sessions`, `/load N|NAME`, `/rename`,
   `/delete` (to the trash); they live in `local/chats/`, leaving saves too, `./almond -c` resumes the last one. A
   conversation the engine still keeps is not read again.
