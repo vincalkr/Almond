@@ -7,7 +7,7 @@
   ./almond --ctx 65536           the context window of the models it starts (a running server keeps its own)
 
 Thinking: --nothink, --think (the model's default), --think-max, --think-level LEVEL - the levels are the model's own
-(GLM-5.3-Flash: low / high / max, it always thinks; DeepSeek-V4.1: none / low / high / max = 0 / 50 / 75 / 100).  In the conversation:
+(GLM-5.3-Flash: low / high / max, it always thinks; DeepSeek-V4.1: off / low / high / max = 0 / 50 / 75 / 100).  In the conversation:
 
   /help  /quit  /models  /model NAME  /think [LEVEL]  /nothink  /clear  /read FILE  /system TEXT  /ctx
   /set [KEY VALUE]   sampling: temp, top_p, top_k, min_p, repeat_penalty, presence_penalty, seed, max_tokens
@@ -448,13 +448,13 @@ class Chat:
 
     def set_level(self, word: str) -> bool:
         vals = self.values()
-        w = {"0": "none", "off": "none", "nothink": "none"}.get(word.lower(), word.lower())
-        if w == "none" and "none" not in vals and vals:      # a model that always thinks (GLM-5.3): its lowest level
+        w = {"0": "off", "none": "off", "nothink": "off"}.get(word.lower(), word.lower())
+        if w == "off" and "off" not in vals and vals:      # a model that always thinks (GLM-5.3): its lowest level
             say(f"{DIM}{self.model['id']} always thinks: {vals[0]}, its lowest level{RESET}")
             w = vals[0]
-        if w.isdigit() and vals == ["none", "low", "high", "max"]:   # ds4's 1-100: the nearest named level
+        if w.isdigit() and vals == ["off", "low", "high", "max"]:   # 1-100: the nearest named level
             n = int(w)
-            w = "none" if n == 0 else "low" if n <= 50 else "high" if n <= 75 else "max"
+            w = "off" if n == 0 else "low" if n <= 50 else "high" if n <= 75 else "max"
         if w not in vals:
             say(f"{RED}{self.model['id']}'s thinking levels: {', '.join(vals)}{RESET}")
             return False
@@ -648,7 +648,7 @@ class Chat:
                     return True
                 self.banner()
         elif cmd == "nothink":
-            if self.set_level("none"):
+            if self.set_level("off"):
                 say(f"{DIM}thinking off{RESET}")
         elif cmd == "think":
             if not arg:
@@ -925,7 +925,7 @@ def main() -> int:
     t.add_argument("--nothink", action="store_true", help="answer without thinking")
     t.add_argument("--think", action="store_true", help="the model's default thinking level")
     t.add_argument("--think-max", action="store_true", help="the most thorough level")
-    t.add_argument("--think-level", metavar="LEVEL", help="one of the model's levels (none / low / high / max; "
+    t.add_argument("--think-level", metavar="LEVEL", help="one of the model's levels (off / low / high / max; "
                                                           "a number 0-100 picks the nearest)")
     ap.add_argument("--temp", type=float, default=None, help="temperature (0 = greedy; default: the model's)")
     ap.add_argument("--top-p", type=float, default=None)
@@ -977,7 +977,7 @@ def main() -> int:
             say(f"{DIM}--ctx {a.ctx}: the server was already running with {chat.model.get('max_context')} tokens "
                 f"(./stop.sh, then ./almond --ctx {a.ctx} starts it with yours){RESET}")
         if a.nothink:
-            chat.set_level("none")
+            chat.set_level("off")
         elif a.think_max:
             chat.set_level("max")
         elif a.think_level and not chat.set_level(a.think_level):
