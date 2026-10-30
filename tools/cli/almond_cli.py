@@ -38,6 +38,7 @@ import difflib
 import http.client
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -369,8 +370,12 @@ class Agent:
         p = self.path(path)
         text = p.read_text(encoding="utf-8")
         n = text.count(old)
+        if n == 0:                              # read_file's line numbers copied into `old`: without them
+            bare = re.sub(r"(?m)^ *\d+\t", "", old)
+            if bare != old and text.count(bare) == 1:
+                old, n = bare, 1
         if n != 1:
-            return f"error: `old` occurs {n} times in {p}; it must occur exactly once"
+            return f"error: `old` occurs {n} times in {p}; it must occur exactly once" + near_lines(text, old)
         after = text.replace(old, new)
         say(diff_text(text, after, str(p)))
         where = "" if self.inside(p) else f" (outside {self.root})"
@@ -390,6 +395,17 @@ class Agent:
             out = (e.stdout or "") + (e.stderr or "")
             return (out if isinstance(out, str) else out.decode(errors="replace")) + f"\n[timed out after {timeout} s]"
         return (r.stdout + r.stderr).rstrip() + f"\n[exit code {r.returncode}]"
+
+
+def near_lines(text: str, old: str) -> str:
+    """For an edit whose `old` is not in the file: the file's lines closest to its first line, as they are."""
+    first = next((x for x in old.splitlines() if x.strip()), "")
+    lines = text.splitlines()
+    hits = difflib.get_close_matches(first, lines, n=3, cutoff=0.5)
+    if not hits:
+        return " (read_file shows the file as it is)"
+    rows = [f"{i + 1:6}\t{x}" for i, x in enumerate(lines) if x in hits][:3]
+    return ". The lines closest to its first line, exactly as the file has them (without the number and tab):\n" + "\n".join(rows)
 
 
 def diff_text(old: str, new: str, name: str) -> str:
