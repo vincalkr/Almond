@@ -1453,11 +1453,14 @@ int ds41_main(int argc, char ** argv) {
             }
             progress(c0);
         }
+        vram_log("batch end", 0);
         if (dc.elastic_cols) {   // back to S columns
             if (!dense.set_columns(0)) { ferr = dense.last_error(); return false; }
             if (rdev1) rdev1 = dense.routed_dev();
         }
+        vram_log("after the columns", 0);
         tier.release_chunk();
+        vram_log("after release_chunk", 0);
         return true;
     };
 

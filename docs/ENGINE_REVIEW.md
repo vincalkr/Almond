@@ -134,3 +134,22 @@ Ordine suggerito, dal più vicino al più lontano: `expert.cpp` (101 righe diver
   `src/glm/core/expert_source.cpp`): non lette per intero.
 - Percorsi d'errore di `src/glm/core/glm_fast_path.cu` e `src/glm/program/generate.cpp` (16 000 righe).
 - Nessuna misura: la revisione non ha usato le GPU.
+
+## Dopo la revisione: la VRAM che DeepSeek non riprende (2026-10-30, misurato)
+
+Le due 7900 XTX, DeepSeek-V4.1-Flash-1017 RCO, `ALMOND_VRAM_TRACE=1`. Non dipende dalle immagini: qualsiasi prompt
+che passa dal percorso batch (oltre ~128 token nuovi) lascia circa 2,5 GiB occupati sulla scheda 0, e la cache
+degli esperti si riapre in 15,2-15,4 GiB liberi invece di 17,9 (un prompt di testo da 465 token: 17,90 -> 15,44;
+uno con un'immagine, 486 token: 15,24). Le richieste dopo vanno alla stessa velocità (19-21 tok/s), con circa 2,5 GiB
+di esperti in meno in VRAM.
+
+Escluso, una prova ciascuno:
+- le colonne di `Ds41Dense`: ricostruite (`reset_columns`), nessun GiB torna;
+- la pool di ggml-cuda: svuotarla restituisce 0,21 GiB e poi il motore va in crash (illegal memory access); tolto;
+- le allocazioni `hipMalloc` di 1 MiB o più (intercettate con LD_PRELOAD): dopo il batch tengono 2.288 MiB in meno,
+  non di più; nessuna chiamata a `hipMallocAsync`, `hipExtMallocWithFlags`, `hipMallocManaged`, `hipMemCreate`;
+- i moduli di kernel caricati durante il batch (rocBLAS, 4 moduli): ~24 MiB;
+- `HSA_ENABLE_SCRATCH_ASYNC_RECLAIM=1` e `HSA_SCRATCH_SINGLE_LIMIT=256 MiB`: nessun effetto.
+
+Resta da guardare: la memoria interna del runtime HIP (scratch dei kernel impostata con `hipDeviceSetLimit`, l'esperimento
+si è bloccato), e la memoria di rocBLAS/hipBLASLt non presa con `hipMalloc`.
