@@ -1,4 +1,4 @@
-// src/kernels/cuda/exl3.cu - the EXL3 device kernels (the format: include/strata/kernels/exl3.hpp).
+// src/kernels/cuda/exl3.cu - the EXL3 device kernels (the format: include/almond/glm/kernels/exl3.hpp).
 //
 // The codebooks and the trellis window arithmetic follow exllamav3 (MIT, turboderp - exllamav3_ext/quant/
 // codebook.cuh, exl3_dq.cuh, hadamard_inner.cuh), and so does decoding a tile straight into tensor-core fragments
@@ -17,14 +17,14 @@
 // NVIDIA GPUs before sm_80 (V100, T4, RTX 20) decode with v1.1.8's kernels instead (exl3_legacy.cu, use_legacy
 // below): this file's CUDA-core fallback was slower there (a V100 with EXL3-3.05bpw: decode 4.9 -> 4.4 tok/s).  The
 // prompt path below is this file's on every GPU.
-#include "strata/kernels/exl3.hpp"
+#include "almond/glm/kernels/exl3.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#if !defined(STRATA_USE_HIP)
+#if !defined(ALMOND_USE_HIP)
 #include <mma.h>
 #endif
-#include "strata/kernels/dp4a.hpp"   // sm_60: __dp4a -> the vmad fallback
+#include "almond/glm/kernels/dp4a.hpp"   // sm_60: __dp4a -> the vmad fallback
 
 #include <algorithm>
 #include <atomic>
@@ -36,8 +36,8 @@
 #include <type_traits>
 #include <utility>
 
-#if !defined(STRATA_USE_HIP)
-namespace strata::kernels::exl3::legacy {   // exl3_legacy.cu: v1.1.8's decode kernels
+#if !defined(ALMOND_USE_HIP)
+namespace almond::glm::kernels::exl3::legacy {   // exl3_legacy.cu: v1.1.8's decode kernels
 int launch_errors();
 bool prepare(cudaStream_t s);
 bool several_ok();
@@ -45,7 +45,7 @@ bool mv(const MvJob* jobs, int n, cudaStream_t s);
 void moe_gate_up(const MoeArgs& a, const float* x, float* h, cudaStream_t s);
 void moe_down(const MoeArgs& a, const float* h, const float* sh_out, float* out, cudaStream_t s);
 bool win_experts(const WinArgs& a, cudaStream_t s);
-}  // namespace strata::kernels::exl3::legacy
+}  // namespace almond::glm::kernels::exl3::legacy
 #define EXL3_LEGACY(call) \
     if (use_legacy()) return legacy::call
 // ... the experts' kernels only where v1.1.8's cover the model: their rotated input slice is at most 4096 wide (GLM's);
@@ -58,7 +58,7 @@ bool win_experts(const WinArgs& a, cudaStream_t s);
 #define EXL3_LEGACY_MOE(a, call) (void) 0
 #endif
 
-namespace strata::kernels::exl3 {
+namespace almond::glm::kernels::exl3 {
 namespace {
 
 constexpr int kThreads = 256, kWarps = 8;
@@ -86,7 +86,7 @@ void launch_check(const char* what) {
 
 // ---------------------------------------------------------------- the codebooks
 __device__ __forceinline__ uint32_t bytesum_plus(uint32_t x, uint32_t acc) {
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     return __builtin_amdgcn_sad_u8(x, 0u, acc);   // (v_sad_u8: the bytes' |x - 0| summed onto acc, one instruction)
 #else
     return __dp4a(x, 0x01010101u, acc);
@@ -315,12 +315,12 @@ __device__ __forceinline__ void chunk_store(float (&v)[4], const float (&s)[4], 
 // with a __syncthreads (out complete).
 constexpr int kTok = 8;   // activations a block takes at once (the MMA's n)
 
-#if !defined(STRATA_USE_HIP) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#if !defined(ALMOND_USE_HIP) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 #define EXL3_TC 1
 #endif
 
 // RDNA 3 / 4: v_dot2_f32_f16 - two FP16 products and their FP32 sum onto c in one instruction (no conversions)
-#if defined(STRATA_USE_HIP) && (defined(__GFX11__) || defined(__GFX12__))
+#if defined(ALMOND_USE_HIP) && (defined(__GFX11__) || defined(__GFX12__))
 #define EXL3_DOT2 1
 typedef _Float16 exl3_h2 __attribute__((ext_vector_type(2)));
 __device__ __forceinline__ float dot2_acc(uint32_t a, uint32_t b, float c) {
@@ -401,7 +401,7 @@ constexpr int kMinBlocksMv = K2 <= 8 ? 2 : 3;
 template <int K2>
 constexpr int kMinBlocksMv = 2;
 #endif
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
 #define EXL3_BOUNDS(n) __launch_bounds__(kThreads)
 #else
 #define EXL3_BOUNDS(n) __launch_bounds__(kThreads, n)
@@ -1152,7 +1152,7 @@ __global__ void rows_f16_kernel(const float* __restrict__ x, int ldx, const int*
 // straight into mma.m16n8k16's B fragments - a lane's 8 steps ARE the fragment order (steps 0,1 / 2,3 rows 2t+{0,1} /
 // 2t+8+{0,1} of column g, steps 4..7 the same of column g + 8) - and multiplies every m-tile of the block with them.
 // The output rotation and svh run on the F32 tile in shared memory.
-#if !defined(STRATA_USE_HIP)
+#if !defined(ALMOND_USE_HIP)
 namespace tc {
 
 constexpr int BM = 32, MT = BM / 16, AP = 136;   // rows a block, its m-tiles, the A rows' pitch (halves)
@@ -1505,9 +1505,9 @@ __global__ void __launch_bounds__(kThreads) set_mix_kernel(const KSetMix a, KMix
 // B 16 activations' slice from xb (col-major: an activation's inputs in a row), D stored col-major into out - the same
 // operands as gfx11's, the fragments loaded by the library instead of by hand (wt's pitch 12 words: wmma's ldm is a
 // multiple of 8 halves; the 8 rows a store takes stay on distinct banks).  wmma_now(): sm_7x unless
-// STRATA_EXL3_WMMA=0 (MAYA_EXL3_WMMA=0).
+// ALMOND_EXL3_WMMA=0 (ALMOND_EXL3_WMMA=0).
 constexpr int kXS = kCols + 8;   // an activation's pitch in xb (halves: 2-way LDS reads)
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
 constexpr int kWtP = 9;          // wt's pitch, words a decoded output row (8 + 1: banks)
 #else
 constexpr int kWtP = 12;
@@ -1519,13 +1519,13 @@ struct WmmaSmem {   // (out, xb and wt at the same offsets for every K2: the mix
     uint32_t wt[kWarps * 16 * kWtP];   // a warp's decoded tile by output, 8 words a row (kWtP apart)
     uint32_t stage[kWarps * 4 * K2];
 };
-#if defined(STRATA_USE_HIP) && defined(__GFX11__)
+#if defined(ALMOND_USE_HIP) && defined(__GFX11__)
 #define EXL3_WMMA 1
 typedef _Float16 exl3_h16 __attribute__((ext_vector_type(16)));
 typedef float exl3_f8 __attribute__((ext_vector_type(8)));
 typedef uint32_t exl3_u8 __attribute__((ext_vector_type(8)));
 #endif
-#if !defined(STRATA_USE_HIP) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700 && __CUDA_ARCH__ < 800
+#if !defined(ALMOND_USE_HIP) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700 && __CUDA_ARCH__ < 800
 #define EXL3_WMMA_V70 1
 #endif
 
@@ -1846,7 +1846,7 @@ template <int K2, int cb> struct RunRows {
             m.trellis, m.ld > 0 ? m.ld : m.n / 16, m.suh, m.svh, m.k, dst, bf16);
     }
 };
-#if !defined(STRATA_USE_HIP)
+#if !defined(ALMOND_USE_HIP)
 template <int K2, int cb> struct RunGemm {
     static void run(const tc::GArgs& a, dim3 grid, cudaStream_t s) { tc::gemm_kernel<K2, cb><<<grid, kThreads, 0, s>>>(a); }
 };
@@ -1924,11 +1924,11 @@ int sm_count() {
 }
 
 // Whether the current device decodes with v1.1.8's kernels (exl3_legacy.cu): NVIDIA before sm_80, where this file's
-// tiles run on the CUDA cores and were slower; STRATA_GLM_EXL3_DECODE=legacy | new picks one on any GPU (A/B).  The
+// tiles run on the CUDA cores and were slower; ALMOND_GLM_EXL3_DECODE=legacy | new picks one on any GPU (A/B).  The
 // token path and the verify windows take the same family on a device, so a window stays bit for bit its token path.
 // Asked once per device.
 bool use_legacy() {
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     return false;
 #else
     static std::atomic<int> cache[64];   // 0 not asked, 1 v1.1.8's kernels, 2 this file's
@@ -1939,7 +1939,7 @@ bool use_legacy() {
     if (c == 0) {
         int major = 0;
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
-        const char* v = std::getenv("STRATA_GLM_EXL3_DECODE");
+        const char* v = std::getenv("ALMOND_GLM_EXL3_DECODE");
         c = v != nullptr && std::strcmp(v, "legacy") == 0 ? 1 : v != nullptr && std::strcmp(v, "new") == 0 ? 2
             : major < 8                                    ? 1
                                                            : 2;
@@ -2030,7 +2030,7 @@ int mv_splits(const Mat& m) {
 
 int mv_cols(const Mat& m) {
     if (!supported(m)) return 0;
-#if !defined(STRATA_USE_HIP)
+#if !defined(ALMOND_USE_HIP)
     if (use_legacy()) return 4;   // (v1.1.8's kernels: the runs of four their callers have always used)
 #endif
     const int S = mv_splits(m);
@@ -2040,7 +2040,7 @@ int mv_cols(const Mat& m) {
 }
 
 int launch_errors() {
-#if !defined(STRATA_USE_HIP)
+#if !defined(ALMOND_USE_HIP)
     return g_launch_errors.load(std::memory_order_relaxed) + legacy::launch_errors();
 #else
     return g_launch_errors.load(std::memory_order_relaxed);
@@ -2320,7 +2320,7 @@ bool win_experts(const WinArgs& a, cudaStream_t s) {
 
 // mma_supported() for the current device, cached (the prompt path's launches ask it each time)
 bool mma_now() {
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     return false;
 #else
     static int known[64];   // 0: not asked yet, 1: no, 2: yes
@@ -2334,7 +2334,7 @@ bool mma_now() {
 
 // the prompt path on the matrix cores (wmma_set_kernel): an RDNA 3 GPU (gfx11), unless EXL3_WMMA=0 - cached a device
 static bool wmma_now() {
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     static const bool off = std::getenv("EXL3_WMMA") != nullptr && std::atoi(std::getenv("EXL3_WMMA")) == 0;
     static int known[64];   // 0: not asked yet, 1: no, 2: yes
     int dev = 0;
@@ -2348,7 +2348,7 @@ static bool wmma_now() {
     return known[dev] == 2;
 #else
     // sm_7x: the Volta / Turing wmma kernels (sm_80 and later take the mma.m16n8k16 ones)
-    static const bool off = std::getenv("STRATA_EXL3_WMMA") != nullptr && std::atoi(std::getenv("STRATA_EXL3_WMMA")) == 0;
+    static const bool off = std::getenv("ALMOND_EXL3_WMMA") != nullptr && std::atoi(std::getenv("ALMOND_EXL3_WMMA")) == 0;
     static int known[64];
     int dev = 0;
     cudaGetDevice(&dev);
@@ -2370,7 +2370,7 @@ static int wmma_rows() {
 }
 template <class F>
 static void with_rows(F&& f) {   // (f(std::integral_constant<int, wmma_rows()>{}))
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     if (wmma_rows() == 16) f(std::integral_constant<int, 16>{});
     else f(std::integral_constant<int, 32>{});
 #else
@@ -2397,7 +2397,7 @@ template <int K2, int cb> struct RunWmmaDown {
 };
 
 bool prompt_tc() {
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     return false;
 #else
     return mma_supported() || wmma_now();
@@ -2405,7 +2405,7 @@ bool prompt_tc() {
 }
 
 bool mma_supported() {
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     return false;
 #else
     int dev = 0, major = 0;
@@ -2421,7 +2421,7 @@ void set_gate_up(const SetArgs& sa, const float* x, int ldx, const int* row_idx,
         if (sa.n_exp <= 0 || sa.max_rows <= 0) return;
         if (sa.eptr == nullptr || !mixed_ok(sa.mix, "set_gate_up")) return;
         const KMix k = kmix(sa.mix);
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
         if (wmma_now()) {
             mix_launch(sa.mix, [&](auto cb) {
                 with_rows([&](auto nr) {
@@ -2443,7 +2443,7 @@ void set_gate_up(const SetArgs& sa, const float* x, int ldx, const int* row_idx,
         launch_check("set_gate_up (mixed)");
         return;
     }
-#if !defined(STRATA_USE_HIP)
+#if !defined(ALMOND_USE_HIP)
     if (!mma_now()) {   // (before sm_80: the portable kernels - on sm_7x the wmma ones)
         if (sa.n_exp <= 0 || sa.max_rows <= 0) return;
         if (wmma_now() && sa.lay.k2[0] == sa.lay.k2[1] &&
@@ -2509,7 +2509,7 @@ void set_down(const SetArgs& sa, const uint16_t* h16, int ldh, float* y, int ldy
         if (sa.n_exp <= 0 || sa.max_rows <= 0) return;
         if (sa.eptr == nullptr || !mixed_ok(sa.mix, "set_down")) return;
         const KMix k = kmix(sa.mix);
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
         if (wmma_now()) {
             mix_launch(sa.mix, [&](auto cb) {
                 with_rows([&](auto nr) {
@@ -2531,7 +2531,7 @@ void set_down(const SetArgs& sa, const uint16_t* h16, int ldh, float* y, int ldy
         launch_check("set_down (mixed)");
         return;
     }
-#if !defined(STRATA_USE_HIP)
+#if !defined(ALMOND_USE_HIP)
     if (sa.n_exp <= 0 || sa.max_rows <= 0) return;
     if (!mma_now()) {   // (before sm_80: the portable kernels - on sm_7x the wmma ones)
         if (wmma_now() && dispatch<RunWmmaDown>(sa.lay.k2[2], sa.lay.cb, sa, h16, ldh, y, ldy, s)) {
@@ -2578,7 +2578,7 @@ void set_down(const SetArgs& sa, const uint16_t* h16, int ldh, float* y, int ldy
 }
 
 void gemm_rows(const Mat& m, const uint16_t* x16, int ldx, int rows, float* y, int ldy, float beta, cudaStream_t s) {
-#if !defined(STRATA_USE_HIP)
+#if !defined(ALMOND_USE_HIP)
     if (rows <= 0) return;
     if (!mma_now()) {   // (before sm_80: the portable kernels)
         if (!supported(m) || !dispatch<RunHipRows>(m.k2, m.cb, m, x16, ldx, rows, y, ldy, beta, s))
@@ -2668,4 +2668,4 @@ void reconstruct_inner(const Mat& m, uint16_t* dst, cudaStream_t s) {
     launch_check("reconstruct_inner");
 }
 
-}  // namespace strata::kernels::exl3
+}  // namespace almond::glm::kernels::exl3

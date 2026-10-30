@@ -1,9 +1,9 @@
-#include "strata/core/remote_experts.hpp"
+#include "almond/glm/core/remote_experts.hpp"
 
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/s2_expert_grouped.hpp"
+#include "almond/glm/kernels/cpu/expert_layout.hpp"
+#include "almond/glm/kernels/iq_kernels.hpp"
+#include "almond/glm/kernels/quantize_act.hpp"
+#include "almond/glm/kernels/s2_expert_grouped.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -11,11 +11,11 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace strata::core {
+namespace almond::glm::core {
 namespace {
-constexpr int64_t H = strata::kernels::cpu::H;
-constexpr int64_t FF = strata::kernels::cpu::FF;
-constexpr int64_t CAP = strata::kernels::cpu::MAXT * 10;
+constexpr int64_t H = almond::glm::kernels::cpu::H;
+constexpr int64_t FF = almond::glm::kernels::cpu::FF;
+constexpr int64_t CAP = almond::glm::kernels::cpu::MAXT * 10;
 
 // Small enough to copy as one pinned buffer per layer. The kernels read the
 // individual arrays through pointers into the same device allocation.
@@ -110,9 +110,9 @@ bool GlmExpertHelper::open(int device, int n_embd, int n_ff,
     plan_.plan_w = (float*) take(8 * sizeof(float));
     plan_.cpu_flag = (int*) take(64);
     if (!check(cudaMemset(plan_.cpu_flag, 0, 64), "helper flags", err, device)) return false;
-    // zero-copy on an integrated helper (the Qwen helper's STRATA_REMOTE_ZEROCOPY pattern): its device reads the host's
+    // zero-copy on an integrated helper (the Qwen helper's ALMOND_REMOTE_ZEROCOPY pattern): its device reads the host's
     // memory as its own, so the input, the plan and the result stay in one mapped pinned block
-    const char* zc = std::getenv("STRATA_GLM_HELPER_ZEROCOPY");
+    const char* zc = std::getenv("ALMOND_GLM_HELPER_ZEROCOPY");
     if (integrated_ && !(zc != nullptr && zc[0] == '0')) {
         const size_t xb = (size_t) n_embd * sizeof(float);
         void* block = nullptr;
@@ -133,7 +133,7 @@ bool GlmExpertHelper::open(int device, int n_embd, int n_ff,
         zplan_.plan_w = (float*) (z + 2 * xb + 8 * sizeof(unsigned long long));
         zero_copy_ = true;
     }
-    prof_ = std::getenv("STRATA_GLM_PROF") != nullptr;
+    prof_ = std::getenv("ALMOND_GLM_PROF") != nullptr;
     for (auto& e : ev_)
         if (prof_ && !check(cudaEventCreate(&e), "helper profile event", err, device)) return false;
     return true;
@@ -243,7 +243,7 @@ std::vector<GlmExpertHelper::Swap> GlmExpertHelper::swaps(const std::vector<uint
 bool GlmExpertHelper::compute(int gu_type, int d_type, size_t down_off, float limit, int ne,
                               const int* keys, const float* weights, const float* x,
                               float* out, std::string& err) {
-    namespace gf = strata::kernels::glmf;
+    namespace gf = almond::glm::kernels::glmf;
     if (device_ < 0 || ne < 1 || ne > 8 || !gf::moe_supported(gu_type) || !gf::moe_supported(d_type)) {
         err = "GLM expert helper: unsupported expert types or route width";
         return false;
@@ -354,9 +354,9 @@ bool RemoteExperts::preflight(int device, double& free_gib, std::string& err) {
     }
     // The layer waits for this GPU on the CPU pool's critical path: spin instead of sleeping, whose wake-up
     // costs more than a small expert batch takes (measured: ~0.3 ms per round trip on Windows).  Only possible
-    // before the device's context exists, so first thing; STRATA_REMOTE_SPIN=0 keeps the driver's default.
-#if !defined(STRATA_USE_HIP)
-    const char* spin = std::getenv("STRATA_REMOTE_SPIN");
+    // before the device's context exists, so first thing; ALMOND_REMOTE_SPIN=0 keeps the driver's default.
+#if !defined(ALMOND_USE_HIP)
+    const char* spin = std::getenv("ALMOND_REMOTE_SPIN");
     if (!(spin && spin[0] == '0')) cudaInitDevice(device, cudaDeviceScheduleSpin | cudaDeviceMapHost, 0);
     cudaGetLastError();
 #endif
@@ -415,7 +415,7 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
     if (!scope.ok) { err = scope.error(device); return false; }
     device_ = device;
     n_expert_ = experts;
-    const auto& lay = strata::kernels::cpu::expert_layout();
+    const auto& lay = almond::glm::kernels::cpu::expert_layout();
     std::vector<std::pair<int32_t, int32_t>> selected;
     selected.reserve((size_t) slots);
     std::vector<uint8_t> picked(claimed.size(), 0);
@@ -465,8 +465,8 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
     }
 
     const size_t scratch = std::max<size_t>(
-        (size_t) strata::kernels::moe_hit_grouped_scratch_bytes(CAP, H, FF),
-        strata::kernels::native_expert_scratch_bytes(CAP, FF));
+        (size_t) almond::glm::kernels::moe_hit_grouped_scratch_bytes(CAP, H, FF),
+        almond::glm::kernels::native_expert_scratch_bytes(CAP, FF));
     const bool allocated =
         check(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "stream", err, device) &&
         check(cudaHostAlloc((void**) &h_x_, (size_t) CAP * H * sizeof(float), cudaHostAllocPortable | cudaHostAllocMapped), "input staging", err, device) &&
@@ -480,8 +480,8 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         check(cudaMalloc(&d_meta_, sizeof(RemoteMeta)), "group metadata", err, device);
     if (!allocated) { close(); return false; }
     // Zero-copy: the helper reads its input from, and writes its compact rows into, the pinned host buffers
-    // directly - two copies fewer per layer, each of which is a PCIe round trip.  STRATA_REMOTE_ZEROCOPY=0 copies.
-    const char* zc = std::getenv("STRATA_REMOTE_ZEROCOPY");
+    // directly - two copies fewer per layer, each of which is a PCIe round trip.  ALMOND_REMOTE_ZEROCOPY=0 copies.
+    const char* zc = std::getenv("ALMOND_REMOTE_ZEROCOPY");
     zero_copy_ = !(zc && zc[0] == '0') &&
                  cudaHostGetDevicePointer((void**) &z_x_, h_x_, 0) == cudaSuccess &&
                  cudaHostGetDevicePointer((void**) &z_out_, h_out_, 0) == cudaSuccess;
@@ -518,7 +518,7 @@ bool RemoteExperts::begin(int64_t layer, const float* x, const int32_t* ids, int
     struct Timer { double& acc; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
         ~Timer() { acc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); } } timer{ms_begin_};
     const int64_t n = n_tok * k;
-    if (n <= 0 || n > CAP || n_tok > strata::kernels::cpu::MAXT || k != 10 || layer < 0 ||
+    if (n <= 0 || n > CAP || n_tok > almond::glm::kernels::cpu::MAXT || k != 10 || layer < 0 ||
         (size_t) layer >= layers_present_.size() || device_ < 0) {
         err = "CUDA" + std::to_string(device_) + " experts: invalid layer, routing width or window size";
         return false;
@@ -574,16 +574,16 @@ bool RemoteExperts::begin(int64_t layer, const float* x, const int32_t* ids, int
         (zero_copy_ || check(cudaMemcpyAsync(d_x_, h_x_, (size_t) n_tok * H * sizeof(float), cudaMemcpyHostToDevice, s), "copy input", err, device_)) &&
         check(cudaMemcpyAsync(d_meta_, h_meta_, sizeof(RemoteMeta), cudaMemcpyHostToDevice, s), "copy group metadata", err, device_);
     if (!staged) return false;
-    const auto& lay = strata::kernels::cpu::expert_layout();
+    const auto& lay = almond::glm::kernels::cpu::expert_layout();
     if (lay.native) {
-        strata::kernels::quantize_q8_1_rows(zero_copy_ ? z_x_ : d_x_, n_tok, H, d_q8_, s);
+        almond::glm::kernels::quantize_q8_1_rows(zero_copy_ ? z_x_ : d_x_, n_tok, H, d_q8_, s);
         const auto& fmt = lay.fmt[(size_t) layer];
-        auto L = strata::kernels::native_expert_layout(fmt.gu_type, fmt.d_type, fmt.n_embd, fmt.n_ff);
-        strata::kernels::native_expert_grouped(L, d_ptr_, d_start_, d_count_, d_dst_, d_tok_,
+        auto L = almond::glm::kernels::native_expert_layout(fmt.gu_type, fmt.d_type, fmt.n_embd, fmt.n_ff);
+        almond::glm::kernels::native_expert_grouped(L, d_ptr_, d_start_, d_count_, d_dst_, d_tok_,
                                                groups_, (int64_t) dst_.size(), d_q8_, d_scratch_, zero_copy_ ? z_out_ : d_out_, s);
     } else {
-        strata::kernels::quantize_q8_0_scaled(zero_copy_ ? z_x_ : d_x_, d_q8_, d_scales_, n_tok * H, s);
-        strata::kernels::moe_grouped_s2(d_ptr_, d_start_, d_count_, d_dst_, d_tok_,
+        almond::glm::kernels::quantize_q8_0_scaled(zero_copy_ ? z_x_ : d_x_, d_q8_, d_scales_, n_tok * H, s);
+        almond::glm::kernels::moe_grouped_s2(d_ptr_, d_start_, d_count_, d_dst_, d_tok_,
                                         groups_, (int64_t) dst_.size(), d_q8_, d_scales_, d_scratch_, zero_copy_ ? z_out_ : d_out_, s);
     }
     const uint64_t compact_bytes = (uint64_t) dst_.size() * H * sizeof(float);
@@ -607,4 +607,4 @@ bool RemoteExperts::finish(float* out, std::string& err) {
     return true;
 }
 
-} // namespace strata::core
+} // namespace almond::glm::core

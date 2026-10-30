@@ -1,4 +1,4 @@
-// src/core/glm_multi.cu - several conversations at once (STRATA_GLM_SEQS=<n>); see glm_model.hpp (SeqCtx).
+// src/core/glm_multi.cu - several conversations at once (ALMOND_GLM_SEQS=<n>); see glm_model.hpp (SeqCtx).
 //
 // Every per-sequence thing a part keeps lives in its state arena (the residual, the KDA states and conv histories, the
 // DSA latent / indexer caches) plus a handful of members (the position, the snapshot, the image rows).  A part holds n
@@ -17,7 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace strata::core {
+namespace almond::glm::core {
 
 void Glm5Model::seq_bind(int s) {
     ckpt_join();   // (ckpt_save_snapshot reads snap_ / snap_pool_)
@@ -113,22 +113,22 @@ uint64_t Glm5Model::seq_layout(int64_t ctx, SeqCtx& c) const {
     return c.bytes;
 }
 
-// STRATA_GLM_SEQS=<n> (1..8): n - 1 more state arenas on this part, zeroed - each for STRATA_GLM_SEQ_CTX tokens
+// ALMOND_GLM_SEQS=<n> (1..8): n - 1 more state arenas on this part, zeroed - each for ALMOND_GLM_SEQ_CTX tokens
 // (default: the engine's context; at least 8320, at most the context).  Called by load_pack right after the first
 // arena, so the expert pool is sized from what is left.
 bool Glm5Model::seq_alloc_arenas(std::string& err) {
-    const char* v = getenv("STRATA_GLM_SEQS");
+    const char* v = getenv("ALMOND_GLM_SEQS");
     const int n = v ? std::max(1, std::min(8, std::atoi(v))) : 1;
     if (n <= 1) return true;
     int64_t ctx = max_ctx_;
-    if (const char* c = getenv("STRATA_GLM_SEQ_CTX")) ctx = std::max<int64_t>(8320, std::min<int64_t>(max_ctx_, std::atoll(c)));
+    if (const char* c = getenv("ALMOND_GLM_SEQ_CTX")) ctx = std::max<int64_t>(8320, std::min<int64_t>(max_ctx_, std::atoll(c)));
     cudaSetDevice(dev_);
     seq_.assign((size_t) n, SeqCtx{});
     // the first sequence's layout recomputed must be the one load_pack made, or the others' would be wrong
     SeqCtx check;
     if (seq_layout(max_ctx_, check) != state_bytes_ || check.dsa_pool != dsa_pool_ || check.kda_conv != kda_conv_ ||
         check.dsa_lat != dsa_lat_ || check.ik_ring != ik_ring_) {
-        err = "glm multi: the state layout does not match load_pack's (this build cannot run MAYA_GLM_SEQS)";
+        err = "glm multi: the state layout does not match load_pack's (this build cannot run ALMOND_GLM_SEQS)";
         return false;
     }
     seq_[0].state = state_;
@@ -141,7 +141,7 @@ bool Glm5Model::seq_alloc_arenas(std::string& err) {
             cudaGetLastError();
             err = "pack: sequence state " + std::to_string(s) + " of " + std::to_string(n) + " (" +
                   std::to_string(c.bytes >> 20) + " MB) does not fit on CUDA" + std::to_string(dev_) +
-                  " - fewer MAYA_GLM_SEQS or a smaller MAYA_GLM_SEQ_CTX";
+                  " - fewer ALMOND_GLM_SEQS or a smaller ALMOND_GLM_SEQ_CTX";
             return false;
         }
         cudaMemset(a, 0, c.bytes);
@@ -177,7 +177,7 @@ bool Glm5Model::seq_alloc_arenas(std::string& err) {
     std::fprintf(stderr, "glm multi: CUDA%d %d sequence states: the first for %lld tokens (%.2f GB), %d more for %lld "
                  "(%.2f GB in all, with every sequence's snapshot)\n", dev_, n, (long long) max_ctx_,
                  (double) state_bytes_ / 1e9, n - 1, (long long) ctx, (double) more / 1e9);
-    // several conversations drafting at once (STRATA_GLM_MULTI_MTP): their windows' buffers, before the pool too
+    // several conversations drafting at once (ALMOND_GLM_MULTI_MTP): their windows' buffers, before the pool too
     if (multi_mtp_setting() > 0 && !mtpw_alloc(err)) return false;
     // one GPU decodes the sequences together; opt-in split rows need the same activations on every part, before its pool
     if (n_parts_ == 1 || split_rows_setting() > 0) return rows_alloc(err);
@@ -188,7 +188,7 @@ bool Glm5Model::seq_pipe_ready(std::string& err) {
     const Glm5Geometry& g = g_;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         if (m->seq_.empty()) {
-            err = "glm multi: one sequence state only (MAYA_GLM_SEQS)";
+            err = "glm multi: one sequence state only (ALMOND_GLM_SEQS)";
             return false;
         }
         cudaSetDevice(m->dev_);
@@ -211,7 +211,7 @@ bool Glm5Model::seq_pipe_ready(std::string& err) {
     return true;
 }
 
-bool Glm5Model::multi_issue(int s, int32_t token, const strata::kernels::SamplerParams& sp, std::string& err) {
+bool Glm5Model::multi_issue(int s, int32_t token, const almond::glm::kernels::SamplerParams& sp, std::string& err) {
     if (s < 0 || s >= seq_count() || seq_.empty()) {
         err = "glm multi: no sequence " + std::to_string(s);
         return false;
@@ -311,4 +311,4 @@ bool Glm5Model::multi_boundary(std::string& err) {
     return true;
 }
 
-}  // namespace strata::core
+}  // namespace almond::glm::core

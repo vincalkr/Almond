@@ -6,9 +6,9 @@
 //
 // Every row the synthetic table holds encodes its own index, so a wrong offset, a straddle mishandled or a
 // dedup slot mixed up shows as a mismatch rather than as plausible data.
-#include "strata/kernels/ngram.hpp"
-#include "strata/ngram/ple_reader.hpp"
-#include "strata/platform/direct_file.hpp"
+#include "almond/glm/kernels/ngram.hpp"
+#include "almond/glm/ngram/ple_reader.hpp"
+#include "almond/glm/platform/direct_file.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -20,9 +20,9 @@
 #include <string>
 #include <vector>
 
-namespace ng = strata::ngram;
-namespace k = strata::kernels;
-using strata::platform::now_us;
+namespace ng = almond::glm::ngram;
+namespace k = almond::glm::kernels;
+using almond::glm::platform::now_us;
 
 namespace {
 

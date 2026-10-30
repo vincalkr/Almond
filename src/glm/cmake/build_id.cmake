@@ -39,7 +39,7 @@ if(release STREQUAL "")
 endif()
 string(REPLACE "\"" "" id "${id}")
 string(REPLACE "\"" "" release "${release}")
-file(WRITE "${OUT}.tmp" "// written by cmake/build_id.cmake at every build\n#define MAYA_BUILD_ID \"${id}\"\n"
-                        "#define MAYA_RELEASE \"${release}\"\n")
+file(WRITE "${OUT}.tmp" "// written by cmake/build_id.cmake at every build\n#define ALMOND_BUILD_ID \"${id}\"\n"
+                        "#define ALMOND_RELEASE \"${release}\"\n")
 file(COPY_FILE "${OUT}.tmp" "${OUT}" ONLY_IF_DIFFERENT)
 file(REMOVE "${OUT}.tmp")

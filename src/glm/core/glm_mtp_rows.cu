@@ -1,4 +1,4 @@
-// src/core/glm_mtp_rows.cu - several conversations drafting with the NextN (MTP) block at once (STRATA_GLM_MULTI_MTP).
+// src/core/glm_mtp_rows.cu - several conversations drafting with the NextN (MTP) block at once (ALMOND_GLM_MULTI_MTP).
 //
 // The batched rows (glm_rows.cu) take one token of each of a group's conversations through the split.  Here each
 // conversation brings a WINDOW instead: the token it feeds (the last one it wrote) and up to d drafts the NextN block
@@ -14,7 +14,7 @@
 //   1. mtpw_front / mtpw_back: the rows through the parts and the head (a group's front can run while another
 //      group's back does: the split's GPUs work on different groups, as with the plain batched rows);
 //   2. mtpw_picks: the picks; the host keeps each window's rows up to the first draft that differs from what was
-//      written before it (strata/core/mtp_rows.hpp) - the kept rows' picks are the tokens written;
+//      written before it (almond/glm/core/mtp_rows.hpp) - the kept rows' picks are the tokens written;
 //   3. mtpw_commit: where a window kept fewer rows than it had, every part's recurrent states (KDA S and conv
 //      history) go back to the copy taken before the window and the kept rows are replayed from their inputs (kept
 //      by the forward pass); the positions become the window's start + kept rows.  The DSA caches' rows past that are
@@ -33,8 +33,8 @@
 // NextN cache rows' embeddings (last part); on the last part the rows' trunk hidden states and a draft chain's state.
 #include "glm_rows_state.hpp"
 
-#include "strata/core/mtp_rows.hpp"
-#include "strata/kernels/sampler.hpp"
+#include "almond/glm/core/mtp_rows.hpp"
+#include "almond/glm/kernels/sampler.hpp"
 
 #include "ggml.h"
 
@@ -44,7 +44,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace strata::core {
+namespace almond::glm::core {
 
 namespace {
 using glmrows::image_row_in;
@@ -90,7 +90,7 @@ struct Glm5Model::MtpRows {
 
 int Glm5Model::multi_mtp_setting() {
     static const int v = [] {
-        const char* e = getenv("STRATA_GLM_MULTI_MTP");
+        const char* e = getenv("ALMOND_GLM_MULTI_MTP");
         return e != nullptr ? std::clamp(std::atoi(e), 0, 7) : 0;
     }();
     return v;
@@ -98,7 +98,7 @@ int Glm5Model::multi_mtp_setting() {
 
 int Glm5Model::multi_mtp_cap() {
     static const int v = [] {
-        const char* e = getenv("STRATA_GLM_MULTI_MTP_ROWS");
+        const char* e = getenv("ALMOND_GLM_MULTI_MTP_ROWS");
         return e != nullptr ? std::clamp(std::atoi(e), 8, gf::kMaxMvNt) : gf::kMaxMvNt;
     }();
     return v;
@@ -148,7 +148,7 @@ bool Glm5Model::mtpw_alloc(std::string& err) {
     };
     const auto fail = [&](const std::string& what) {
         err = "glm multi mtp: " + what + " did not allocate on CUDA" + std::to_string(dev_) +
-              " - fewer conversations at once (--parallel), a smaller MAYA_GLM_SEQ_CTX or fewer drafts";
+              " - fewer conversations at once (--parallel), a smaller ALMOND_GLM_SEQ_CTX or fewer drafts";
         return false;
     };
     M->kin.assign((size_t) n, nullptr);
@@ -295,7 +295,7 @@ bool Glm5Model::rows_bind_win(const int* seqs, const int* counts, int n, RowSeq*
 
 // one part's share of a group's step (mtpw_front's parts, mtpw_back's last one)
 bool Glm5Model::mtpw_part(const int* seqs, const int* counts, int n, const int32_t* tokens,
-                          const strata::kernels::SamplerParams* sps, Glm5Model* prev, bool last, std::string& err) {
+                          const almond::glm::kernels::SamplerParams* sps, Glm5Model* prev, bool last, std::string& err) {
     MtpRows* M = mtpw_;
     FastState* F = fast_;
     RowsState* S = rows_;
@@ -382,7 +382,7 @@ bool Glm5Model::mtpw_part(const int* seqs, const int* counts, int n, const int32
         }
         for (int c = 0, row = 0; c < n; row += counts[c], ++c) {
             const float* lg = row_at(S->logits, g.n_vocab, row);
-            if (strata::core::rows_pick_argmax(sps[c])) {
+            if (almond::glm::core::rows_pick_argmax(sps[c])) {
                 for (int t = 0; t < counts[c]; ++t) gf::argmax(lg + (size_t) t * g.n_vocab, g.n_vocab, S->tok + row + t, s);
             } else {
                 // row t: the request's draw index + t, its penalties over the window's tokens before it
@@ -410,7 +410,7 @@ bool Glm5Model::mtpw_part(const int* seqs, const int* counts, int n, const int32
 
 bool Glm5Model::mtpw_front(const int* seqs, const int* counts, int n, const int32_t* tokens, std::string& err) {
     if (!mtpw_ok()) {
-        err = "glm multi mtp: not set up (MAYA_GLM_MULTI_MTP with --parallel, the NextN block loaded)";
+        err = "glm multi mtp: not set up (ALMOND_GLM_MULTI_MTP with --parallel, the NextN block loaded)";
         return false;
     }
     if (seq_[0].hop_h == nullptr && !seq_pipe_ready(err)) return false;
@@ -422,7 +422,7 @@ bool Glm5Model::mtpw_front(const int* seqs, const int* counts, int n, const int3
 }
 
 bool Glm5Model::mtpw_back(const int* seqs, const int* counts, int n, const int32_t* tokens,
-                          const strata::kernels::SamplerParams* sps, std::string& err) {
+                          const almond::glm::kernels::SamplerParams* sps, std::string& err) {
     Glm5Model *L = this, *prev = nullptr;
     while (L->split_next_) {
         prev = L;
@@ -742,7 +742,7 @@ bool Glm5Model::mtpw_draft_queue(const int* seqs, const int* keep, int n, const 
         return false;
     }
     static const bool whole_head = [] {
-        const char* e = getenv("STRATA_GLM_MULTI_MTP_VOCAB");
+        const char* e = getenv("ALMOND_GLM_MULTI_MTP_VOCAB");
         return e != nullptr && std::atoi(e) == 0;
     }();
     const bool sub = !whole_head && F->mtp_dv > 0;
@@ -760,10 +760,10 @@ bool Glm5Model::mtpw_draft_queue(const int* seqs, const int* keep, int n, const 
     M->d_tok.assign((size_t) n, -1);
     M->d_out.assign((size_t) n * (size_t) std::max(1, M->W - 1), -1);
     M->d_pending = false;
-    // STRATA_GLM_MULTI_MTP_DRAFT_ROWS (on): the conversations' draft steps as batched rows of the NextN block, nothing
+    // ALMOND_GLM_MULTI_MTP_DRAFT_ROWS (on): the conversations' draft steps as batched rows of the NextN block, nothing
     // bound; 0: each conversation's steps through the token path's block (fast_mtp), the last part bound to it
     static const bool draft_rows = [] {
-        const char* e = getenv("STRATA_GLM_MULTI_MTP_DRAFT_ROWS");
+        const char* e = getenv("ALMOND_GLM_MULTI_MTP_DRAFT_ROWS");
         return e == nullptr || std::atoi(e) != 0;
     }();
     RowSeq base[gf::kMaxMvNt];
@@ -886,4 +886,4 @@ bool Glm5Model::mtpw_draft_take(int32_t* out, std::string& err) {
     return true;
 }
 
-}  // namespace strata::core
+}  // namespace almond::glm::core

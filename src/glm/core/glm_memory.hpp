@@ -5,49 +5,49 @@
 #include <cstdlib>
 #include <utility>
 
-namespace strata::core::glmfast {
+namespace almond::glm::core::glmfast {
 
-// The all-resident launch skip (STRATA_GLM_RESIDENT_SKIP; the complete pool was here too until v1.1.35): on by
+// The all-resident launch skip (ALMOND_GLM_RESIDENT_SKIP; the complete pool was here too until v1.1.35): on by
 // default on AMD, where the Strix / Gorgon Halo APUs hold every expert (measured there); an NVIDIA build launches
 // every route's kernels unless the setting is 1.  The setting, when given, wins either way.
 inline bool on_by_default_on_amd(const char* env) {
     if (const char* v = std::getenv(env)) return std::atoi(v) != 0;
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     return true;
 #else
     return false;
 #endif
 }
-// The complete pool (STRATA_GLM_COMPLETE_POOL): on by default on every GPU since v1.1.35 - it is taken only where
+// The complete pool (ALMOND_GLM_COMPLETE_POOL): on by default on every GPU since v1.1.35 - it is taken only where
 // the budget holds every expert, the spares and the prompt path's tail (complete_pool_slots), so the capped pool
 // stays wherever it is needed.  NVIDIA kept the capped pool before, even where the budget held a complete one: a long
 // prompt's borrow then evicted ~270 residents a layer for good and the CPU lane ran the decode's misses (#474: 4x A100,
 // 33 tok/s instead of 83).  The setting, when given, wins either way (0: the capped pool, for A/B).
 inline bool complete_pool_on() {
-    if (const char* v = std::getenv("STRATA_GLM_COMPLETE_POOL")) return std::atoi(v) != 0;
+    if (const char* v = std::getenv("ALMOND_GLM_COMPLETE_POOL")) return std::atoi(v) != 0;
     return true;
 }
 // ... and the other way round: on by default on NVIDIA, off on AMD unless the setting is 1
 inline bool off_by_default_on_amd(const char* env) {
     if (const char* v = std::getenv(env)) return std::atoi(v) != 0;
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     return false;
 #else
     return true;
 #endif
 }
-// STRATA_GLM_GROUP_EXPERTS=1: the batched rows' routed experts each run once for all the rows of a group (glm_rows.cu)
+// ALMOND_GLM_GROUP_EXPERTS=1: the batched rows' routed experts each run once for all the rows of a group (glm_rows.cu)
 inline bool group_experts_on() {
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_GLM_GROUP_EXPERTS");
+        const char* v = std::getenv("ALMOND_GLM_GROUP_EXPERTS");
         return v != nullptr && std::atoi(v) != 0;
     }();
     return on;
 }
-// STRATA_GLM_SKIP_EMPTY=1: the batched rows leave out the launches their routes have no work for (glm_rows.cu)
+// ALMOND_GLM_SKIP_EMPTY=1: the batched rows leave out the launches their routes have no work for (glm_rows.cu)
 inline bool skip_empty_on() {
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_GLM_SKIP_EMPTY");
+        const char* v = std::getenv("ALMOND_GLM_SKIP_EMPTY");
         return v != nullptr && std::atoi(v) != 0;
     }();
     return on;
@@ -137,4 +137,4 @@ inline int warm_pool_slots(bool unified, int slots, int experts, int spares) {
     return full_unified_pool(unified, slots, experts) ? experts : std::min(experts, std::max(0, slots - spares));
 }
 
-}  // namespace strata::core::glmfast
+}  // namespace almond::glm::core::glmfast

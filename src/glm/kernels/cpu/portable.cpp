@@ -1,10 +1,10 @@
-#include "strata/kernels/cpu/expert.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/cpu/exl3_cpu.hpp"
-#include "strata/kernels/cpu/iq_avx2.hpp"
-#include "strata/kernels/cpu/iq_avx512.hpp"
-#include "strata/kernels/cpu/iq_avx512_one.hpp"
-#include "strata/kernels/cpu/kq_avx512.hpp"
+#include "almond/glm/kernels/cpu/expert.hpp"
+#include "almond/glm/kernels/cpu/expert_layout.hpp"
+#include "almond/glm/kernels/cpu/exl3_cpu.hpp"
+#include "almond/glm/kernels/cpu/iq_avx2.hpp"
+#include "almond/glm/kernels/cpu/iq_avx512.hpp"
+#include "almond/glm/kernels/cpu/iq_avx512_one.hpp"
+#include "almond/glm/kernels/cpu/kq_avx512.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -12,7 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace strata::kernels::cpu {
+namespace almond::glm::kernels::cpu {
 namespace {
 
 std::atomic<bool> oracle_q8_0{false};
@@ -154,4 +154,4 @@ bool exl3_cpu_band_acc_on(int, const Exl3Part&, const float* const*, int, int, i
 }
 void exl3_cpu_band_out(const Exl3Part&, const float*, float, int, float*) { unsupported("the EXL3 CPU kernel"); }
 
-}  // namespace strata::kernels::cpu
+}  // namespace almond::glm::kernels::cpu

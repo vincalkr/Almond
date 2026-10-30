@@ -1,12 +1,12 @@
-// src/spec/draft_policy.cpp - see include/strata/spec/draft_policy.hpp.
-#include "strata/spec/draft_policy.hpp"
+// src/spec/draft_policy.cpp - see include/almond/glm/spec/draft_policy.hpp.
+#include "almond/glm/spec/draft_policy.hpp"
 
 #include <algorithm>
 #include <cstdio>
 #include <limits>
 #include <vector>
 
-namespace strata::spec {
+namespace almond::glm::spec {
 namespace {
 
 // The shape of a round's cost by window size, relative to one token, used only for sizes not measured yet (the
@@ -286,4 +286,4 @@ std::string DraftPolicy::cost_text() const {
     return s;
 }
 
-}  // namespace strata::spec
+}  // namespace almond::glm::spec

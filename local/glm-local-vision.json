@@ -41,7 +41,7 @@
   },
   "loop_guard": true,
   "vision": {
-    "exe": "build-maya-vision/build/bin/maya-vision",
+    "exe": "build-vision/build/bin/almond-vision",
     "mmproj": "models/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf",
     "model": "models/glm53-vision/GLM-5.3-Flash-vocab.gguf",
     "gpu": true,

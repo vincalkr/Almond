@@ -8,12 +8,12 @@
 //   3. the composed gathers bitwise vs the host dequantization of those codes;
 //   4. qsa_decode_attn<3> + output fwht vs a host attention over the SAME dequantized K/V (fp32 math), and
 //      bounded against the fp32-true attention from the unquantized K/V.
-#include "strata/kernels/f16_bits.hpp"
-#include "strata/kernels/kv_q4.hpp"
-#include "strata/kernels/kv_q8.hpp"
-#include "strata/kernels/qsa.hpp"
-#include "strata/kernels/qsa_decode_attn.hpp"
-#include "strata/kernels/qsa_prompt_attn.hpp"
+#include "almond/glm/kernels/f16_bits.hpp"
+#include "almond/glm/kernels/kv_q4.hpp"
+#include "almond/glm/kernels/kv_q8.hpp"
+#include "almond/glm/kernels/qsa.hpp"
+#include "almond/glm/kernels/qsa_decode_attn.hpp"
+#include "almond/glm/kernels/qsa_prompt_attn.hpp"
 
 #include <cuda_runtime.h>
 
@@ -25,7 +25,7 @@
 #include <random>
 #include <vector>
 
-namespace k = strata::kernels;
+namespace k = almond::glm::kernels;
 
 namespace {
 int g_fail = 0;
@@ -329,7 +329,7 @@ int main() {
         float* d_at4 = dalloc<float>((size_t) QH * D);
         const bool took = k::qsa_prompt_attn_batch(d_q, pools, d_ids, d_step, cells, s, d_at4, 1, nullptr);
         if (!took) {
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
             // AMD: the tensor-core prompt path is CUDA-only, so it refuses every pool and the old kernel runs
             std::printf("[5/5] qsa_prompt_attn mode 3: PASS (refused on HIP - the old kernel runs)\n");
 #else

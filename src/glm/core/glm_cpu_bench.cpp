@@ -7,7 +7,7 @@
 // n_embd) and down (n_embd rows of n_ff) on each thread count given, rows split evenly over a persistent spinning
 // pool (no thread start per expert) - the shape of a CPU miss path beside the PCIe fetches.  GLM_CPU_BENCH_TOKENS=k: each
 // row dotted with k activations (a verify window's tokens sharing the expert): the same DRAM reads, k times the dots.
-#include "strata/kernels/cpu/native_expert.hpp"
+#include "almond/glm/kernels/cpu/native_expert.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -108,9 +108,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     const int n_embd = 4096, n_ff = 2048, n_exp = 64;
-    strata::kernels::cpu::NativeFmt f;
+    almond::glm::kernels::cpu::NativeFmt f;
     std::string err;
-    if (!strata::kernels::cpu::native_fmt(gu, dt, n_embd, n_ff, f, err)) {
+    if (!almond::glm::kernels::cpu::native_fmt(gu, dt, n_embd, n_ff, f, err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
     }
@@ -135,15 +135,15 @@ int main(int argc, char** argv) {
     std::vector<float> x(n_embd);
     for (int i = 0; i < n_embd; ++i) x[i] = std::sin(0.37f * i) * 0.5f;
     const int K = std::max(1, std::min(16, getenv("GLM_CPU_BENCH_TOKENS") ? std::atoi(getenv("GLM_CPU_BENCH_TOKENS")) : 1));
-    std::vector<uint8_t> act(K * strata::kernels::cpu::kNativeActBytes), hq(K * strata::kernels::cpu::kNativeHBytes);
+    std::vector<uint8_t> act(K * almond::glm::kernels::cpu::kNativeActBytes), hq(K * almond::glm::kernels::cpu::kNativeHBytes);
     std::vector<float> ff((size_t) K * n_ff), dn((size_t) K * n_embd);
     std::vector<const void*> ap(K), hp(K);
     std::vector<float*> fp(K), dp(K);
     for (int k = 0; k < K; ++k) {
         for (int i = 0; i < n_embd; ++i) x[i] = std::sin(0.37f * i + 0.11f * k) * 0.5f;
-        strata::kernels::cpu::native_quant_act(f, x.data(), act.data() + k * strata::kernels::cpu::kNativeActBytes);
-        ap[k] = act.data() + k * strata::kernels::cpu::kNativeActBytes;
-        hp[k] = hq.data() + k * strata::kernels::cpu::kNativeHBytes;
+        almond::glm::kernels::cpu::native_quant_act(f, x.data(), act.data() + k * almond::glm::kernels::cpu::kNativeActBytes);
+        ap[k] = act.data() + k * almond::glm::kernels::cpu::kNativeActBytes;
+        hp[k] = hq.data() + k * almond::glm::kernels::cpu::kNativeHBytes;
         fp[k] = ff.data() + (size_t) k * n_ff;
         dp[k] = dn.data() + (size_t) k * n_embd;
     }
@@ -161,13 +161,13 @@ int main(int argc, char** argv) {
             const auto t0 = std::chrono::steady_clock::now();
             pool.run([&](int t, int n) {
                 const int r0 = n_ff * t / n, r1 = n_ff * (t + 1) / n;
-                strata::kernels::cpu::native_gu_rows_split(f, b, b + gub, ap.data(), K, fp.data(), r0, r1, 10.0f);
+                almond::glm::kernels::cpu::native_gu_rows_split(f, b, b + gub, ap.data(), K, fp.data(), r0, r1, 10.0f);
             });
             const auto t1 = std::chrono::steady_clock::now();
-            for (int k = 0; k < K; ++k) strata::kernels::cpu::native_quant_h(f, fp[k], (void*) hp[k]);
+            for (int k = 0; k < K; ++k) almond::glm::kernels::cpu::native_quant_h(f, fp[k], (void*) hp[k]);
             pool.run([&](int t, int n) {
                 const int r0 = n_embd * t / n, r1 = n_embd * (t + 1) / n;
-                strata::kernels::cpu::native_down_rows_split(f, b + 2 * gub, hp.data(), K, dp.data(), r0, r1);
+                almond::glm::kernels::cpu::native_down_rows_split(f, b + 2 * gub, hp.data(), K, dp.data(), r0, r1);
             });
             const auto t2 = std::chrono::steady_clock::now();
             if (rep < n_exp) continue;   // the first lap warms the pool and the clocks

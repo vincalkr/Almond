@@ -5,7 +5,7 @@
 //
 //   1. draft   - the NextN block at p0 - 1 reads (h_{p0-1}, y) and proposes d1; its own output hidden state
 //                (shared_head_norm's, which also feeds its head) and d1 make the next step at p0, ... up to n drafts
-//                (STRATA_GLM_MTP_DRAFT, 3; greedy: each draft is the head's argmax over the draft vocabulary);
+//                (ALMOND_GLM_MTP_DRAFT, 3; greedy: each draft is the head's argmax over the draft vocabulary);
 //   2. verify  - window([y, d1 .. dn]): the rows through every layer in one batched pass, each row's pick the one the
 //                token-at-a-time decode makes there (the request's sampler, draw index counter + t);
 //   3. accept  - d_{t+1} stands while it matches the pick at row t; the first mismatch is the new token, a full match
@@ -15,19 +15,19 @@
 //                the entries the drafts wrote from their own hidden states are replaced).
 //
 // The tokens are exactly what the token-at-a-time loop produces for the same samples.  A length 0 round is a plain token
-// (the token path, which keeps the NextN cache: mtp_fill_prev).  The length adapts per machine (STRATA_GLM_MTP_ADAPT,
+// (the token path, which keeps the NextN cache: mtp_fill_prev).  The length adapts per machine (ALMOND_GLM_MTP_ADAPT,
 // on): every round's wall time is measured per length and the draft positions' acceptance counted, and the length with
 // the most tokens per second wins.
 //
 // Where it runs: one GPU that holds the routed experts (a verify row costs its experts in full where they stream from
-// RAM) - by default the Strix / Gorgon Halo APUs (gfx115x), whose memory holds the whole model; STRATA_GLM_MTP_DECODE=1
+// RAM) - by default the Strix / Gorgon Halo APUs (gfx115x), whose memory holds the whole model; ALMOND_GLM_MTP_DECODE=1
 // asks for it elsewhere, =0 turns it off.  Not with several conversations at once (--parallel) or a DFlash drafter.
 //
 // The NextN cache's entry p pairs h_p with the token at p + 1 (the prompt path writes them so).
 #include "glm_fast_state.hpp"
-#include "strata/core/glm_model.hpp"
-#include "strata/kernels/glm_fast.hpp"
-#include "strata/kernels/sampler.hpp"
+#include "almond/glm/core/glm_model.hpp"
+#include "almond/glm/kernels/glm_fast.hpp"
+#include "almond/glm/kernels/sampler.hpp"
 
 #include "ggml.h"
 
@@ -42,32 +42,32 @@
 #include <string>
 #include <vector>
 
-namespace gf = strata::kernels::glmf;
+namespace gf = almond::glm::kernels::glmf;
 
-namespace strata::core {
+namespace almond::glm::core {
 
 namespace {
 constexpr size_t kQ8 = 36;   // bytes per q8_1 block (32 values)
 
 size_t q8_bytes(int64_t n) { return (size_t) (n / 32) * kQ8; }
 
-// the drafts per round at most: STRATA_GLM_MTP_DRAFT (3; 0 turns the MTP decode off)
+// the drafts per round at most: ALMOND_GLM_MTP_DRAFT (3; 0 turns the MTP decode off)
 int mtp_draft_cap() {
     static const int v = [] {
-        const char* e = getenv("STRATA_GLM_MTP_DRAFT");
+        const char* e = getenv("ALMOND_GLM_MTP_DRAFT");
         return e ? std::max(0, std::min(Glm5Model::kWinMax - 1, std::atoi(e))) : 3;
     }();
     return v;
 }
 
-// STRATA_GLM_MTP_CHAIN: the drafts of a round go out as one chain on the device - each step's argmax feeds the next
+// ALMOND_GLM_MTP_CHAIN: the drafts of a round go out as one chain on the device - each step's argmax feeds the next
 // step's embedding there (token_embd kept on the device, embed_tok) - and the host reads them back once, instead of a
 // wait, a host dequantization and a copy per step; nor does the round wait for the device before its drafts or its
 // NextN cache rows (the host's own rows go through their own pinned buffers).  Unset: on where the device holds every
 // routed expert and token_embd besides; 1 = on wherever token_embd is Q6_K or Q8_0; 0 = off (step by step).
 bool mtp_chain_wanted() {
     static const bool v = [] {
-        const char* e = getenv("STRATA_GLM_MTP_CHAIN");
+        const char* e = getenv("ALMOND_GLM_MTP_CHAIN");
         return e == nullptr || std::atoi(e) != 0;
     }();
     return v;
@@ -76,13 +76,13 @@ bool mtp_chain_wanted() {
 
 // load_pack / fast_setup: whether this model decodes with the MTP block on one GPU (see the top of this file)
 bool Glm5Model::mtp_decode_wanted(int dev, int n_parts) {
-    if (getenv("STRATA_GLM_NO_SPEC") != nullptr || getenv("STRATA_GLM_NO_MTP") != nullptr || mtp_draft_cap() <= 0)
+    if (getenv("ALMOND_GLM_NO_SPEC") != nullptr || getenv("ALMOND_GLM_NO_MTP") != nullptr || mtp_draft_cap() <= 0)
         return false;
-    if (const char* q = getenv("STRATA_GLM_SEQS"); q != nullptr && std::atoi(q) > 1) return false;   // (--parallel)
-    if (const char* d = getenv("STRATA_GLM_DFLASH"); d != nullptr && d[0] != '\0') return false;
-    if (const char* e = getenv("STRATA_GLM_MTP_DECODE")) return std::atoi(e) != 0 && n_parts == 1;
+    if (const char* q = getenv("ALMOND_GLM_SEQS"); q != nullptr && std::atoi(q) > 1) return false;   // (--parallel)
+    if (const char* d = getenv("ALMOND_GLM_DFLASH"); d != nullptr && d[0] != '\0') return false;
+    if (const char* e = getenv("ALMOND_GLM_MTP_DECODE")) return std::atoi(e) != 0 && n_parts == 1;
     if (n_parts != 1) return false;
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     // the Strix / Gorgon Halo APUs (gfx1150 / gfx1151 / gfx1152): their memory holds every expert
     hipDeviceProp_t prop{};
     if (hipGetDeviceProperties(&prop, dev) != hipSuccess) return false;
@@ -112,7 +112,7 @@ bool Glm5Model::mtp_ready() const { return fast_ != nullptr && mtp_dec_ && mtp_i
 //     begin that thousand;
 //   - after it, the tokens that are digits only, and the control / user-defined ones (the roles, <think>, the tool-call
 //     tags: a draft can still end a turn or open a call).
-// STRATA_GLM_MTP_DRAFT_VOCAB=<K>: the first K ids as the leading block (the rest as above); 0 = the whole head.  Where
+// ALMOND_GLM_MTP_DRAFT_VOCAB=<K>: the first K ids as the leading block (the rest as above); 0 = the whole head.  Where
 // the answer leaves the vocabulary (another script) the drafts go back to the whole head by themselves (decode_mtp:
 // the share of the emitted tokens outside it).
 
@@ -143,18 +143,18 @@ static void token_kind(const std::string& s, bool& ascii, bool& digits) {
 // load_pack, the part with the NextN block: the draft vocabulary from the GGUF's tokenizer (mtp_vlead_, mtp_vextra_,
 // mtp_vin_; left empty - the whole head - without a byte-level BPE vocabulary of n_vocab tokens, or where it would
 // not pay: more than 90% of the head, or a leading block under an eighth of it)
-void Glm5Model::mtp_vocab_scan(const std::vector<std::unique_ptr<strata::GgufFile>>& gfs) {
+void Glm5Model::mtp_vocab_scan(const std::vector<std::unique_ptr<almond::glm::GgufFile>>& gfs) {
     mtp_vlead_ = 0;
     mtp_vextra_.clear();
     mtp_vin_.clear();
     static const int env = [] {
-        const char* e = getenv("STRATA_GLM_MTP_DRAFT_VOCAB");
+        const char* e = getenv("ALMOND_GLM_MTP_DRAFT_VOCAB");
         return e != nullptr ? std::max(0, std::atoi(e)) : -1;
     }();
     if (env == 0) return;
     // (the reader's metadata keeps a sample of each array: the two arrays read whole)
-    strata::MetaValue toks_v, types_v;
-    const strata::MetaValue *toks = nullptr, *types = nullptr, *model = nullptr;
+    almond::glm::MetaValue toks_v, types_v;
+    const almond::glm::MetaValue *toks = nullptr, *types = nullptr, *model = nullptr;
     for (const auto& gf : gfs) {
         if (toks == nullptr && gf->get_full("tokenizer.ggml.tokens", toks_v)) toks = &toks_v;
         if (types == nullptr && gf->get_full("tokenizer.ggml.token_type", types_v)) types = &types_v;
@@ -234,8 +234,8 @@ void Glm5Model::mtp_draft_setup(bool chain) {
             mtp_vin_.clear();
         }
     }
-    // the chain: token_embd as stored, where the device has the room (or STRATA_GLM_MTP_CHAIN=1 says so)
-    const char* ce = getenv("STRATA_GLM_MTP_CHAIN");
+    // the chain: token_embd as stored, where the device has the room (or ALMOND_GLM_MTP_CHAIN=1 says so)
+    const char* ce = getenv("ALMOND_GLM_MTP_CHAIN");
     const bool want = chain && mtp_chain_wanted(), forced = chain && ce != nullptr && std::atoi(ce) != 0;
     const size_t rb = ggml_row_size((ggml_type) pack_emb_type_, g.n_embd);
     const size_t tb = (size_t) g.n_vocab * rb;
@@ -452,26 +452,26 @@ bool Glm5Model::mtp_fill_prev(int32_t token, int64_t p, std::string& err) {
 // ---------------------------------------------------------------- the draft length
 // The length that gives the most tokens per second on this machine: each length's round time (measured wall time: the
 // mean of its first rounds, then an EMA) against the tokens a round of it yields - 1 + a1 + a1 a2 + ..., a_i the share
-// of rounds that reached draft i (all before it accepted) and accepted it.  STRATA_GLM_MTP_ADAPT=0: always n_cap.
+// of rounds that reached draft i (all before it accepted) and accepted it.  ALMOND_GLM_MTP_ADAPT=0: always n_cap.
 //
-// The search starts at STRATA_GLM_MTP_START (2) and climbs: the start runs a stint of measured rounds, then each
+// The search starts at ALMOND_GLM_MTP_START (2) and climbs: the start runs a stint of measured rounds, then each
 // neighbour of the best a short probe, until the best's neighbours are both measured and lose (Maya-S on the Radeon
 // 8065S: trying every length first cost a machine's first answer 12.7 tok/s, against 21-27 after; length 2 wins
 // there).  The token path (length 0) is only tried where length 1 is the best.  Then one neighbour of the best gets a
 // probe now and then, the gap doubling while the best stays.
 int Glm5Model::mtp_choose(int n_cap) {
     static const bool fixed = [] {
-        const char* e = getenv("STRATA_GLM_MTP_ADAPT");
+        const char* e = getenv("ALMOND_GLM_MTP_ADAPT");
         return e != nullptr && std::atoi(e) == 0;
     }();
-    // STRATA_GLM_MTP_FIXED=<n> (A/B and tests): every round drafts n - n = 0 is the token path with the same memory
+    // ALMOND_GLM_MTP_FIXED=<n> (A/B and tests): every round drafts n - n = 0 is the token path with the same memory
     // layout as the drafting runs
     static const int forced_n = [] {
-        const char* e = getenv("STRATA_GLM_MTP_FIXED");
+        const char* e = getenv("ALMOND_GLM_MTP_FIXED");
         return e != nullptr ? std::max(0, std::atoi(e)) : -1;
     }();
     static const int start_n = [] {
-        const char* e = getenv("STRATA_GLM_MTP_START");
+        const char* e = getenv("ALMOND_GLM_MTP_START");
         return e != nullptr ? std::max(0, std::atoi(e)) : 2;
     }();
     if (forced_n >= 0) return std::min(forced_n, n_cap);
@@ -537,7 +537,7 @@ int Glm5Model::mtp_choose(int n_cap) {
 }
 
 // ---------------------------------------------------------------- the decode
-bool Glm5Model::decode_mtp(strata::kernels::SamplerParams& sp, int64_t max_new, const std::function<bool(int)>& emit,
+bool Glm5Model::decode_mtp(almond::glm::kernels::SamplerParams& sp, int64_t max_new, const std::function<bool(int)>& emit,
                            int64_t& produced, std::string& err) {
     produced = 0;
     if (!mtp_ready()) {
@@ -548,7 +548,7 @@ bool Glm5Model::decode_mtp(strata::kernels::SamplerParams& sp, int64_t max_new, 
     const Glm5Geometry& g = g_;
     const int64_t E = g.n_embd;
     const int n_cap = std::min(mtp_draft_cap(), std::min(kWinMax - 1, 8));
-    static const bool trace = getenv("STRATA_GLM_MTP_TRACE") != nullptr;
+    static const bool trace = getenv("ALMOND_GLM_MTP_TRACE") != nullptr;
     // the first token: the prompt's last forward left its logits (and greedy argmax)
     int y = -1;
     if (sp.greedy && sp.penalty_last_n <= 0 && last_tok_ >= 0) {   // (penalties: picked through the sampler)
@@ -572,11 +572,11 @@ bool Glm5Model::decode_mtp(strata::kernels::SamplerParams& sp, int64_t max_new, 
     // the smaller head saves: 2% is about where the two meet.
     constexpr double kOutMax = 0.02;
     // the acceptance a length's choice weighs is the recent text's: each draft position's counts decay over its last
-    // STRATA_GLM_MTP_ACC_WINDOW (64) comparisons (0: every comparison since the load).  A whole-session count let a
+    // ALMOND_GLM_MTP_ACC_WINDOW (64) comparisons (0: every comparison since the load).  A whole-session count let a
     // request's easy start speak for its hard part (Maya-S on the Radeon 8065S kept 2 drafts through a 1536-token essay,
     // 57% of the drafts accepted, 21.3 tok/s, where 1 gives ~22.5).
     static const double acc_keep = [] {
-        const char* e = getenv("STRATA_GLM_MTP_ACC_WINDOW");
+        const char* e = getenv("ALMOND_GLM_MTP_ACC_WINDOW");
         const int w = e != nullptr ? std::max(0, std::atoi(e)) : 64;
         return w > 0 ? 1.0 - 1.0 / (double) w : 1.0;
     }();
@@ -750,7 +750,7 @@ bool Glm5Model::decode_mtp(strata::kernels::SamplerParams& sp, int64_t max_new, 
             ok = false;
         }
     }
-    win_prof_report();   // (STRATA_GLM_WIN_PROF: the verify windows' phases)
+    win_prof_report();   // (ALMOND_GLM_WIN_PROF: the verify windows' phases)
     if (n_ph > 0)
         std::fprintf(stderr, "glm mtp: a drafting round's host time - drafts %.2f ms, verify %.2f ms, commit + cache "
                              "%.2f ms (%lld rounds)\n", ph[0] / n_ph, ph[1] / n_ph, ph[2] / n_ph, (long long) n_ph);
@@ -765,4 +765,4 @@ bool Glm5Model::decode_mtp(strata::kernels::SamplerParams& sp, int64_t max_new, 
     return ok;
 }
 
-}  // namespace strata::core
+}  // namespace almond::glm::core

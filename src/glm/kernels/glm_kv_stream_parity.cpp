@@ -13,9 +13,9 @@
 //   3. after the prompt, the host copy and the staging copy equal the resident cache row for row;
 //   4. no call overflowed, and the counters add up.
 // FP16 rows and INT8 records.
-#include "strata/kernels/glm_batch.hpp"
-#include "strata/kernels/glm_fast.hpp"
-#include "strata/kernels/glm_kv_stream.hpp"
+#include "almond/glm/kernels/glm_batch.hpp"
+#include "almond/glm/kernels/glm_fast.hpp"
+#include "almond/glm/kernels/glm_kv_stream.hpp"
 
 #include <cuda_runtime.h>
 
@@ -29,9 +29,9 @@
 #include <string>
 #include <vector>
 
-namespace gf = strata::kernels::glmf;
-namespace gb = strata::kernels::glmb;
-namespace k = strata::kernels;
+namespace gf = almond::glm::kernels::glmf;
+namespace gb = almond::glm::kernels::glmb;
+namespace k = almond::glm::kernels;
 
 namespace {
 int g_fail = 0;

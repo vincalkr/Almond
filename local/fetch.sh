@@ -19,7 +19,7 @@ TOKEN=${HF_TOKEN:-$(cat "$HOME/.cache/huggingface/token" 2>/dev/null || true)}
 AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: Bearer $TOKEN")
 
 GLM_REPO=pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF
-MAYA_REPO=peasantsmith/GLM-5.3-Flash-Maya-GGUF
+GLM_SRC_REPO=peasantsmith/GLM-5.3-Flash-Maya-GGUF
 DS_SHARDS=$(for i in 1 2 3 4; do echo "$M/rco-iq2xxs/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-0000$i-of-00004.gguf"; done)
 
 ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision)
@@ -80,13 +80,13 @@ fetch() {
                                  sh "$R/local/glm-pack.sh";;
         glm-mtp)             [ -s "$M/glm53-gsq-rco/GLM-5.3-Flash-Maya-M-NextN.gguf" ] && { echo "have   GLM-5.3-Flash-Maya-M-NextN.gguf"; return; }
                              local src=$M/glm53-gsq-rco/src/GLM-5.3-Flash-Maya-M-IQ2_S-00003-of-00003.gguf
-                             get $MAYA_REPO Maya-M/$(basename "$src") "$src"
+                             get $GLM_SRC_REPO Maya-M/$(basename "$src") "$src"
                              [ "$DRY_RUN" = 1 ] && return
                              GGUF_ARCH=glm5-next ALMOND_GGUF_PY="$R/third_party/llama.cpp/gguf-py" "$PY" "$R/local/glm-mtp-extract.py" \
                                  "$src" "$M/glm53-gsq-rco/GLM-5.3-Flash-Maya-M-NextN.gguf"
                              gio trash "$M/glm53-gsq-rco/src" && echo "the 20.5 GB source went to the trash";;
-        glm-vision)          get $MAYA_REPO vision/mmproj-GLM-5.3-Flash-F16.gguf "$M/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf"
-                             get $MAYA_REPO vision/GLM-5.3-Flash-vocab.gguf "$M/glm53-vision/GLM-5.3-Flash-vocab.gguf";;
+        glm-vision)          get $GLM_SRC_REPO vision/mmproj-GLM-5.3-Flash-F16.gguf "$M/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf"
+                             get $GLM_SRC_REPO vision/GLM-5.3-Flash-vocab.gguf "$M/glm53-vision/GLM-5.3-Flash-vocab.gguf";;
         *) echo "fetch: no item '$1' (${ITEMS[*]})" >&2; exit 2;;
     esac
 }

@@ -26,7 +26,7 @@ tokens (the stream only holds back up to HOLD_MAX tokens of a tail that repeats 
 literal, a function name over and over, code lines alike - is not an exact block repeated back to back three times
 or more, which is what a loop is.
 
-Off: MAYA_LOOP_GUARD=0, "loop_guard": false in the run config, or "loop_guard": false in a request (true there turns
+Off: ALMOND_LOOP_GUARD=0, "loop_guard": false in the run config, or "loop_guard": false in a request (true there turns
 it on for that request when the server has it off).
 """
 from __future__ import annotations

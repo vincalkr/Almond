@@ -5,14 +5,14 @@
 // (a) float reference: ggml's own dequantizer (`to_float`) and a float SwiGLU expert, (b) the CPU path
 // (ggml-cpu vec_dot with its quantized activations), (c) the GPU path (`native_expert_grouped`, q8_1
 // activations).  (b) and (c) each differ from (a) by their activation rounding only (a few 1e-3 relative).
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/kernels/cpu/native_expert.hpp"
-#include "strata/kernels/cpu/expert.hpp"
-#include "strata/kernels/cpu/iq_avx512.hpp"
-#include "strata/kernels/cpu/iq_avx2.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
+#include "almond/glm/artifact/gguf_reader.hpp"
+#include "almond/glm/kernels/cpu/native_expert.hpp"
+#include "almond/glm/kernels/cpu/expert.hpp"
+#include "almond/glm/kernels/cpu/iq_avx512.hpp"
+#include "almond/glm/kernels/cpu/iq_avx2.hpp"
+#include "almond/glm/kernels/cpu/expert_layout.hpp"
 #include "ggml-cpu.h"
-#include "strata/kernels/iq_kernels.hpp"
+#include "almond/glm/kernels/iq_kernels.hpp"
 
 #include "ggml.h"
 
@@ -26,7 +26,7 @@
 #include <string>
 #include <vector>
 
-namespace cpu = strata::kernels::cpu;
+namespace cpu = almond::glm::kernels::cpu;
 
 static double rel(const std::vector<float>& a, const std::vector<float>& b) {
     double n = 0, d = 0;
@@ -37,7 +37,7 @@ static double rel(const std::vector<float>& a, const std::vector<float>& b) {
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);   // keep the trail on a crash
     if (argc < 2) { std::fprintf(stderr, "usage: native_expert_parity <shard1.gguf> [layer ...]\n"); return 2; }
-    strata::GgufFile gguf(argv[1]);
+    almond::glm::GgufFile gguf(argv[1]);
     std::vector<int> layers;
     for (int i = 2; i < argc; ++i) layers.push_back(std::atoi(argv[i]));
     if (layers.empty()) layers = {0, 1, 2, 3, 20, 47};
@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
     cudaStream_t s;
     cudaStreamCreate(&s);
     for (int l : layers) {
-        const strata::TensorInfo* t[3] = {};
+        const almond::glm::TensorInfo* t[3] = {};
         const char* roles[3] = {"gate", "up", "down"};
         for (const auto& ti : gguf.tensors())
             for (int r = 0; r < 3; ++r)
@@ -218,7 +218,7 @@ int main(int argc, char** argv) {
         }
         // (c) the GPU: one group holding the NT entries
         {
-            const auto L = strata::kernels::native_expert_layout(f.gu_type, f.d_type, H, FF);
+            const auto L = almond::glm::kernels::native_expert_layout(f.gu_type, f.d_type, H, FF);
             void *dblob, *dx, *dxq, *dscr;
             float* dout;
             unsigned long long* dptr;
@@ -226,7 +226,7 @@ int main(int argc, char** argv) {
             cudaMalloc(&dblob, blob.size());
             cudaMalloc(&dx, x.size() * 4);
             cudaMalloc(&dxq, (size_t) NT * H / 32 * 36);
-            cudaMalloc(&dscr, strata::kernels::native_expert_scratch_bytes(NT, FF));
+            cudaMalloc(&dscr, almond::glm::kernels::native_expert_scratch_bytes(NT, FF));
             cudaMalloc((void**) &dout, (size_t) NT * H * 4);
             cudaMalloc((void**) &dptr, 8);
             cudaMalloc((void**) &dstart, 8);
@@ -242,8 +242,8 @@ int main(int argc, char** argv) {
             cudaMemcpy(dn, &one, 4, cudaMemcpyHostToDevice);
             cudaMemcpy(ddst, idx, NT * 4, cudaMemcpyHostToDevice);
             cudaMemcpy(dtok, idx, NT * 4, cudaMemcpyHostToDevice);
-            strata::kernels::quantize_q8_1_rows((const float*) dx, NT, H, dxq, s);
-            strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, 1, NT, dxq, dscr, dout, s);
+            almond::glm::kernels::quantize_q8_1_rows((const float*) dx, NT, H, dxq, s);
+            almond::glm::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, 1, NT, dxq, dscr, dout, s);
             cudaStreamSynchronize(s);
             cudaMemcpy(got_g.data(), dout, got_g.size() * 4, cudaMemcpyDeviceToHost);
             cudaFree(dblob); cudaFree(dx); cudaFree(dxq); cudaFree(dscr); cudaFree(dout); cudaFree(dptr);

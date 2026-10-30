@@ -1,4 +1,4 @@
-// src/kernels/cpu/exl3_cpu.cpp - EXL3 routed experts on the CPU (see include/strata/kernels/cpu/exl3_cpu.hpp).
+// src/kernels/cpu/exl3_cpu.cpp - EXL3 routed experts on the CPU (see include/almond/glm/kernels/cpu/exl3_cpu.hpp).
 //
 // The vector kernels follow exllamav3's CPU expert kernel (MIT, turboderp - exllamav3_ext/cpu/moe_mul1.cpp, its
 // AVX-512 BW and AVX2 tiers): a tile row's 16 states come out of the tile's words with cross-lane permutes and a
@@ -7,10 +7,10 @@
 // device's FP16 constant, so the CPU lane computes what the device kernels compute up to the FP16 rounding of each
 // weight.  The AVX-512 and AVX2 tiers do the same FMAs in the same order: they give the same bits (the bands,
 // the split-K pieces, the GEMM's sums and the vectorised transforms alike).
-#include "strata/kernels/cpu/exl3_cpu.hpp"
+#include "almond/glm/kernels/cpu/exl3_cpu.hpp"
 
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/f16_bits.hpp"
+#include "almond/glm/kernels/cpu/expert_layout.hpp"
+#include "almond/glm/kernels/f16_bits.hpp"
 
 #include <algorithm>
 #include <array>
@@ -44,7 +44,7 @@
 #define EXL3_AVX2_INLINE inline
 #endif
 
-namespace strata::kernels::cpu {
+namespace almond::glm::kernels::cpu {
 namespace {
 
 constexpr uint32_t kMul1 = 0x83DCD12Du;
@@ -1119,7 +1119,7 @@ EXL3_AVX2 void band_out_avx2(const float* acc, float ki, float kz, const uint16_
     }
 }
 
-// AVX-512 F and BW with FMA, the OS saving the state (STRATA_FORCE_AVX2 is the tier choice's, below)
+// AVX-512 F and BW with FMA, the OS saving the state (ALMOND_FORCE_AVX2 is the tier choice's, below)
 bool cpu_avx512_exl3() {
     unsigned r[4] = {0, 0, 0, 0};
     auto cpuid = [&](unsigned leaf, unsigned sub) {
@@ -1161,7 +1161,7 @@ bool cpu_f16c() {
 #endif
 
 // the tiers this CPU runs (bit t: tier t - 0 scalar, 1 AVX2 + FMA + F16C, 2 AVX-512 F/BW), and the one the lane takes:
-// the widest, but AVX2 on an AVX-512 CPU with STRATA_FORCE_AVX2=1 (to compare the two vector tiers)
+// the widest, but AVX2 on an AVX-512 CPU with ALMOND_FORCE_AVX2=1 (to compare the two vector tiers)
 int tier_mask() {
     static const int mask = [] {
         int t = 1;
@@ -1175,7 +1175,7 @@ int tier_mask() {
 }
 int detect_tier() {
     const int t = tier_mask();
-    const char* f = std::getenv("STRATA_FORCE_AVX2");
+    const char* f = std::getenv("ALMOND_FORCE_AVX2");
     if ((t & 4) && !(f != nullptr && f[0] == '1')) return 2;
     return (t & 2) ? 1 : 0;
 }
@@ -1425,4 +1425,4 @@ void exl3_cpu_band(const Exl3Part& m, const float* xh, float xsum, int c0, float
     exl3_cpu_band_out(m, acc, xsum, c0, y);
 }
 
-}  // namespace strata::kernels::cpu
+}  // namespace almond::glm::kernels::cpu

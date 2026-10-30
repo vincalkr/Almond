@@ -1,9 +1,9 @@
-// src/spec/suffix_drafter.cpp - see include/strata/spec/suffix_drafter.hpp.
-#include "strata/spec/suffix_drafter.hpp"
+// src/spec/suffix_drafter.cpp - see include/almond/glm/spec/suffix_drafter.hpp.
+#include "almond/glm/spec/suffix_drafter.hpp"
 
 #include <algorithm>
 
-namespace strata::spec {
+namespace almond::glm::spec {
 
 namespace {
 uint64_t mix(uint64_t x) {
@@ -85,4 +85,4 @@ int SuffixDrafter::propose(int max_k, int32_t* out) {
     return k;
 }
 
-}  // namespace strata::spec
+}  // namespace almond::glm::spec

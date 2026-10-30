@@ -2252,7 +2252,7 @@ class Vision:
 
 def vision_footprint(vcfg: dict, env: dict, cache_file: Path) -> tuple[int, int] | None:
     """(image token cap, bytes) for the on-demand vision encoder on the first GPU (project-maya's): measured once by
-    `maya-vision --measure` before the model loads, cached per encoder file and cap in `cache_file`.  A cap the
+    `almond-vision --measure` before the model loads, cached per encoder file and cap in `cache_file`.  A cap the
     config does not set is the largest of 4096 / 2048 / 1024 image tokens within 15% of the card.  None: no measurement."""
     try:
         cache = json.loads(cache_file.read_text(encoding="utf-8"))
@@ -2572,8 +2572,6 @@ def child_env(cfg: dict) -> dict:
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in ordered_gpus(cfg))
     for k, v in (cfg.get("env") or {}).items():      # engine settings the config carries (AMD: the GEMM tuning table)
         env[str(k)] = str(v)
-        if str(k).startswith("ALMOND_"):            # the vendored GLM engine (project-maya's) reads them as STRATA_*:
-            env["STRATA_" + str(k)[7:]] = str(v)     # the configurations say ALMOND_* only
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -6099,8 +6097,7 @@ def main() -> int:
                 if fp is None:
                     raise SystemExit("[almond] images: the vision encoder could not be measured on the GPU")
                 vcfg = dict(vcfg, max_tokens=fp[0])
-                env = dict(env, ALMOND_GLM_VISION_LEND_MB=str((fp[1] >> 20) + 1),
-                           STRATA_GLM_VISION_LEND_MB=str((fp[1] >> 20) + 1))   # (the engine's name)
+                env = dict(env, ALMOND_GLM_VISION_LEND_MB=str((fp[1] >> 20) + 1))
                 print(f"[almond] images: the vision encoder needs {fp[1] / 2**30:.2f} GB on the GPU at up to {fp[0]} "
                       "image tokens; it starts when a picture arrives, in memory the engine lends it", flush=True)
             vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,

@@ -1,4 +1,4 @@
-// src/kernels/cuda/glm_lat8.cuh - the INT8 latent records (STRATA_GLM_KV_INT8; glm_fast.hpp lat8_rec_bytes) read as
+// src/kernels/cuda/glm_lat8.cuh - the INT8 latent records (ALMOND_GLM_KV_INT8; glm_fast.hpp lat8_rec_bytes) read as
 // the FP16 an FP16 row would hold, for the batched kernels: per position kv int8 codes, then an FP16 scale per 32.
 //
 // A value is (half) (q * d), the exact product rounded once.  The prompt attention reads every selected row this way,
@@ -15,7 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace strata::kernels::glmb {
+namespace almond::glm::kernels::glmb {
 
 __device__ __forceinline__ const uint8_t* lat8_rec(const uint16_t* lat, int kv, int cell) {
     return (const uint8_t*) lat + (size_t) (kv + kv / 16) * cell;
@@ -27,7 +27,7 @@ __device__ __forceinline__ uint2 lat8_q4(uint32_t w, __half2 d) {
     const __half2 bias = __halves2half2(__ushort_as_half(0x6480), __ushort_as_half(0x6480));   // 1152
     const __half2 a = __hmul2(__hsub2(*(const __half2*) &lo, bias), d);
     const __half2 b = __hmul2(__hsub2(*(const __half2*) &hi, bias), d);
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     // a code 0 times a negative scale is -0 in FP16 and +0 through AMD's F32 product: a zero half loses its sign
     // (only a code 0 makes a zero here - a normal scale times any other code is a normal number)
     const auto unsigned_zeros = [](unsigned x) {
@@ -53,7 +53,7 @@ __device__ __forceinline__ bool lat8_normal(__half d) { return (__half_as_ushort
 __device__ __forceinline__ uint2 lat8_h4(const uint8_t* rec, int kv, int c4) {
     const uint32_t w = ((const uint32_t*) rec)[c4];
     const __half d = ((const __half*) (rec + kv))[(4 * c4) >> 5];
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     if (!lat8_normal(d)) return lat8_q4_f32(w, __half2float(d));
 #endif
     return lat8_q4(w, __half2half2(d));
@@ -62,7 +62,7 @@ __device__ __forceinline__ uint2 lat8_h4(const uint8_t* rec, int kv, int c4) {
 __device__ __forceinline__ uint4 lat8_h8(const uint8_t* rec, int kv, int c8) {
     const uint2 w = ((const uint2*) rec)[c8];
     const __half d = ((const __half*) (rec + kv))[c8 >> 2];
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     if (!lat8_normal(d)) {
         const uint2 lo = lat8_q4_f32(w.x, __half2float(d)), hi = lat8_q4_f32(w.y, __half2float(d));
         return make_uint4(lo.x, lo.y, hi.x, hi.y);
@@ -72,4 +72,4 @@ __device__ __forceinline__ uint4 lat8_h8(const uint8_t* rec, int kv, int c8) {
     return make_uint4(lo.x, lo.y, hi.x, hi.y);
 }
 
-}  // namespace strata::kernels::glmb
+}  // namespace almond::glm::kernels::glmb

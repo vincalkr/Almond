@@ -71,8 +71,8 @@ case $MODEL in
         SHIM="$R/tools/glm/serve/serve_glm.py"
         if [ -z "$CFG" ]; then
             CFG="$R/local/glm-local.json"
-            # with the image encoder (local/fetch.sh glm-vision) and maya-vision built: images on, loaded per picture
-            [ -s "$R/models/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf" ] && [ -x "$R/build-maya-vision/build/bin/maya-vision" ] &&
+            # with the image encoder (local/fetch.sh glm-vision) and almond-vision built: images on, loaded per picture
+            [ -s "$R/models/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf" ] && [ -x "$R/build-vision/build/bin/almond-vision" ] &&
                 CFG="$R/local/glm-local-vision.json"
         fi
         [ -x "$R/build-hip-fused/almond-engine" ] || { echo "run.sh: build-hip-fused/almond-engine is not built (./build.sh builds it)" >&2; exit 1; }

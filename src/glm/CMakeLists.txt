@@ -2,30 +2,30 @@
 # (add_subdirectory from the top CMakeLists.txt) on Almond's ggml (the top level's prebuilt ggml-base / ggml-cpu and
 # third_party/llama.cpp/ggml's MMQ sources).  HIP only.  Its targets keep project-maya's names until the rename
 # (docs/ENGINE_PLAN.md, step 4); the executable is `almond-engine` (the top level's).
-add_compile_definitions(STRATA_VERSION="${PROJECT_VERSION}")
+add_compile_definitions(ALMOND_VERSION="${PROJECT_VERSION}")
 include(cmake/hip_backend.cmake)
-set(_strata_gpu_runtime_target strata_hip_runtime)
-set(_strata_gpu_blas_target roc::hipblas)
-set(_strata_gpu_include_directories ${STRATA_HIP_COMPAT_INCLUDE_DIR})
+set(_glm_gpu_runtime_target glm_hip_runtime)
+set(_glm_gpu_blas_target roc::hipblas)
+set(_glm_gpu_include_directories ${ALMOND_HIP_COMPAT_INCLUDE_DIR})
 set(_glm_ggml_common ${PROJECT_SOURCE_DIR}/third_party/ggml)   # llama.cpp's block layouts and codebook grids
 
-add_library(strata_warnings INTERFACE)
-target_compile_options(strata_warnings INTERFACE
+add_library(glm_warnings INTERFACE)
+target_compile_options(glm_warnings INTERFACE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall> $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
   $<$<COMPILE_LANGUAGE:HIP>:-Wall> $<$<COMPILE_LANGUAGE:HIP>:-Wextra>)
-add_library(strata_artifact INTERFACE)
-target_include_directories(strata_artifact INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(strata_artifact INTERFACE strata_warnings)
-add_library(strata_plan INTERFACE)
-target_include_directories(strata_plan INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(strata_plan INTERFACE strata_warnings)
+add_library(glm_artifact INTERFACE)
+target_include_directories(glm_artifact INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(glm_artifact INTERFACE glm_warnings)
+add_library(glm_plan INTERFACE)
+target_include_directories(glm_plan INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(glm_plan INTERFACE glm_warnings)
 
-add_library(strata_core STATIC core/device.cu core/pinned.cu platform/memory.cpp core/graph.cpp core/weights.cpp
+add_library(glm_core STATIC core/device.cu core/pinned.cu platform/memory.cpp core/graph.cpp core/weights.cpp
             core/layout.cpp)
-target_include_directories(strata_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(strata_core PUBLIC strata_plan strata_warnings ${_strata_gpu_runtime_target})
+target_include_directories(glm_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(glm_core PUBLIC glm_plan glm_warnings ${_glm_gpu_runtime_target})
 
-add_library(strata_kernels STATIC
+add_library(glm_kernels STATIC
   kernels/cuda/dequant_s2.cu kernels/cuda/s2_gemv.cu kernels/cuda/s_gemv.cu kernels/cuda/s2_gemv_quads.cu
   kernels/cuda/s2_gemv_fast.cu kernels/cuda/router_top10.cu kernels/cuda/router_sigmoid.cu kernels/cuda/quantize_act.cu
   kernels/cuda/rope.cu kernels/cuda/sampler.cu kernels/cuda/s2_gemv_q8.cu kernels/cuda/s2_expert_grouped.cu
@@ -41,8 +41,8 @@ add_library(strata_kernels STATIC
   kernels/cuda/verify_kernels.cu kernels/cuda/iq_kernels.cu kernels/cuda/glm_fast.cu kernels/cuda/glm_batch.cu
   kernels/cuda/exl3.cu kernels/cuda/exl3_legacy.cu kernels/cuda/glm_kv_stream.cu
   kernels/ngram.cpp ngram/ple_reader.cpp platform/direct_file.cpp)
-target_link_libraries(strata_kernels PUBLIC strata_core strata_artifact)
-target_include_directories(strata_kernels PRIVATE ${_glm_ggml_common})
+target_link_libraries(glm_kernels PUBLIC glm_core glm_artifact)
+target_include_directories(glm_kernels PRIVATE ${_glm_ggml_common})
 # Q8_K's multiply and magic-bias rounding stay separate FP32 operations (an FMA changes tie results); EXL3's
 # multiply-adds fused where the source writes them, not after inlining
 set_source_files_properties(kernels/cuda/elementwise.cu kernels/cuda/quantize_act.cu
@@ -52,8 +52,8 @@ set_source_files_properties(kernels/cuda/exl3.cu PROPERTIES COMPILE_OPTIONS "-ff
 set(_glm_cpu_sources kernels/cpu/pool.cpp kernels/cpu/expert_layout.cpp kernels/cpu/exl3_ref.cpp kernels/cpu/expert.cpp
     kernels/cpu/q2_avx2.cpp kernels/cpu/exl3_cpu.cpp kernels/cpu/native_expert.cpp kernels/cpu/iq_avx512.cpp
     kernels/cpu/iq_avx2.cpp kernels/cpu/kq_avx512.cpp kernels/cpu/iq_avx512_one.cpp)
-add_library(strata_kernels_cpu STATIC ${_glm_cpu_sources})
-target_include_directories(strata_kernels_cpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${_glm_ggml_common})
+add_library(glm_kernels_cpu STATIC ${_glm_cpu_sources})
+target_include_directories(glm_kernels_cpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${_glm_ggml_common})
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_FLAGS "-mavx512f -mavx512bw -mavx512vl -mavx512dq -mavx512vnni -mavx512vbmi -mf16c -mfma")
 check_cxx_source_compiles([=[
@@ -69,7 +69,7 @@ if(GLM_CPU_VNNI_ASM)
 else()
   set_source_files_properties(kernels/cpu/expert.cpp
     PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512vl;-mavx512dq;-mavx512vbmi;-mf16c;-mfma"
-               COMPILE_DEFINITIONS "STRATA_CPU_DPBUSD_BW=1")
+               COMPILE_DEFINITIONS "ALMOND_CPU_DPBUSD_BW=1")
 endif()
 set_source_files_properties(kernels/cpu/q2_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
 set_source_files_properties(kernels/cpu/iq_avx512.cpp PROPERTIES COMPILE_OPTIONS
@@ -79,23 +79,23 @@ set_source_files_properties(kernels/cpu/iq_avx512_one.cpp PROPERTIES COMPILE_OPT
   "-mavx512f;-mavx512bw;-mavx512vl;-mavx512dq;-mavx512vbmi;-mbmi2;-mf16c;-mfma;-ffp-contract=off")
 set_source_files_properties(kernels/cpu/kq_avx512.cpp PROPERTIES COMPILE_OPTIONS
   "-mavx512f;-mavx512bw;-mavx512vl;-mavx512dq;-mf16c;-mfma")
-target_link_libraries(strata_kernels_cpu PUBLIC Threads::Threads ggml-cpu ggml-base)
-target_compile_definitions(strata_kernels_cpu PUBLIC STRATA_NATIVE_EXPERTS=1)
+target_link_libraries(glm_kernels_cpu PUBLIC Threads::Threads ggml-cpu ggml-base)
+target_compile_definitions(glm_kernels_cpu PUBLIC ALMOND_NATIVE_EXPERTS=1)
 
-add_library(strata_engine STATIC core/layer.cpp core/session.cpp core/expert_source.cpp core/remote_experts.cpp
+add_library(glm_engine STATIC core/layer.cpp core/session.cpp core/expert_source.cpp core/remote_experts.cpp
   core/expert_cache.cpp core/native_head.cpp core/native_dense.cpp core/verify.cpp core/mtp.cpp
   core/glm_model.cu core/glm_fast_path.cu core/glm_prefill.cu core/glm_multi.cu core/glm_rows.cu
   core/glm_window.cu core/glm_dflash.cu core/glm_mtp.cu core/glm_mtp_rows.cu)
-target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
-target_compile_definitions(strata_engine PRIVATE STRATA_HIP_PREFILL_FUSED=1)
+target_include_directories(glm_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(glm_engine PUBLIC glm_core glm_kernels glm_kernels_cpu ${_glm_gpu_runtime_target})
+target_compile_definitions(glm_engine PRIVATE ALMOND_HIP_PREFILL_FUSED=1)
 
-add_library(strata_prefill STATIC prefill/gemm.cu prefill/kernels.cu prefill/prefill.cpp)
-target_include_directories(strata_prefill PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
-target_link_libraries(strata_prefill PUBLIC strata_engine ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target})
-if(STRATA_HIPBLASLT_AVAILABLE)
-  target_compile_definitions(strata_prefill PRIVATE STRATA_HIPBLASLT_AVAILABLE=1)
-  target_link_libraries(strata_prefill PRIVATE roc::hipblaslt)
+add_library(glm_prefill STATIC prefill/gemm.cu prefill/kernels.cu prefill/prefill.cpp)
+target_include_directories(glm_prefill PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${_glm_gpu_include_directories})
+target_link_libraries(glm_prefill PUBLIC glm_engine ${_glm_gpu_blas_target} ${_glm_gpu_runtime_target})
+if(ALMOND_HIPBLASLT_AVAILABLE)
+  target_compile_definitions(glm_prefill PRIVATE ALMOND_HIPBLASLT_AVAILABLE=1)
+  target_link_libraries(glm_prefill PRIVATE roc::hipblaslt)
   add_executable(tune_hipblaslt ${PROJECT_SOURCE_DIR}/tools/glm/hip/tune_hipblaslt.cpp)
   target_link_libraries(tune_hipblaslt PRIVATE hip::host roc::hipblas roc::hipblaslt)
 endif()
@@ -108,16 +108,16 @@ foreach(_t q2_0 iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl iq4_xs q8_0 iq1_s q2_k
   list(APPEND _glm_mmq_sources "${_glm_mmq}/template-instances/mmq-instance-${_t}.cu")
 endforeach()
 set_source_files_properties(${_glm_mmq_sources} PROPERTIES LANGUAGE HIP)
-add_library(strata_mmq STATIC ${_glm_mmq_sources})
-target_include_directories(strata_mmq PRIVATE "${ALMOND_GGML_DIR}/ggml/include" "${ALMOND_GGML_DIR}/ggml/src" "${_glm_mmq}"
+add_library(glm_mmq STATIC ${_glm_mmq_sources})
+target_include_directories(glm_mmq PRIVATE "${ALMOND_GGML_DIR}/ggml/include" "${ALMOND_GGML_DIR}/ggml/src" "${_glm_mmq}"
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_compile_definitions(strata_mmq PRIVATE GGML_USE_HIP=1)
-target_link_libraries(strata_mmq PUBLIC ggml-base hip::host roc::hipblas)
-target_link_libraries(strata_prefill PUBLIC strata_mmq)
-target_compile_definitions(strata_prefill PUBLIC STRATA_PREFILL_MMQ=1)
-target_link_libraries(strata_engine PUBLIC strata_mmq ${_strata_gpu_blas_target})
+target_compile_definitions(glm_mmq PRIVATE GGML_USE_HIP=1)
+target_link_libraries(glm_mmq PUBLIC ggml-base hip::host roc::hipblas)
+target_link_libraries(glm_prefill PUBLIC glm_mmq)
+target_compile_definitions(glm_prefill PUBLIC ALMOND_PREFILL_MMQ=1)
+target_link_libraries(glm_engine PUBLIC glm_mmq ${_glm_gpu_blas_target})
 
-add_library(strata_spec STATIC spec/suffix_drafter.cpp spec/controller.cpp spec/draft_policy.cpp)
-target_include_directories(strata_spec PUBLIC include)
+add_library(glm_spec STATIC spec/suffix_drafter.cpp spec/controller.cpp spec/draft_policy.cpp)
+target_include_directories(glm_spec PUBLIC include)
 
 # (the executable: almond-engine, the top CMakeLists.txt - src/engine_main.cpp)

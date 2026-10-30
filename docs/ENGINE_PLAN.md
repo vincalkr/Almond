@@ -26,7 +26,8 @@ measures worse is not merged.
 5. **Shared parts, one at a time, each measured:** the CPU worker pool and its pinning, the expert tiers (VRAM pool,
    pinned RAM, file reads; the expert profile both can learn from), conversations on disk (DeepSeek's
    `--conversation-disk` and GLM's slots), the vision encoder's memory lending (GLM's VLEND for DeepSeek's encoder:
-   the ~0.6 GiB it leaves behind today), power and timing tools.
+   the ~0.6 GiB it leaves behind today), GLM's image tower inside the engine on Almond's ggml as DeepSeek's is (today
+   `almond-vision`, a separate process on llama.cpp's mtmd at another commit, `build-vision`), power and timing tools.
 6. **Other repositories:** Strata, project-maya, Xolotl, llama.cpp, antirez's ds4 - what each does better for
    these models, measured here before it goes in.
 
@@ -59,3 +60,11 @@ linked in (`glm_program`, link-only so each tree keeps its own forced `hip_compa
 runs GLM's path when the arguments name `--glm-pack`, DeepSeek's otherwise. GLM's ggml-cuda host shim is weak, as
 DeepSeek's: ggml-hip's own definitions win. GLM: PPL 10.3034, 10.4309, 10.4771 (mean 10.404); server tok/s 32.1 32.1
 30.7 / 32.4 33.0 31.1 (mean 31.9). DeepSeek: text 20.9-23.9 tok/s, the two pictures read as before.
+
+**Step 4, our names (2026-10-30).** GLM's code: namespace `strata::` -> `almond::glm::`, headers `strata/...` ->
+`almond/glm/...`, macros and environment variables `STRATA_*` / `MAYA_*` -> `ALMOND_*` (`ALMOND_GLM_*` for GLM's),
+CMake targets `strata_*` -> `glm_*`, the image encoder `maya-vision` -> `almond-vision` (`build-vision`); the server no
+longer maps the configurations' names. Prose that says where code came from keeps project-maya's and Strata's names, and
+`src/glm/LICENSE` their copyright. GLM: PPL 10.2178, 10.3842, 10.4711 (mean 10.358); server tok/s 31.4 32.2 30.1 /
+32.8 33.4 31.0 (mean 31.8); pictures read, the terzine question closed and answered (2,795 tokens). DeepSeek: text
+19.0-23.8 tok/s, pictures as before.

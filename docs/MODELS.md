@@ -96,7 +96,7 @@ Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
   (15.51 / 15.38 GiB free at the reseed against ~16.1 after a text prompt); text decode 23.2 tok/s before, 21.1, 23.7,
   23.7, 22.1, 23.5 after (one run each). Open: where the missing ~0.6 GiB goes. Clearing ggml-hip's buffer pool
   after the encoder (tried, 2026-10-30) gave back 112 MiB only and the next decode hit an illegal memory access: removed.
-- GLM: project-maya's encoder (`maya-vision`, llama.cpp's mtmd with GLM-5.3's tower, built by `./build.sh` for HIP;
+- GLM: project-maya's encoder (`almond-vision`, llama.cpp's mtmd with GLM-5.3's tower, built by `./build.sh` for HIP;
   `local/fetch.sh glm-vision` gets the mmproj F16 + vocab, 1.1 GB) starts only when a picture arrives, in 2.78 GB the
   engine lends it from the tail of card 0's expert pool (273 experts moved to colder slots, 27 dropped) and takes back
   after (`local/glm-local-vision.json`, which `./run.sh --model glm` picks when the encoder is there). Text decode, one

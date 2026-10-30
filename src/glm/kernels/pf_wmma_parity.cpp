@@ -1,4 +1,4 @@
-// src/kernels/pf_wmma_parity.cpp - gemm_iq_f16_grouped (the Volta prompt experts, STRATA_PF_WMMA) against a double
+// src/kernels/pf_wmma_parity.cpp - gemm_iq_f16_grouped (the Volta prompt experts, ALMOND_PF_WMMA) against a double
 // reference over the same FP16 weights (iq_dequant_f16, the FP16 path's dequantization) and FP16 activations.
 //
 //     build/pf_wmma_parity            the checks (a ctest; needs a CUDA GPU with FP16 tensor cores: sm_70+)
@@ -23,7 +23,7 @@
 // window convention: the host-side launch overhead is amortized, not measured).  Every shape is validated first -
 // three rows of every expert against the double reference, every written output finite, every guard row and column at
 // its sentinel - and a shape that fails is reported and not timed.  The bench assumes an idle GPU.
-#include "strata/kernels/iq_kernels.hpp"
+#include "almond/glm/kernels/iq_kernels.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -37,7 +37,7 @@
 #include <span>
 #include <vector>
 
-namespace k = strata::kernels;
+namespace k = almond::glm::kernels;
 
 namespace {
 

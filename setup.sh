@@ -42,7 +42,7 @@ echo "== 3. models (models/)"
 
 echo "== 4. build"
 built=1
-for b in build-hip-fused/almond-engine build-maya-vision/build/bin/maya-vision; do
+for b in build-hip-fused/almond-engine build-vision/build/bin/almond-vision; do
     if [ -x "$b" ]; then ok "$b"; else miss "$b"; built=0; fi
 done
 if [ $built = 0 ] || [ "$CHECK" = 0 ]; then

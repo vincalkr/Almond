@@ -1,14 +1,14 @@
-// src/kernels/cuda/fused_gr.cu - see include/strata/kernels/fused_gr.hpp.
-#include "strata/kernels/fused_gr.hpp"
-#include "strata/kernels/bf16_bits.hpp"
-#include "strata/kernels/verify_kernels.hpp"
+// src/kernels/cuda/fused_gr.cu - see include/almond/glm/kernels/fused_gr.hpp.
+#include "almond/glm/kernels/fused_gr.hpp"
+#include "almond/glm/kernels/bf16_bits.hpp"
+#include "almond/glm/kernels/verify_kernels.hpp"
 
 #include <cuda_runtime.h>
 
 #include <cstdio>
 #include <cstdlib>
 
-namespace strata::kernels {
+namespace almond::glm::kernels {
 namespace {
 
 constexpr int N = 2560;         // n_embd
@@ -389,4 +389,4 @@ void fused_gr_read(const FusedGrArgs& a, void* stream) {
     }
 }
 
-}  // namespace strata::kernels
+}  // namespace almond::glm::kernels

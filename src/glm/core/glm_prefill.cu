@@ -12,27 +12,27 @@
 //     glmfast::expert_stride), the others are copied from the pinned RAM tier (or read from disk) into a small ring
 //     of staging groups on the copy stream while the resident ones compute.
 //
-// The kernels are the token path's arithmetic (strata/kernels/glm_batch.hpp); what differs is the projections'
+// The kernels are the token path's arithmetic (almond/glm/kernels/glm_batch.hpp); what differs is the projections'
 // rounding (FP16 activations instead of q8_1), as between llama.cpp's batched and one-token paths.  The prompt's
 // routing also feeds the expert tiers' LFU counts, so the decode that follows starts from this conversation's
-// experts.  STRATA_GLM_NO_PREFILL=1 keeps the token-at-a-time prompt (A/B).
+// experts.  ALMOND_GLM_NO_PREFILL=1 keeps the token-at-a-time prompt (A/B).
 #include "glm_fast_state.hpp"
 
-#include "strata/core/exl3_mma_rows.hpp"
-#include "strata/core/prefill_chunks.hpp"
-#include "strata/core/prefill_gaps.hpp"
-#include "strata/core/progress.hpp"
-#include "strata/kernels/cpu/exl3_cpu.hpp"
-#include "strata/kernels/cpu/kq_avx512.hpp"
-#include "strata/kernels/dequant_bf16.hpp"
-#include "strata/kernels/exl3.hpp"
-#include "strata/kernels/glm_batch.hpp"
-#include "strata/kernels/iq_kernels.hpp"
-#if defined(STRATA_USE_HIP)
-#include "strata/prefill/gemm.hpp"
-#include "strata/prefill/moe_fused_rdna4.hpp"
+#include "almond/glm/core/exl3_mma_rows.hpp"
+#include "almond/glm/core/prefill_chunks.hpp"
+#include "almond/glm/core/prefill_gaps.hpp"
+#include "almond/glm/core/progress.hpp"
+#include "almond/glm/kernels/cpu/exl3_cpu.hpp"
+#include "almond/glm/kernels/cpu/kq_avx512.hpp"
+#include "almond/glm/kernels/dequant_bf16.hpp"
+#include "almond/glm/kernels/exl3.hpp"
+#include "almond/glm/kernels/glm_batch.hpp"
+#include "almond/glm/kernels/iq_kernels.hpp"
+#if defined(ALMOND_USE_HIP)
+#include "almond/glm/prefill/gemm.hpp"
+#include "almond/glm/prefill/moe_fused_rdna4.hpp"
 #endif
-#include "strata/prefill/moe_mmq.hpp"
+#include "almond/glm/prefill/moe_mmq.hpp"
 
 #include "ggml.h"
 
@@ -60,10 +60,10 @@
 #include <windows.h>
 #endif
 
-namespace strata::core {
+namespace almond::glm::core {
 
-namespace gb = strata::kernels::glmb;
-namespace mmq = strata::prefill::mmq;
+namespace gb = almond::glm::kernels::glmb;
+namespace mmq = almond::glm::prefill::mmq;
 
 namespace {
 
@@ -108,7 +108,7 @@ constexpr size_t kMmqSlab = (size_t) 16 << 20;
 // predicted rows an expert is prestaged for (below that it may not be routed at all)
 constexpr int kPreSlots = 160, kPreMinT = 1024, kPreMinRows = 4;
 // resident experts routed by at most kLightRows rows of a chunk take the light kernels (gf::rows_experts) instead of
-// MMQ (STRATA_GLM_PREFILL_LIGHT overrides, 0 = MMQ only); their {slot, r0, nr} ride the bounds array from kLightOff
+// MMQ (ALMOND_GLM_PREFILL_LIGHT overrides, 0 = MMQ only); their {slot, r0, nr} ride the bounds array from kLightOff
 constexpr int kLightRows = 32, kLightOff = 6144, kLightMax = (8192 - kLightOff) / 3;
 
 struct KdaBufs {
@@ -131,12 +131,12 @@ KdaBufs carve_kda(Carve& c, size_t T, const Glm5Geometry& g) {
     return b;
 }
 
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
 // The MLA batched products in FP16 with every head's tokens contiguous (hipBLAS picks far faster kernels than for the
 // F32 ones).  The prompt attention has three paths: the rocWMMA kernel on FP16 q_abs (f16q), the wave32 WMMA kernel on
 // F32 q_abs (wmma2), and the F32 kernel.  Both FP16 products and the WMMA attention are on by default;
-// STRATA_GLM_MLA_F16=0 and STRATA_GLM_MLA_WMMA=0 turn them off (WMMA off keeps the F32 attention, F16 off also the F32
-// products).  STRATA_GLM_PREFILL_ATTN=wmma2|f16q|f32 forces an attention path; unset, gfx12 (RDNA4) and gfx1151
+// ALMOND_GLM_MLA_F16=0 and ALMOND_GLM_MLA_WMMA=0 turn them off (WMMA off keeps the F32 attention, F16 off also the F32
+// products).  ALMOND_GLM_PREFILL_ATTN=wmma2|f16q|f32 forces an attention path; unset, gfx12 (RDNA4) and gfx1151
 // (Strix Halo) default to wmma2, other gfx11 to f16q.  A GPU without WMMA (RDNA 2, gfx1030) has neither WMMA path:
 // it takes the F32 kernel whatever is asked.
 __global__ void pack_heads_f16(const float* __restrict__ src, uint16_t* __restrict__ dst, int T, int H, int K) {
@@ -157,17 +157,17 @@ bool env_on(const char* name) {
     return !(v && v[0] == '0');
 }
 bool mla_wmma_on() {
-    static const bool on = env_on("STRATA_GLM_MLA_WMMA");
+    static const bool on = env_on("ALMOND_GLM_MLA_WMMA");
     return on;
 }
 bool mla_f16_on() {
-    static const bool on = env_on("STRATA_GLM_MLA_F16") || mla_wmma_on();
+    static const bool on = env_on("ALMOND_GLM_MLA_F16") || mla_wmma_on();
     return on;
 }
 enum class MlaAttnPath { F32, F16Q, WMMA2 };
 MlaAttnPath mla_attn_path() {
-    if (!mla_wmma_on()) return MlaAttnPath::F32;   // STRATA_GLM_MLA_WMMA=0 keeps the F32 kernel as before
-    static const char* mode = getenv("STRATA_GLM_PREFILL_ATTN");
+    if (!mla_wmma_on()) return MlaAttnPath::F32;   // ALMOND_GLM_MLA_WMMA=0 keeps the F32 kernel as before
+    static const char* mode = getenv("ALMOND_GLM_PREFILL_ATTN");
     static const bool want_wmma2 = mode != nullptr && std::strcmp(mode, "wmma2") == 0;
     static const bool want_f16q = mode != nullptr && std::strcmp(mode, "f16q") == 0;
     static const bool want_f32 = mode != nullptr && std::strcmp(mode, "f32") == 0;
@@ -177,7 +177,7 @@ MlaAttnPath mla_attn_path() {
     return gb::mla_wmma2_default() ? MlaAttnPath::WMMA2 : MlaAttnPath::F16Q;
 }
 #endif
-// The Volta grouped-WMMA MoE products (STRATA_PF_WMMA, the same switch as the Qwen prompt path): the FP16
+// The Volta grouped-WMMA MoE products (ALMOND_PF_WMMA, the same switch as the Qwen prompt path): the FP16
 // tensor-core grouped GEMM replaces MMQ's dp4a products for a layer whose gate/up and down are IQ formats the
 // kernel decodes (its gate/up tile is 256 values wide, so E must split into whole 256-value chunks; its down
 // kernels cover IQ4_NL / Q2_0 at any K % 128 and IQ3_S / IQ3_XXS / IQ2_S at any K % 256 - E = 4096 and
@@ -188,13 +188,13 @@ MlaAttnPath mla_attn_path() {
 // once per device.
 bool wmma_env_on() {
     static const bool want = [] {
-        const char* v = getenv("STRATA_PF_WMMA");
+        const char* v = getenv("ALMOND_PF_WMMA");
         return v != nullptr && std::atoi(v) != 0;
     }();
     return want;
 }
 bool moe_wmma_on(int gu_type, int d_type, int E, int nff) {
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     (void) gu_type; (void) d_type; (void) E; (void) nff;
     return false;
 #else
@@ -216,7 +216,7 @@ bool moe_wmma_on(int gu_type, int d_type, int E, int nff) {
         int major = 0, minor = 0;
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
-        ok = major == 7 && minor == 0 && strata::kernels::gemm_iq_f16_grouped_supported(dev);
+        ok = major == 7 && minor == 0 && almond::glm::kernels::gemm_iq_f16_grouped_supported(dev);
         probed = dev;
         if (ok) std::fprintf(stderr, "glm prefill: Volta grouped-WMMA prompt experts on (CUDA%d)\n", dev);
     }
@@ -267,11 +267,11 @@ DenseBufs carve_dense(Carve& c, size_t T, const Glm5Geometry& g) {
 // window fills - moe_combine_add - instead of every routed row living until one combine at the end: 128 KB a token),
 // and as many again for the CPU experts' uploaded rows.  At least T rows (one expert never has more than the chunk's
 // tokens) and the light kernels' most; never more than the chunk routes.
-// (STRATA_GLM_PREFILL_WINDOW=<rows> sets it, at least the floor; 0 = every routed row, the layout before the window)
+// (ALMOND_GLM_PREFILL_WINDOW=<rows> sets it, at least the floor; 0 = every routed row, the layout before the window)
 int moe_window_rows(size_t T, const Glm5Geometry& g) {
     const size_t all = T * (size_t) g.n_exp_used, floor = std::max(T, (size_t) kLightMax * kLightRows);
     static const long long env = [] {
-        const char* v = getenv("STRATA_GLM_PREFILL_WINDOW");
+        const char* v = getenv("ALMOND_GLM_PREFILL_WINDOW");
         return v ? std::atoll(v) : -1LL;
     }();
     if (env == 0) return (int) all;
@@ -284,7 +284,7 @@ struct MoeBufs {
     float *sh_g, *sh_u;
     uint16_t* sh16;
     int *ids, *rank, *counts, *base, *row_tok, *pos, *bounds;
-#if defined(STRATA_HIP_PREFILL_FUSED)
+#if defined(ALMOND_HIP_PREFILL_FUSED)
     int* tiles;
 #endif
     uint8_t *Xq, *Hq;
@@ -303,17 +303,17 @@ MoeBufs carve_moe(Carve& c, size_t T, size_t sub, const Glm5Geometry& g) {
     b.base = c.take<int>((size_t) g.n_expert);
     b.bounds = c.take<int>(8192);
     const size_t W = (size_t) moe_window_rows(T, g);
-#if defined(STRATA_HIP_PREFILL_FUSED)
+#if defined(ALMOND_HIP_PREFILL_FUSED)
     const bool fused = g.n_embd == 4096 && g.n_ff_exp == 2048 &&
-                       strata::prefill::rdna4::available();
+                       almond::glm::prefill::rdna4::available();
     if (fused) b.tiles = c.take<int>(2 * ((W + 63) / 64 + g.n_expert));
 #endif
     size_t x_bytes = mmq::q8_bytes((int64_t) W, g.n_embd);
     size_t h_bytes = mmq::q8_bytes((int64_t) W, g.n_ff_exp);
-#if defined(STRATA_HIP_PREFILL_FUSED)
+#if defined(ALMOND_HIP_PREFILL_FUSED)
     if (fused) {
-        x_bytes = std::max(x_bytes, strata::prefill::rdna4::act_bytes(T, g.n_embd));
-        h_bytes = std::max(h_bytes, strata::prefill::rdna4::act_bytes(W, g.n_ff_exp));
+        x_bytes = std::max(x_bytes, almond::glm::prefill::rdna4::act_bytes(T, g.n_embd));
+        h_bytes = std::max(h_bytes, almond::glm::prefill::rdna4::act_bytes(W, g.n_ff_exp));
     }
 #endif
     if (wmma_env_on()) {   // the WMMA branch's FP16 activation windows (a part's rows, at most W): 2 bytes a value
@@ -334,14 +334,14 @@ MoeBufs carve_moe(Carve& c, size_t T, size_t sub, const Glm5Geometry& g) {
 }
 
 // the shared expert's sub-batch: each one dequantizes its three matrices to FP16 again, so on CUDA it runs in larger
-// ones than the mixers; STRATA_GLM_PREFILL_SH_SUB overrides, sub_env sets it
+// ones than the mixers; ALMOND_GLM_PREFILL_SH_SUB overrides, sub_env sets it
 int shexp_sub(int sub_env) {
     if (sub_env > 0) return sub_env;
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     return kSub;
 #else
     static const int v = [] {
-        const char* e = getenv("STRATA_GLM_PREFILL_SH_SUB");
+        const char* e = getenv("ALMOND_GLM_PREFILL_SH_SUB");
         return e ? std::clamp(std::atoi(e), 16, 8192) : kShSub;
     }();
     return v;
@@ -351,10 +351,10 @@ int shexp_sub(int sub_env) {
 // the mixers' and the dense FFN's sub-batch for chunks of T tokens: kSub, doubled (up to 4096) while their buffers
 // stay within what the chunk's MoE buffers take of the union anyway - no extra memory, fewer and larger GEMMs, and
 // each projection dequantized to FP16 once a sub-batch instead of once every 256 tokens (a 14.8K chunk: 58 -> 4).
-// sub_env (STRATA_GLM_PREFILL_SUB, 16-8192) sets every sub-batch instead; HIP keeps kSub without it.
+// sub_env (ALMOND_GLM_PREFILL_SUB, 16-8192) sets every sub-batch instead; HIP keeps kSub without it.
 int mixer_sub(size_t T, const Glm5Geometry& g, bool kda, bool dsa, bool dense, bool moe, int max_pools, int sub_env) {
     if (sub_env > 0) return sub_env;
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     (void) T; (void) g; (void) kda; (void) dsa; (void) dense; (void) moe; (void) max_pools;
     return kSub;
 #else
@@ -383,7 +383,7 @@ void blas_ck(cublasStatus_t st, const char* what) {
 // kernels (sm_80+, and sm_7x's wmma ones - exl3::prompt_tc; they decode the trellis once a 32-row block - cheaper than reconstructing 50 MB of FP16 for a few
 // rows), the rest reconstructed to FP16 and multiplied by cuBLAS (the decode once, the GEMM at the tensor cores' FP16
 // rate).  Both write the window's OUTP rows; w16 is their scratch.  The lane is one GPU's: the working part's prompt
-// path, and the waiting part computing its share of that part's experts (STRATA_GLM_PREFILL_CALC).
+// path, and the waiting part computing its share of that part's experts (ALMOND_GLM_PREFILL_CALC).
 struct X3Lane {
     cudaStream_t s = nullptr;
     cublasHandle_t blas = nullptr;
@@ -394,15 +394,15 @@ struct X3Lane {
     float* OUTP = nullptr;            // the output window, W rows
     int W = 0;
     std::function<int(int, int)> place;   // sorted rows [a, a + n) -> the window row of a (it adds what it holds first)
-    const strata::kernels::exl3::ExpertLayout* lay = nullptr;
+    const almond::glm::kernels::exl3::ExpertLayout* lay = nullptr;
     int E = 0, nff = 0;
     float limit = 0.0f;               // the experts' swiglu clamp
-    int T = 0;                        // the chunk's tokens (STRATA_GLM_EXL3_MMA_ROWS_SHORT; 0: unknown)
+    int T = 0;                        // the chunk's tokens (ALMOND_GLM_EXL3_MMA_ROWS_SHORT; 0: unknown)
 };
 // experts [i0, i1) of a set through the tensor-core kernels, in parts whose rows fit the window and w16's h
 void x3_run_mma(const X3Lane& L, const uint8_t* wbase, size_t stride, const int* d_bounds, const int* hb, int r0, int i0,
                 int i1) {
-    namespace x3 = strata::kernels::exl3;
+    namespace x3 = almond::glm::kernels::exl3;
     const int E = L.E, nff = L.nff;
     const int cap = std::min(L.W, (int) std::max<int64_t>(1, L.w16_elems / nff));
     while (i0 < i1) {
@@ -433,11 +433,11 @@ void x3_run_mma(const X3Lane& L, const uint8_t* wbase, size_t stride, const int*
 // one expert through reconstruct + cuBLAS.  By default the expert's rows are rotated instead of its weights
 // (x W = H(H(x * suh) W') * svh): the decoded W' alone goes to FP16 - a plain decode, not two 128-point
 // transforms of every weight - and the inputs and outputs of its few hundred rows take the rotations, as in
-// decode.  STRATA_GLM_EXL3_ROT=0: the weights rotated (reconstruct_rows), as before
+// decode.  ALMOND_GLM_EXL3_ROT=0: the weights rotated (reconstruct_rows), as before
 void x3_run_blas(const X3Lane& L, const uint8_t* blob, int a, int nrows, int r0) {
-    namespace x3 = strata::kernels::exl3;
+    namespace x3 = almond::glm::kernels::exl3;
     static const bool rot_rows = [] {
-        const char* v = getenv("STRATA_GLM_EXL3_ROT");
+        const char* v = getenv("ALMOND_GLM_EXL3_ROT");
         return v == nullptr || std::atoi(v) != 0;
     }();
     const float one = 1.0f, zero = 0.0f;
@@ -514,26 +514,26 @@ void x3_run_blas(const X3Lane& L, const uint8_t* blob, int a, int nrows, int r0)
     }
 }
 // one set's experts in set order (the window takes the rows in order): runs of light experts to the tensor cores, the
-// rest alone.  STRATA_GLM_EXL3_MMA_ROWS=<rows>: the largest expert the tensor-core kernels take (0: none);
-// STRATA_GLM_EXL3_MMA_ROWS_SHORT=<rows>[,<max chunk tokens>]: that in a chunk of up to <max chunk tokens> (4096)
-// tokens instead (strata/core/exl3_mma_rows.hpp)
+// rest alone.  ALMOND_GLM_EXL3_MMA_ROWS=<rows>: the largest expert the tensor-core kernels take (0: none);
+// ALMOND_GLM_EXL3_MMA_ROWS_SHORT=<rows>[,<max chunk tokens>]: that in a chunk of up to <max chunk tokens> (4096)
+// tokens instead (almond/glm/core/exl3_mma_rows.hpp)
 void x3_run_set(const X3Lane& L, const uint8_t* wbase, int n_exp, size_t stride, const int* d_bounds, const int* hb,
                 int r0) {
     static const int mma_base = [] {
-        const char* v = getenv("STRATA_GLM_EXL3_MMA_ROWS");
+        const char* v = getenv("ALMOND_GLM_EXL3_MMA_ROWS");
         return v ? std::max(0, std::atoi(v)) : 64;
     }();
-    static const strata::core::MmaRowsShort mma_short = [] {
-        const strata::core::MmaRowsShort r =
-            strata::core::mma_rows_short_parse(getenv("STRATA_GLM_EXL3_MMA_ROWS_SHORT"));
+    static const almond::glm::core::MmaRowsShort mma_short = [] {
+        const almond::glm::core::MmaRowsShort r =
+            almond::glm::core::mma_rows_short_parse(getenv("ALMOND_GLM_EXL3_MMA_ROWS_SHORT"));
         if (r.rows > 0)
             std::fprintf(stderr, "glm prefill: EXL3 experts with up to %d rows through the tensor-core kernels in chunks "
-                                 "of up to %d tokens (MAYA_GLM_EXL3_MMA_ROWS_SHORT), %d in longer ones\n",
+                                 "of up to %d tokens (ALMOND_GLM_EXL3_MMA_ROWS_SHORT), %d in longer ones\n",
                          r.rows, r.max_tokens, mma_base);
         return r;
     }();
-    const int mma_rows = strata::core::mma_rows_for(L.T, mma_base, mma_short);
-    const bool use_mma = mma_rows > 0 && strata::kernels::exl3::prompt_tc();
+    const int mma_rows = almond::glm::core::mma_rows_for(L.T, mma_base, mma_short);
+    const bool use_mma = mma_rows > 0 && almond::glm::kernels::exl3::prompt_tc();
     for (int i = 0; i < n_exp;) {
         const int rows = hb[i + 1] - hb[i];
         if (use_mma && rows <= mma_rows) {
@@ -564,13 +564,13 @@ struct Glm5Model::PrefillState {
     int64_t lend_pct = 90;
     bool lend_pct_fixed = false;
     std::string mode;
-    int sub_env = 0;                 // STRATA_GLM_PREFILL_SUB: every sub-batch (0: mixer_sub, the shared expert kSub)
+    int sub_env = 0;                 // ALMOND_GLM_PREFILL_SUB: every sub-batch (0: mixer_sub, the shared expert kSub)
     int sh_sub() const { return shexp_sub(sub_env); }   // the shared expert's sub-batch
     int max_pools = 0;
     cublasHandle_t blas = nullptr;
     void* ws = nullptr;
-#if defined(STRATA_USE_HIP)
-    std::unique_ptr<strata::prefill::Gemm> lt;   // hipBLASLt with a tuning table (STRATA_HIPBLASLT_TUNING)
+#if defined(ALMOND_USE_HIP)
+    std::unique_ptr<almond::glm::prefill::Gemm> lt;   // hipBLASLt with a tuning table (ALMOND_HIPBLASLT_TUNING)
     bool lt_tried = false;
 #endif
     std::unique_ptr<mmq::Context> mq;
@@ -595,7 +595,7 @@ struct Glm5Model::PrefillState {
     // KV streaming: one layer's latent cache in position order, staged from its host copy - what the prompt attention
     // reads (a chunk's selections can name any position, so the slots' window does not hold them).  The copy runs on
     // kv_ss once the attention before has read the stage (kv_free), while the layers in between compute; the layer it
-    // is for waits on kv_ready (kv_next: that layer, -1 none).  STRATA_GLM_KV_PREFETCH=0: on the compute stream.
+    // is for waits on kv_ready (kv_next: that layer, -1 none).  ALMOND_GLM_KV_PREFETCH=0: on the compute stream.
     uint8_t* kv_stage = nullptr;
     cudaStream_t kv_ss = nullptr;
     cudaEvent_t kv_ready = nullptr, kv_free = nullptr;
@@ -612,11 +612,11 @@ struct Glm5Model::PrefillState {
     size_t gstride = 0;
     // pinned: the disk reads' landing ring, nland slots of gstride - deep enough that the reader runs a layer's disk
     // experts ahead of the groups that use them (12 slots kept the reader and the GPU waiting on each other: a 16k
-    // prompt on Mercury read the NVMe at ~0.7 of its ~2.9 GB/s); STRATA_GLM_PREFILL_LAND=<slots>, at least NG * GE
+    // prompt on Mercury read the NVMe at ~0.7 of its ~2.9 GB/s); ALMOND_GLM_PREFILL_LAND=<slots>, at least NG * GE
     uint8_t* gpin = nullptr;
     int nland = NG * GE;
     cudaEvent_t ev_ready[NG] = {}, ev_free[NG] = {};
-    // DUAL-LINK PROMPT (STRATA_GLM_DUAL_PREFILL=1, a two-GPU split whose halves run one after the other): the idle
+    // DUAL-LINK PROMPT (ALMOND_GLM_DUAL_PREFILL=1, a two-GPU split whose halves run one after the other): the idle
     // other GPU stages every second expert of a group - host -> its own (idle) gbuf over ITS PCIe link, then peer to
     // peer into this gbuf over NVLink - so a group arrives through both links.  help: that GPU while this half runs
     // (prefill_run sets it), ev_hready: its copies of group b landed (events on its device)
@@ -625,12 +625,12 @@ struct Glm5Model::PrefillState {
     cudaEvent_t ev_hready[NG] = {};
     uint64_t staged_help = 0;
     cudaEvent_t ev_hidle = nullptr;   // (on this GPU) its compute stream's queued work, before it helps the other
-    // THE WAITING PART COMPUTES (STRATA_GLM_PREFILL_CALC=1, Glm5Model::calc_prefill_ready: two parts whose halves run
+    // THE WAITING PART COMPUTES (ALMOND_GLM_PREFILL_CALC=1, Glm5Model::calc_prefill_ready: two parts whose halves run
     // one after the other, no peer access): while this half runs a MoE layer of EXL3 experts, the other GPU (calc)
     // computes a share of its RAM-tier experts - their weights over ITS PCIe link from this part's pinned RAM tier, the
     // chunk's x and routes over the host to it, the weighted sum of its rows back over the host - so both links
     // stream.  calc: that part while this half runs (prefill_run sets it).  calc_share: the RAM-tier experts left after
-    // the CPU's share that it takes, learned per layer from both lanes' times (STRATA_GLM_PREFILL_CALC_SHARE fixes it)
+    // the CPU's share that it takes, learned per layer from both lanes' times (ALMOND_GLM_PREFILL_CALC_SHARE fixes it)
     Glm5Model* calc = nullptr;
     double calc_share = 0.5;
     bool calc_fixed = false;
@@ -729,7 +729,7 @@ struct Glm5Model::PrefillState {
     // stats
     double ms = 0, ms_plan = 0, ms_disk = 0;
     int64_t tokens = 0, chunks = 0;
-    // STRATA_GLM_PREFILL_PROF=1: events between the phases of every layer, summed per phase (debug)
+    // ALMOND_GLM_PREFILL_PROF=1: events between the phases of every layer, summed per phase (debug)
     bool prof = false;
     std::vector<cudaEvent_t> pev;
     std::vector<const char*> pname;
@@ -787,25 +787,25 @@ struct Glm5Model::PrefillState {
     static constexpr int kPreEv = 8;      // an event every kPreEv copies: how far they are at the plan
     std::vector<cudaEvent_t> ev_pdone;
     cudaEvent_t ev_pready = nullptr, ev_pfree = nullptr, ev_pstart = nullptr;
-    // STRATA_GLM_PRESTAGE_ADAPT=1 (experimental): how many a layer prestages, in experts per chunk token by mixer
+    // ALMOND_GLM_PRESTAGE_ADAPT=1 (experimental): how many a layer prestages, in experts per chunk token by mixer
     // (KDA, DSA), learned from its lanes - the copy stream idle before the plan: more; the CPU done before copies the
     // plan could not move to it: fewer (0: unset).  Off: every layer fills the buffer
     double pre_rate[2] = {0.0, 0.0};
     double copy_ms = 0.0;                 // a prestage copy's time, measured (the split's PCIe estimate)
     std::vector<std::vector<int>> last_cnt;   // per layer: the routing of its last chunk (half the prediction)
     uint64_t pre_issued = 0, pre_hit = 0, pre_rows = 0;
-    // STRATA_GLM_PREFILL_TRACE=1 (debug): per MoE layer of a chunk, when its lanes ended - printed after the chunk
+    // ALMOND_GLM_PREFILL_TRACE=1 (debug): per MoE layer of a chunk, when its lanes ended - printed after the chunk
     struct Tr {
         cudaEvent_t start = nullptr, plan = nullptr, pre = nullptr, c1 = nullptr, end = nullptr;
         int pre_n = 0, pre_left = 0, grp = 0, ncpu = 0, crows = 0;
         double dl = 0, dcpu = 0;
-        int calc_n = 0, calc_rows = 0;   // STRATA_GLM_PREFILL_CALC: the other part's share, and both lanes' ends (ms
+        int calc_n = 0, calc_rows = 0;   // ALMOND_GLM_PREFILL_CALC: the other part's share, and both lanes' ends (ms
         double calc_a = 0, calc_b = 0;   // from the plan: this link's last copy, the other's sum here)
         bool on = false;
     };
     bool trace = false;
     std::vector<Tr> tr;
-    // STRATA_GLM_PREFILL_STAGES (default on; =0 silences): the chunk's stage line.  A prompt chunk is one long copy
+    // ALMOND_GLM_PREFILL_STAGES (default on; =0 silences): the chunk's stage line.  A prompt chunk is one long copy
     // lane (the staged experts) beside the compute stream, and nothing says where its wall goes: the profiling prints
     // only at exit, the trace is a debug knob.  Events around every staging group's ring wait split the lane into the
     // wait for the group's slot (the compute stream still reading it), the copies themselves, and the window between
@@ -847,11 +847,11 @@ struct Glm5Model::PrefillState {
     }
 };
 
-// STRATA_GLM_PREFILL_CALC: one MoE layer's share for the waiting part - what the working part's plan gave it
+// ALMOND_GLM_PREFILL_CALC: one MoE layer's share for the waiting part - what the working part's plan gave it
 struct Glm5Model::CalcJob {
     Glm5Model* owner = nullptr;      // the working part (its pinned routes, x and sum buffers)
     int T = 0;
-    const strata::kernels::exl3::ExpertLayout* lay = nullptr;   // the layer's experts' layout ...
+    const almond::glm::kernels::exl3::ExpertLayout* lay = nullptr;   // the layer's experts' layout ...
     size_t blob = 0;                 // ... and bytes
     std::vector<const uint8_t*> ram;   // the share's experts in the working part's pinned RAM tier
     std::vector<int> e, cnt;           // ... their ids and rows
@@ -973,11 +973,11 @@ bool Glm5Model::prefill_calc(const CalcJob& J, std::string& err) {
 
 int Glm5Model::prefill_chunk() const { return pf_ ? pf_->T : 0; }
 
-// --prefill as the engine reads it: STRATA_GLM_PREFILL (generate sets it from the config's args), unset = auto;
-// STRATA_GLM_PREFILL_CHUNK=N (the older knob) is --prefill N
+// --prefill as the engine reads it: ALMOND_GLM_PREFILL (generate sets it from the config's args), unset = auto;
+// ALMOND_GLM_PREFILL_CHUNK=N (the older knob) is --prefill N
 static std::string prefill_mode() {
-    if (const char* c = getenv("STRATA_GLM_PREFILL_CHUNK"); c != nullptr && c[0]) return c;
-    if (const char* v = getenv("STRATA_GLM_PREFILL"); v != nullptr && v[0]) return v;
+    if (const char* c = getenv("ALMOND_GLM_PREFILL_CHUNK"); c != nullptr && c[0]) return c;
+    if (const char* v = getenv("ALMOND_GLM_PREFILL"); v != nullptr && v[0]) return v;
     return "auto";
 }
 
@@ -1035,7 +1035,7 @@ static std::pair<int64_t, int64_t> weight_scratch(const Glm5Geometry& g, bool ha
     if (has_dsa)
         w32 = std::max<int64_t>({w32, (int64_t) g.n_head * g.kv_lora * g.qk_nope, (int64_t) g.n_head * g.v_head * g.kv_lora});
     int64_t w16 = std::max<int64_t>((int64_t) g.d_inner() * E, (int64_t) 2048 * E);
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
     if (has_dsa)   // the MLA products' FP16 copy of wk_b / wv_b
         w16 = std::max<int64_t>({w16, (int64_t) g.n_head * g.kv_lora * g.qk_nope, (int64_t) g.n_head * g.v_head * g.kv_lora});
 #endif
@@ -1046,7 +1046,7 @@ static constexpr size_t kPfWorkspace = (size_t) 16 << 20;   // cuBLAS
 // ---------------------------------------------------------------- setup
 bool Glm5Model::prefill_setup(std::string& err) {
     (void) err;
-    if (getenv("STRATA_GLM_NO_PREFILL") != nullptr) return true;
+    if (getenv("ALMOND_GLM_NO_PREFILL") != nullptr) return true;
     if (prefill_mode() != "auto" && std::atoll(prefill_mode().c_str()) <= 0) {
         std::fprintf(stderr, "glm prefill: --prefill %s: the prompt runs token by token\n", prefill_mode().c_str());
         return true;
@@ -1061,8 +1061,8 @@ bool Glm5Model::prefill_setup(std::string& err) {
     size_t gstride = 0;
     std::string why;
     const auto deq_ok = [&](const WSlot& w, const char* nm, int il) {
-        if (w.q == nullptr || (w.type != gf::kTypeBF16 && w.type != strata::kernels::exl3::kTypeEXL3 &&
-                               !strata::kernels::dequant_bf16_supported(w.type)))
+        if (w.q == nullptr || (w.type != gf::kTypeBF16 && w.type != almond::glm::kernels::exl3::kTypeEXL3 &&
+                               !almond::glm::kernels::dequant_bf16_supported(w.type)))
             why += "blk." + std::to_string(il) + "." + nm + " (type " + std::to_string(w.type) + ") ";
     };
     for (int il = l0_; il < l1_; ++il) {
@@ -1112,9 +1112,9 @@ bool Glm5Model::prefill_setup(std::string& err) {
     S->has_dense = has_dense;
     S->has_moe = has_moe;
     S->max_pools = (int) std::max<int64_t>(1, max_ctx_ / g.idx_kpool);
-    if (const char* v = getenv("STRATA_GLM_PREFILL_SUB"))
+    if (const char* v = getenv("ALMOND_GLM_PREFILL_SUB"))
         S->sub_env = std::clamp(std::atoi(v), 16, 8192);
-    S->prof = getenv("STRATA_GLM_PREFILL_PROF") != nullptr;
+    S->prof = getenv("ALMOND_GLM_PREFILL_PROF") != nullptr;
     S->gstride = gstride;
 
     // ---- sizes: the chunk T from the budget (per device)
@@ -1122,18 +1122,18 @@ bool Glm5Model::prefill_setup(std::string& err) {
     const auto wsc = weight_scratch(g, has_dsa);
     const int64_t w16_elems = wsc.first, w32_elems = wsc.second;
     const size_t ws_bytes = kPfWorkspace;
-    // ---- the chunk T, as Strata's --prefill (the config's args; STRATA_GLM_PREFILL, unset = auto).  `auto`: the
+    // ---- the chunk T, as Strata's --prefill (the config's args; ALMOND_GLM_PREFILL, unset = auto).  `auto`: the
     // largest chunk on the 256-token grid, up to 32768 on one GPU and 8192 on a split (each the faster there: one V100,
     // 26K-token prompts 559 tok/s at 32768 against 367 at 8192; two V100s 709 at 8192 against 551 at 32768), whose
     // buffers the expert pool fast_setup carves next can lend.
-    // The pool lends at most STRATA_PREFILL_LEND_PCT of its slots - Strata's 90 when at least 90% of the expert bytes
+    // The pool lends at most ALMOND_PREFILL_LEND_PCT of its slots - Strata's 90 when at least 90% of the expert bytes
     // are held pinned (the copies are DMA), 85 when host copies are the limit; that share is known once the RAM tier
     // exists, so the chunk is sized with 90 here and prefill_settle() takes it down to 85's when the share falls short
     // - and keeps every layer a route's experts and the spares (fast_setup's floor).  The prestage buffer is Strata's
     // ring and comes out of the same loan: the chunk is the largest that leaves it whole, else the largest that leaves
     // it 16 slots, else none.  A number N: chunks of N tokens, halved until the pool can lend them (only the floor
     // applies - the operator's number).  A split reads in its smallest part's chunk (load_pack_split).
-    // STRATA_GLM_PREFILL_MB=<MB> fixes what may be lent.
+    // ALMOND_GLM_PREFILL_MB=<MB> fixes what may be lent.
     const std::string mode = prefill_mode();
     const bool is_auto = mode == "auto";
     const int64_t auto_max = n_parts_ == 1 ? 32768 : 8192;
@@ -1150,9 +1150,9 @@ bool Glm5Model::prefill_setup(std::string& err) {
         stride_max = std::max(stride_max, glmfast::expert_stride(Ly.blob, Ly.gu_type, Ly.d_type));
     }
     const int64_t keep = Glm5Model::pool_keep(g.n_exp_used);
-    if (getenv("STRATA_GLM_PREFILL_KEEP") != nullptr)
+    if (getenv("ALMOND_GLM_PREFILL_KEEP") != nullptr)
         std::fprintf(stderr, "glm prefill: CUDA%d the pool keeps %lld slots a layer while a prompt runs "
-                             "(STRATA_GLM_PREFILL_KEEP; the floor is %d, Strata's is %d)\n",
+                             "(ALMOND_GLM_PREFILL_KEEP; the floor is %d, Strata's is %d)\n",
                      dev_, (long long) keep, g.n_exp_used + gf::kSpares, g.n_exp_used + gf::kSpares + 2);
     size_t avail = part_budget(dev_free, dev_total, (size_t) keep * stride_sum, stride_max).avail;
     // ... less the prompt path's MMQ scratch pool: fast_setup sizes the expert pool without it, so the lendable the
@@ -1160,25 +1160,25 @@ bool Glm5Model::prefill_setup(std::string& err) {
     avail -= std::min(avail, mmq_scratch_reserve());
     int64_t per = std::min<int64_t>(g.n_expert, (int64_t) (avail / std::max<size_t>(1, blob_sum)));
     while (per > 0 && (size_t) per * stride_sum > avail) --per;
-    const char* pct_env = getenv("STRATA_PREFILL_LEND_PCT");
-    const char* mb_env = getenv("STRATA_GLM_PREFILL_MB");
+    const char* pct_env = getenv("ALMOND_PREFILL_LEND_PCT");
+    const char* mb_env = getenv("ALMOND_GLM_PREFILL_MB");
     const size_t gbuf = has_moe ? (size_t) PrefillState::NG * PrefillState::GE * gstride : 0;
-    // the prestage buffer (the ring): one GPU (a split's parts hold most of their experts); STRATA_GLM_PRESTAGE=<slots>
+    // the prestage buffer (the ring): one GPU (a split's parts hold most of their experts); ALMOND_GLM_PRESTAGE=<slots>
     int ring_max = has_moe && n_parts_ == 1 ? kPreSlots : 0;
-    if (const char* v = getenv("STRATA_GLM_PRESTAGE")) ring_max = has_moe ? std::max(0, std::atoi(v)) : 0;
+    if (const char* v = getenv("ALMOND_GLM_PRESTAGE")) ring_max = has_moe ? std::max(0, std::atoi(v)) : 0;
     // A COMPLETE pool to come (fast_setup: every expert and the spares in each layer's main slots, this path's buffers
     // in the tail beyond them - the Windows APU's carve-out): no expert is outside VRAM, so there is nothing to prestage
     // (the ring only copies RAM-tier experts: Maya-S lent 1153 MB for it, ~4 slots a layer more for nothing) and
     // nothing to land from the disk (the smallest landing ring: ~0.4 GB of the 8065S's 32 GB of OS RAM less pinned).
     // Priced with the largest chunk's buffers and a margin; fast_setup decides from what is free then (short of it
-    // there, the pool is the capped one - without a prestage buffer).  STRATA_GLM_COMPLETE_POOL=0: never (on by
+    // there, the pool is the capped one - without a prestage buffer).  ALMOND_GLM_COMPLETE_POOL=0: never (on by
     // default on every GPU: complete_pool_on).
     bool complete = false;
     if (glmfast::complete_pool_on() && !F->unified_memory && has_moe && stride_sum > 0 &&
         ceiling > 0) {
         const auto pu = prefill_bytes_for((size_t) ceiling);
         size_t bufs = pu.first + pu.second + (size_t) w16_elems * 2 + (size_t) w32_elems * 4 + ws_bytes + gbuf + 4096;
-        if (const char* v = getenv("STRATA_GLM_VISION_LEND_MB"); v != nullptr && dev_ == 0)
+        if (const char* v = getenv("ALMOND_GLM_VISION_LEND_MB"); v != nullptr && dev_ == 0)
             bufs = std::max(bufs, (size_t) std::max(0LL, std::atoll(v)) << 20);
         const size_t margin = std::max<size_t>((size_t) 1 << 30, 2 * stride_sum);
         const int tail = (int) ((bufs + stride_sum - 1) / stride_sum);
@@ -1304,7 +1304,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
         // On an APU these pinned pages compete with the expert pool. A small
         // landing ring suffices for disk reads while the prompt borrows its tail.
         if (F->unified_memory || complete) want = kMinLand;
-        if (const char* v = getenv("STRATA_GLM_PREFILL_LAND")) want = std::max(kMinLand, std::atoi(v));
+        if (const char* v = getenv("ALMOND_GLM_PREFILL_LAND")) want = std::max(kMinLand, std::atoi(v));
         int n = want;
         while (cudaHostAlloc((void**) &S->gpin, (size_t) n * gstride, cudaHostAllocDefault) != cudaSuccess) {
             cudaGetLastError();
@@ -1372,7 +1372,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
     for (auto& e : S->ev_land) create_event(e, cudaEventDisableTiming);
     create_event(S->ev_hop, cudaEventDisableTiming);
     static const bool kv_prefetch = [] {
-        const char* v = getenv("STRATA_GLM_KV_PREFETCH");
+        const char* v = getenv("ALMOND_GLM_KV_PREFETCH");
         return v == nullptr || std::atoi(v) != 0;
     }();
     if (kv_ != nullptr && has_dsa && kv_prefetch) {   // (no side stream: the stage copies on the compute stream)
@@ -1397,18 +1397,18 @@ bool Glm5Model::prefill_setup(std::string& err) {
         return true;
     }
     S->last_cnt.assign((size_t) g.n_layers, {});
-    S->trace = getenv("STRATA_GLM_PREFILL_TRACE") != nullptr;
+    S->trace = getenv("ALMOND_GLM_PREFILL_TRACE") != nullptr;
     if (S->trace) {
         S->tr.resize((size_t) g.n_layers);
         for (auto& t : S->tr)
             for (cudaEvent_t* e : {&t.start, &t.plan, &t.pre, &t.c1, &t.end}) cudaEventCreate(e);
     }
     {
-        const char* v = getenv("STRATA_GLM_PREFILL_STAGES");
+        const char* v = getenv("ALMOND_GLM_PREFILL_STAGES");
         S->stages = v == nullptr || std::atoi(v) != 0;
         if (S->stages) {   // (a create that fails leaves the event null and the line's sums read -1)
             for (cudaEvent_t* e : {&S->sev_a, &S->sev_b, &S->sev_h0, &S->sev_h1}) cudaEventCreate(e);
-            std::fprintf(stderr, "glm prefill: CUDA%d the chunk stage line is on (STRATA_GLM_PREFILL_STAGES=0 "
+            std::fprintf(stderr, "glm prefill: CUDA%d the chunk stage line is on (ALMOND_GLM_PREFILL_STAGES=0 "
                                  "silences it)\n", dev_);
         }
     }
@@ -1513,7 +1513,7 @@ size_t glm_prefill_lend_bytes(const Glm5Geometry& g, size_t T, bool has_kda, boo
                               bool has_moe, bool mtp, int64_t max_ctx, size_t gstride, size_t kv_stage) {
     const int max_pools = (int) std::max<int64_t>(1, max_ctx / g.idx_kpool);
     int sub_env = 0;
-    if (const char* v = getenv("STRATA_GLM_PREFILL_SUB")) sub_env = std::clamp(std::atoi(v), 16, 8192);
+    if (const char* v = getenv("ALMOND_GLM_PREFILL_SUB")) sub_env = std::clamp(std::atoi(v), 16, 8192);
     const auto pu = chunk_bytes(g, T, has_kda, has_dsa, has_dense, has_moe, max_pools, sub_env, mtp, kv_stage);
     const auto ws = weight_scratch(g, has_dsa);
     Carve c;
@@ -1565,15 +1565,15 @@ bool Glm5Model::prefill_carve(int Tn, int64_t end) {
     blas_ck(cublasSetWorkspace(S->blas, S->ws, S->ws_bytes), "set workspace");
     S->T_bound = Tn;
     S->need = c.off;
-    // A test hook: STRATA_PREALLOC_FAIL=<tokens> makes the layout of a request's chunk bigger than that fail (the
+    // A test hook: ALMOND_PREALLOC_FAIL=<tokens> makes the layout of a request's chunk bigger than that fail (the
     // startup's layout is not touched), so the recovery (the prompt is read again with a smaller chunk) can be
     // checked.
     static const int64_t fail_above = [] {
-        const char* v = std::getenv("STRATA_PREALLOC_FAIL");
+        const char* v = std::getenv("ALMOND_PREALLOC_FAIL");
         return v ? std::atoll(v) : 0;
     }();
     if (fail_above > 0 && end >= 0 && (int64_t) Tn > fail_above) {
-        std::fprintf(stderr, "glm prefill: CUDA%d the layout of %d tokens does not fit (STRATA_PREALLOC_FAIL)\n", dev_,
+        std::fprintf(stderr, "glm prefill: CUDA%d the layout of %d tokens does not fit (ALMOND_PREALLOC_FAIL)\n", dev_,
                      Tn);
         return false;
     }
@@ -1739,8 +1739,8 @@ bool Glm5Model::lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std:
             F->upd_val_h[nu] = v;
             ++nu;
         };
-        // STRATA_GLM_LEND_DROP=1: drop the lent slots' experts as before (instead of moving them, below)
-        static const bool lend_drop = getenv("STRATA_GLM_LEND_DROP") != nullptr;
+        // ALMOND_GLM_LEND_DROP=1: drop the lent slots' experts as before (instead of moving them, below)
+        static const bool lend_drop = getenv("ALMOND_GLM_LEND_DROP") != nullptr;
         // an expert that leaves VRAM here goes to the RAM tier when it has room (a free slot, else a colder entry):
         // the decode after the prompt then finds it in RAM, not on disk (with the experts all in VRAM - a split
         // across many GPUs - the RAM tier holds little else, and every lent expert was a ~20 ms disk read back)
@@ -1754,13 +1754,13 @@ bool Glm5Model::lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std:
                 if (R.st[(size_t) s2] == FastState::kRFree) rs = s2;
             if (rs < 0) {
                 // the victim: a RAM-tier expert of a lower LFU count - and on EQUAL counts the one a route used less
-                // recently (STRATA_GLM_LEND_PARK_LRU=0: strictly lower only, as before).  The counts age (all halve every
+                // recently (ALMOND_GLM_LEND_PARK_LRU=0: strictly lower only, as before).  The counts age (all halve every
                 // 32768 routing events), so most sit at the same small value, often 0, and the strict rule picked badly:
                 // Maya-S24, one V100, 512 tokens after a fresh 24K prompt (the run's second lend), two rounds each, disk
                 // reads 520-578 -> 309-317, of them the lend's RAM victims 392-465 -> 208-213; decode 31.6-32.5 ->
                 // 33.1-33.3 tok/s, VRAM hits 72.2-74.0 -> 73.7-74.5 %
-                static const bool lru_ties = getenv("STRATA_GLM_LEND_PARK_LRU") == nullptr ||
-                                             std::atoi(getenv("STRATA_GLM_LEND_PARK_LRU")) != 0;
+                static const bool lru_ties = getenv("ALMOND_GLM_LEND_PARK_LRU") == nullptr ||
+                                             std::atoi(getenv("ALMOND_GLM_LEND_PARK_LRU")) != 0;
                 // ... and on equal recency too (the first prompt after a load: every count and tick alike, 30 of 450 lent
                 // experts parked) the one of the lower long-term usage (the profile the warm-up placed them by)
                 const auto use = [&](int k) { return F->usage.empty() ? 0u : F->usage[(size_t) k]; };
@@ -1826,8 +1826,8 @@ bool Glm5Model::lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std:
                 char& st = P.st[(size_t) s];
                 if (st == FastState::kResident && P.key[(size_t) s] >= 0) {
                     const int key = il * NE + P.key[(size_t) s];
-                    static const bool lru_ties = getenv("STRATA_GLM_LEND_PARK_LRU") == nullptr ||
-                                                 std::atoi(getenv("STRATA_GLM_LEND_PARK_LRU")) != 0;
+                    static const bool lru_ties = getenv("ALMOND_GLM_LEND_PARK_LRU") == nullptr ||
+                                                 std::atoi(getenv("ALMOND_GLM_LEND_PARK_LRU")) != 0;
                     if (ci < cold.size() &&
                         (cold[ci].first < (uint64_t) F->cnt[(size_t) key] ||
                          (lru_ties && cold[ci].first == (uint64_t) F->cnt[(size_t) key] &&
@@ -1946,7 +1946,7 @@ void Glm5Model::prefill_destroy() {
         if (S->ev_hready[b]) cudaEventDestroy(S->ev_hready[b]);
     }
     if (S->ev_hidle) cudaEventDestroy(S->ev_hidle);
-    // (STRATA_GLM_PREFILL_CALC's: every event of this part's lives on this GPU)
+    // (ALMOND_GLM_PREFILL_CALC's: every event of this part's lives on this GPU)
     for (cudaEvent_t e : {S->ev_xh, S->ev_cpart, S->ev_ca0, S->ev_a1, S->cev_plan, S->cev_t0, S->ev_turn})
         if (e) cudaEventDestroy(e);
     for (int b = 0; b < PrefillState::NG; ++b) {
@@ -2048,11 +2048,11 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
     // projection the GGUF keeps unquantized) is narrowed to FP16 the same way
     const auto hgemm_q = [&](const WSlot& w, int N, int Kd, const uint16_t* X16, int ldx, float* Y, int ldy, int Tn,
                              float beta) {
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
         if (!S->lt_tried) {
             S->lt_tried = true;
-            if (getenv("STRATA_HIPBLASLT_TUNING")) {
-                auto lt = std::make_unique<strata::prefill::Gemm>();
+            if (getenv("ALMOND_HIPBLASLT_TUNING")) {
+                auto lt = std::make_unique<almond::glm::prefill::Gemm>();
                 std::string lt_err;
                 if (lt->init_external(F->cs, S->w16, S->w16_elems, S->ws, S->ws_bytes, lt_err))
                     S->lt = std::move(lt);
@@ -2065,7 +2065,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         // an EXL3 weight: reconstructed in slices of whole 128-row output rotation blocks (at a sub-batch's 1-2K rows
         // the decode once + cuBLAS beat exl3::gemm_rows, which decodes again for every 32 rows: KDA projections 2.3 vs
         // 3.3 s over 9 GPUs for a 6.4K-token prompt)
-        const bool x3w = w.type == strata::kernels::exl3::kTypeEXL3;
+        const bool x3w = w.type == almond::glm::kernels::exl3::kTypeEXL3;
         int rows = (int) std::max<int64_t>(1, std::min<int64_t>(N, S->w16_elems / Kd));
         if (x3w) rows = std::max(128, rows / 128 * 128);
         for (int r0 = 0; r0 < N; r0 += rows) {
@@ -2073,11 +2073,11 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             if (w.type == gf::kTypeBF16)
                 gb::bf16_to_f16((const uint16_t*) w.q + (size_t) r0 * Kd, S->w16, (int64_t) n * Kd, s);
             else if (x3w)
-                strata::kernels::exl3::reconstruct_rows(
-                    strata::kernels::exl3::view(*(const strata::kernels::exl3::Mat*) w.q, r0, n), S->w16, false, s);
+                almond::glm::kernels::exl3::reconstruct_rows(
+                    almond::glm::kernels::exl3::view(*(const almond::glm::kernels::exl3::Mat*) w.q, r0, n), S->w16, false, s);
             else
-                strata::kernels::dequant_f16(w.type, w.q, r0, n, Kd, S->w16, s);
-#if defined(STRATA_USE_HIP)
+                almond::glm::kernels::dequant_f16(w.type, w.q, r0, n, Kd, S->w16, s);
+#if defined(ALMOND_USE_HIP)
             if (S->lt && ldx == Kd) {
                 S->lt->f16(X16, S->w16, Y + r0, Tn, n, Kd, ldy, beta);
                 continue;
@@ -2120,8 +2120,8 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
     // A single-device prompt chunk only conditions later tokens; decode computes the last prompt token and its
     // logits separately. The terminal layer's outputs have no reader unless NextN is loaded. Keep its mixer/cache
     // updates, but omit the output projection and FFN (including both mHC write halves). Split boundaries and seam
-    // dumps consume these rows, so keep their full path. STRATA_GLM_PREFILL_TAIL_SKIP=0 is the A/B baseline.
-    const char* tail_env = getenv("STRATA_GLM_PREFILL_TAIL_SKIP");
+    // dumps consume these rows, so keep their full path. ALMOND_GLM_PREFILL_TAIL_SKIP=0 is the A/B baseline.
+    const char* tail_env = getenv("ALMOND_GLM_PREFILL_TAIL_SKIP");
     const bool tail_skip = l0_ == 0 && l1_ == g.n_layers && split_next_ == nullptr && mtp_il_ < 0 &&
                            (cb_dir == nullptr || !cb_dir[0]) && (tail_env == nullptr || std::atoi(tail_env) != 0);
     const auto dump_row = [&](const std::string& name, const float* rows, int width, int row = -1) {
@@ -2139,7 +2139,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
     // ---- the disk reader: one thread for the chunk, reading the experts the MoE layers append - (layer, expert) in
     //      order - into the pinned landing ring, while the resident product and the RAM-tier groups run (Mercury,
     //      2.6k-token prompt: 5.1 -> 4.5 ms/token).  A layer appends its disk-only experts once its plan is known.
-    //      From kPredT tokens on (STRATA_GLM_PREFILL_PRED_T=<tokens>, 0 = never), a layer also appends the NEXT MoE
+    //      From kPredT tokens on (ALMOND_GLM_PREFILL_PRED_T=<tokens>, 0 = never), a layer also appends the NEXT MoE
     //      layer's whole disk-only set (a superset of what it will route), so those reads overlap its attention too.
     //      With the 12-slot ring it was slower (the reader could not get ahead); with the deep ring it pays from 2k
     //      chunks (Mercury 16k prompt at 2048-token chunks: 394 -> 417 tok/s).  A slot is refilled once the copy that
@@ -2158,22 +2158,22 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             return (int) q.size() - 1;
         }
     } dq;
-    // STRATA_GLM_DISK_QD=<n>: experts read at once (one batch across the workers) when they are queued and their
+    // ALMOND_GLM_DISK_QD=<n>: experts read at once (one batch across the workers) when they are queued and their
     // slots free - an NVMe gives more with a few in flight (Uranus 1.87 -> 2.2 GB/s at 2, Mercury 2.65 -> 2.96).
     // Up to 32: on Windows each read has a fixed cost, so more in flight matter more (RX 7900 XTX, PCIe 4 NVMe,
-    // with STRATA_GLM_READ_CHUNKS=1: 1.66 GB/s at 2 -> 4.27 GB/s at 16)
+    // with ALMOND_GLM_READ_CHUNKS=1: 1.66 GB/s at 2 -> 4.27 GB/s at 16)
     static constexpr int kMaxDiskQd = 32;
     static const int disk_qd = [] {
-        const char* v = getenv("STRATA_GLM_DISK_QD");
+        const char* v = getenv("ALMOND_GLM_DISK_QD");
         return std::max(1, std::min(kMaxDiskQd, v ? std::atoi(v) : 2));
     }();
-    // STRATA_GLM_DISK_READERS=<n>: n reader threads, each with one expert in flight (its three parts read whole), every
+    // ALMOND_GLM_DISK_READERS=<n>: n reader threads, each with one expert in flight (its three parts read whole), every
     // expert handed on the moment it and those before it landed - instead of one reader reading disk_qd experts at a
     // time across the workers and handing the batch on when all of it landed.  A DRAM-less NVMe (Kingston NV3) reads
     // 1.6 GB/s in the 256 KB pieces the workers read and 3.0 GB/s in 2 MB ones; a deeper batch bought short prompts the
     // throughput (514 tokens: 6.8 -> 5.9 s) but cost long ones the first expert's wait (8k tokens: 9.7 -> 10.7 s)
     static const int n_readers = [] {
-        const char* v = getenv("STRATA_GLM_DISK_READERS");
+        const char* v = getenv("ALMOND_GLM_DISK_READERS");
         return v ? std::max(0, std::min(16, std::atoi(v))) : 0;
     }();
     std::atomic<int> rnext{0};
@@ -2214,9 +2214,9 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             for (auto& t : more) t.join();
             return;
         }
-        // each part in pieces across the workers, as the decode's disk path (STRATA_GLM_READ_CHUNKS)
+        // each part in pieces across the workers, as the decode's disk path (ALMOND_GLM_READ_CHUNKS)
         static const int kChunks = [] {
-            const char* v = getenv("STRATA_GLM_READ_CHUNKS");
+            const char* v = getenv("ALMOND_GLM_READ_CHUNKS");
             return std::max(1, std::min(16, v ? std::atoi(v) : 8));
         }();
         for (int k = 0;;) {
@@ -2256,9 +2256,9 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             issued += (uint64_t) q.n.load();
         }
     } joiner{reader, dq, S->disk_issued};
-    // STRATA_GLM_PREFILL_PRED_T=<tokens>: the chunk size from which the next layer's disk set is read ahead (0 = never)
+    // ALMOND_GLM_PREFILL_PRED_T=<tokens>: the chunk size from which the next layer's disk set is read ahead (0 = never)
     static const int pred_t = [] {
-        const char* v = getenv("STRATA_GLM_PREFILL_PRED_T");
+        const char* v = getenv("ALMOND_GLM_PREFILL_PRED_T");
         return v ? std::atoi(v) : kPredT;
     }();
     int pred_layer = -1, pred0 = 0;   // the predicted segment: its layer, first index and experts (ascending)
@@ -2327,8 +2327,8 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 if (pred >= kPreMinRows) cand.push_back(Cand{pred, e, rs});
             }
         }
-        // the layer's count: the buffer's, or (STRATA_GLM_PRESTAGE_ADAPT=1) what its mixer's window took before
-        static const bool adapt = getenv("STRATA_GLM_PRESTAGE_ADAPT") != nullptr && std::atoi(getenv("STRATA_GLM_PRESTAGE_ADAPT")) != 0;
+        // the layer's count: the buffer's, or (ALMOND_GLM_PRESTAGE_ADAPT=1) what its mixer's window took before
+        static const bool adapt = getenv("ALMOND_GLM_PRESTAGE_ADAPT") != nullptr && std::atoi(getenv("ALMOND_GLM_PRESTAGE_ADAPT")) != 0;
         const int cap = std::min(S->NP, (int) std::min<size_t>(S->pbuf_bytes / P.stride,
                                                                 S->ev_pdone.size() * PrefillState::kPreEv));
         const double rate = S->pre_rate[Ly.recr ? 0 : 1];
@@ -2355,9 +2355,9 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         S->pre_issued += (uint64_t) n;
     };
 
-    // whether layer il's plan may give experts to the CPU (STRATA_GLM_PREFILL_CPU=0: never)
+    // whether layer il's plan may give experts to the CPU (ALMOND_GLM_PREFILL_CPU=0: never)
     static const bool pf_cpu = [] {
-        const char* v = getenv("STRATA_GLM_PREFILL_CPU");
+        const char* v = getenv("ALMOND_GLM_PREFILL_CPU");
         return v == nullptr || std::atoi(v) != 0;
     }();
     const auto cpu_lane = [&](int il) {
@@ -2410,7 +2410,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         S->kv_next = il;
         return true;
     };
-    // STRATA_GLM_PREFILL_CALC: the other part computes a share of this half's EXL3 MoE layers - its buffers in its
+    // ALMOND_GLM_PREFILL_CALC: the other part computes a share of this half's EXL3 MoE layers - its buffers in its
     // own prompt carve, laid out for this chunk (idle until its half: prefill_run's turn() keeps the streams apart)
     Glm5Model* const C = S->calc;
     bool calc_half = false;
@@ -2426,7 +2426,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
     }
     // ... and its balance, from a helped layer's two lanes (both from its plan): this GPU's staged copies against the
     // other GPU's sum on the host plus its way up here (at this link's measured rate) - the share is nudged until they
-    // end together (STRATA_GLM_PREFILL_CALC_SHARE: fixed)
+    // end together (ALMOND_GLM_PREFILL_CALC_SHARE: fixed)
     const auto calc_balance = [&]() {
         S->calc_measure = false;
         if (C == nullptr) return;
@@ -2519,16 +2519,16 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 // the recurrence over n_head x 4 blocks (kda_rec_split: the value columns are independent) instead of
                 // one block a head - 32 blocks for a V100's 80 SMs.  Maya-S24, 27K prompts: kda_rec 4.7 / 5.1 -> 3.5 s
                 // (8 blocks a head: 5.3 / 5.5 s); state and output within 1e-7 of the one-block kernel.
-                // STRATA_GLM_KDA_SPLIT=0 / 8: the one-block kernel / 8 a head.  STRATA_GLM_KDA_SPLIT_CHECK=1 (debug):
+                // ALMOND_GLM_KDA_SPLIT=0 / 8: the one-block kernel / 8 a head.  ALMOND_GLM_KDA_SPLIT_CHECK=1 (debug):
                 // the one-block kernel on a copy too, compared
                 static const int kda_split = [] {
-                    const char* v = getenv("STRATA_GLM_KDA_SPLIT");
+                    const char* v = getenv("ALMOND_GLM_KDA_SPLIT");
                     const int n = v ? std::atoi(v) : 4;
                     return n == 4 || n == 8 ? n : 0;
                 }();
                 float* Sl = state_ + kda_S_[(size_t) il];
                 if (kda_split > 0) {
-                    static const bool chk = getenv("STRATA_GLM_KDA_SPLIT_CHECK") != nullptr;
+                    static const bool chk = getenv("ALMOND_GLM_KDA_SPLIT_CHECK") != nullptr;
                     const size_t sn = (size_t) g.n_head * 128 * 128, on = (size_t) tn * DI;
                     float* rs = nullptr;
                     __half* ro = nullptr;
@@ -2627,7 +2627,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                                B.cells, B.n_sel, s);
                 S->mark("dsa_index", s);
                 // q_abs[t][h] = wk_b[h] (kv_lora x qk_nope) . q[t][h]
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
                 // FP16 products; q is packed per head into B.attn's space and the context into B.q_abs's (both idle there)
                 const bool f16 = mla_f16_on() && (int64_t) g.qk_nope <= 2 * (int64_t) g.v_head;
                 const MlaAttnPath attn_path = mla_attn_path();
@@ -2655,7 +2655,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                         "q_abs");
                 }
                 S->mark("dsa_qabs", s);
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
                 if (use_f16q)
                     gb::mla_attn_f16q((const uint16_t*) B.q_abs, lat, B.cells,
                                       B.n_sel, g.n_sel_max(), g.n_head, g.kv_lora, 1.0f / std::sqrt((float) g.qk_nope), tn,
@@ -2670,7 +2670,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                              g.kv_lora, 1.0f / std::sqrt((float) g.qk_nope), tn, B.ctx, s, lat_q8_);
                 S->mark("dsa_attn", s);
                 // out[t][h] = wv_b[h] (v_head x kv_lora) . ctx[t][h]
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
                 if (f16) {
                     bf16_to_f16<<<1024, 256, 0, s>>>(Ly.v_b, S->w16, (int64_t) g.n_head * g.v_head * g.kv_lora);
                     pack_heads_f16<<<2048, 256, 0, s>>>(B.ctx, hp_c, tn, g.n_head, g.kv_lora);
@@ -2698,7 +2698,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                     dump_row("dsa_qr-" + Ls, B.qr, g.q_lora, tn - 1);
                     dump_row("dsa_q-" + Ls, B.q, g.n_head * g.qk_nope, tn - 1);
                     dump_row("dsa_iq-" + Ls, B.iq, g.idx_heads * g.idx_key, tn - 1);
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
                     if (!f16)   // with the FP16 products q_abs holds FP16 / the packed context
 #endif
                     dump_row("pf_qabs-" + Ls, B.q_abs, g.n_head * g.kv_lora, tn - 1);
@@ -2838,11 +2838,11 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         // resident experts with at most light_rows rows go to the light kernels (gf::rows_experts): their rows come
         // after the MMQ product's, which sees them as empty
         static const int light_env = [] {
-            const char* v = getenv("STRATA_GLM_PREFILL_LIGHT");
+            const char* v = getenv("ALMOND_GLM_PREFILL_LIGHT");
             return v ? std::atoi(v) : kLightRows;
         }();
         const auto lt_ok = [](int t) { return t == 16 || t == 18 || t == 19; };
-        static const int light_layer = getenv("STRATA_GLM_PREFILL_LIGHT_LAYER") ? std::atoi(getenv("STRATA_GLM_PREFILL_LIGHT_LAYER")) : -1;
+        static const int light_layer = getenv("ALMOND_GLM_PREFILL_LIGHT_LAYER") ? std::atoi(getenv("ALMOND_GLM_PREFILL_LIGHT_LAYER")) : -1;
         const int light_rows = lt_ok(Ly.gu_type) && lt_ok(Ly.d_type) && (light_layer < 0 || il == light_layer) ? light_env : 0;
         int n_light = 0, rows_mmq = 0;
         int b_pre = -1, rows_pre = 0, max_pre = 0;   // the prestaged set: its bounds, rows and largest expert
@@ -2938,12 +2938,12 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         // THE CPU'S SHARE (a host whose CPU lane computes an expert faster than PCIe moves it - one GPU beside two
         // sockets: 0.15 vs 2.1 ms): the least routed RAM-tier experts are computed on the host, from the RAM tier, while
         // the copy stream stages the rest - taken in ascending row count while the host's estimated time (an expert's
-        // weights + STRATA_GLM_PREFILL_CPU_ROW_MS a row, times the learned balance kappa) stays under the PCIe time of
+        // weights + ALMOND_GLM_PREFILL_CPU_ROW_MS a row, times the learned balance kappa) stays under the PCIe time of
         // what is left.  Their rows go last in the sorted order; their outputs are uploaded into OUTP before the
-        // combine.  STRATA_GLM_PREFILL_CPU=0: off.
+        // combine.  ALMOND_GLM_PREFILL_CPU=0: off.
         std::vector<Staged> cpu_set;
         {
-            static const char* row_env = getenv("STRATA_GLM_PREFILL_CPU_ROW_MS");
+            static const char* row_env = getenv("ALMOND_GLM_PREFILL_CPU_ROW_MS");
             // the planning cost of a row: the env's, else learned from the layers before (their host time less an
             // expert's weights each, over their rows; one 3090 beside 2x Xeon 6152: ~0.056 ms)
             const double row_ms = row_env != nullptr ? std::atof(row_env) : S->row_ms;
@@ -2994,7 +2994,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 staged.swap(rest);
             }
         }
-        // THE OTHER PART'S SHARE (STRATA_GLM_PREFILL_CALC): calc_share of the RAM-tier experts left go to the waiting
+        // THE OTHER PART'S SHARE (ALMOND_GLM_PREFILL_CALC): calc_share of the RAM-tier experts left go to the waiting
         // GPU - the lightest ones when it has fewer multiprocessors than this one (the slower at computing), else the
         // most routed; this GPU keeps the rest, the VRAM-tail and the disk ones.  Their rows go last in the sorted
         // order, never computed here: the other part's weighted sum of them is added into ffn after the combine
@@ -3079,7 +3079,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         // experts, queued after it, started near the end of the copies they were planned beside (an 8K prompt on one
         // 3090: at plan + ~290 of a layer's ~400 ms, ~110 ms of work).  Joined before their outputs go up
         const auto x3_cpu = [&]() {
-            namespace kc = strata::kernels::cpu;
+            namespace kc = almond::glm::kernels::cpu;
             const int ncx = (int) cpu_set.size();
             std::vector<int> r_of((size_t) ncx);   // each expert's first row in the CPU segment
             for (int j = 0; j < ncx; ++j) r_of[(size_t) j] = S->h_base[cpu_set[(size_t) j].e] - cpu_r0;
@@ -3204,7 +3204,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 if (x3_ok) x3_cpu();
                 x3_t1 = std::chrono::steady_clock::now();
             });
-        // the other part's share (STRATA_GLM_PREFILL_CALC): its work goes onto its GPU from a thread of its own (this
+        // the other part's share (ALMOND_GLM_PREFILL_CALC): its work goes onto its GPU from a thread of its own (this
         // thread's launches block once this GPU's queue is full), joined before the sum's way up is queued here
         const bool calc_run = calc_on && !calc_set.empty();
         CalcJob calc_job;
@@ -3251,21 +3251,21 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         const size_t qblk = mmq::q8_block_bytes();
         // the SwiGLU in the gate/up product's write-back where MMQ has it: the product
         // writes T x n_ff values instead of T x 2 n_ff that a separate kernel reads back, bit-identical to it.
-        // STRATA_GLM_MMQ_GLU=0: the separate kernel.
+        // ALMOND_GLM_MMQ_GLU=0: the separate kernel.
         static const bool glu_on = [] {
-            const char* v = getenv("STRATA_GLM_MMQ_GLU");
+            const char* v = getenv("ALMOND_GLM_MMQ_GLU");
             return v == nullptr || std::atoi(v) != 0;
         }();
         const bool glu = glu_on && mmq::glu_supported(Ly.gu_type, nff);
-        // the Volta grouped-WMMA products for this layer (STRATA_PF_WMMA): the run_set's branch below converts the
+        // the Volta grouped-WMMA products for this layer (ALMOND_PF_WMMA): the run_set's branch below converts the
         // activations to FP16 and runs both products on the tensor cores; a rejected launch falls back to MMQ once
         const bool wmma = moe_wmma_on(Ly.gu_type, Ly.d_type, E, nff);
         static bool wmma_fell_back = false;
-#if defined(STRATA_HIP_PREFILL_FUSED)
+#if defined(ALMOND_HIP_PREFILL_FUSED)
         // X is rounded once per token; the fused GU epilogue writes rounded H.
         // The shared scratch reserves the larger of the two activation formats.
         const bool fused = E == 4096 && nff == 2048 &&
-                           strata::prefill::rdna4::supported(Ly.gu_type, Ly.d_type);
+                           almond::glm::prefill::rdna4::supported(Ly.gu_type, Ly.d_type);
         bool fused_x_ready = false;
 #endif
         // one expert set through gate/up, swiglu and down: its rows [r0 + hb[0], r0 + hb[n_exp]) of the sorted order
@@ -3280,9 +3280,9 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 for (int i = i0; i < i1; ++i) max_rows = std::max(max_rows, hb[i + 1] - hb[i]);
                 if (nrows > 0) {
                     const int o = place(r0 + a, nrows);
-#if defined(STRATA_HIP_PREFILL_FUSED)
+#if defined(ALMOND_HIP_PREFILL_FUSED)
                     if (fused) {
-                        namespace rf = strata::prefill::rdna4;
+                        namespace rf = almond::glm::prefill::rdna4;
                         if (!fused_x_ready) {
                             rf::quantize(S->x, T, E, M.Xq, s);
                             fused_x_ready = true;
@@ -3306,15 +3306,15 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                         // the set's from a and the activations start a rows back, as in the MMQ products' trick.
                         auto* x16 = reinterpret_cast<uint16_t*>(M.Xq) - (size_t) a * E;
                         auto* h16 = reinterpret_cast<uint16_t*>(M.Hq) - (size_t) a * nff;
-                        strata::kernels::exl3::rows_f16(S->x, E, M.row_tok + r0 + a, nrows, E, x16 + (size_t) a * E, s);
-                        if (!strata::kernels::gemm_iq_f16_grouped(Ly.gu_type, wbase + (size_t) i0 * stride, stride,
+                        almond::glm::kernels::exl3::rows_f16(S->x, E, M.row_tok + r0 + a, nrows, E, x16 + (size_t) a * E, s);
+                        if (!almond::glm::kernels::gemm_iq_f16_grouped(Ly.gu_type, wbase + (size_t) i0 * stride, stride,
                                 2 * nff, E, x16, E, d_bounds + i0, i1 - i0, max_rows, GU - (size_t) a * (2 * nff),
                                 2 * nff, s)) {
                             wmma_fell_back = true;
                             std::fprintf(stderr, "glm prefill: grouped WMMA rejected the gate/up shape, MMQ from here\n");
                         } else {
                             gb::swiglu_rows_h16(GU, h16 + (size_t) a * nff, nrows, nff, g.swiglu_exp, s);
-                            if (!strata::kernels::gemm_iq_f16_grouped(Ly.d_type, wbase + (size_t) i0 * stride + Ly.down_off,
+                            if (!almond::glm::kernels::gemm_iq_f16_grouped(Ly.d_type, wbase + (size_t) i0 * stride + Ly.down_off,
                                     stride, E, nff, h16, nff, d_bounds + i0, i1 - i0, max_rows,
                                     M.OUTP + (size_t) (o - a) * E, E, s)) {
                                 wmma_fell_back = true;
@@ -3383,7 +3383,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         x3l.E = E;
         x3l.nff = nff;
         x3l.limit = g.swiglu_exp;
-        // FP16 EXPERTS (Volta): a quantized expert routed by at least STRATA_GLM_PREFILL_BLAS rows of the chunk is
+        // FP16 EXPERTS (Volta): a quantized expert routed by at least ALMOND_GLM_PREFILL_BLAS rows of the chunk is
         // dequantized to FP16 (llama.cpp's convert.cu) and multiplied by cuBLAS on the FP16 tensor cores - the
         // 25M-weight decode once an expert, the GEMM at the FP16 rate (~53 TFLOPS from ~200 rows an expert on a V100,
         // where MMQ has no int8 tensor cores: ~25 TOPS); lighter experts stay on MMQ.  GLM-5.3-Flash on one V100, two
@@ -3393,11 +3393,11 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         // (per device: a split over a V100 and a newer card keeps MMQ on the newer one)
         const int blas_rows = [] {
             static const int env = [] {
-                const char* v = getenv("STRATA_GLM_PREFILL_BLAS");
+                const char* v = getenv("ALMOND_GLM_PREFILL_BLAS");
                 return v ? std::max(0, std::atoi(v)) : -1;
             }();
             if (env >= 0) return env;
-#if defined(STRATA_USE_HIP)
+#if defined(ALMOND_USE_HIP)
             return 0;   // (MMQ only: the FP16 path is measured on Volta)
 #else
             static int blas_dev[16] = {};   // rows + 1 per device, 0: not looked at yet
@@ -3416,7 +3416,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         const bool use_blas = blas_rows > 0 && !Ly.exl3 && mmq::to_f16_supported(Ly.gu_type) &&
                               mmq::to_f16_supported(Ly.d_type) && S->w16_elems >= (int64_t) 2 * nff * E + E;
         const auto run_blas_q = [&](const uint8_t* blob, int a, int nrows, int r0) {
-            namespace x3 = strata::kernels::exl3;
+            namespace x3 = almond::glm::kernels::exl3;
             const int64_t wgu = (int64_t) 2 * nff * E, wdn = (int64_t) E * nff;
             const int gu_rows = (int) std::max<int64_t>(1, (S->w16_elems - wgu) / E);
             const int dn_rows = (int) std::max<int64_t>(1, (S->w16_elems - wdn) / nff);
@@ -3515,9 +3515,9 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             }
         }
         S->mark("moe_light", s);
-        // STRATA_GLM_PREFILL_LIGHT_CHECK=1 (debug): the light rows again through MMQ, compared row by row
+        // ALMOND_GLM_PREFILL_LIGHT_CHECK=1 (debug): the light rows again through MMQ, compared row by row
         // (it reads the light rows where they were before the output window: only before any other set ran)
-        static const bool light_check = getenv("STRATA_GLM_PREFILL_LIGHT_CHECK") != nullptr;
+        static const bool light_check = getenv("ALMOND_GLM_PREFILL_LIGHT_CHECK") != nullptr;
         if (light_check && n_light > 0 && wb == rows_mmq) {
             const int nl_rows = rows_res - rows_mmq;
             std::vector<float> A((size_t) nl_rows * E), B((size_t) nl_rows * E);
@@ -3678,7 +3678,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         // waited out the whole prestage (one copy engine a direction), and the combine with it
         if (cpu_nrows == 0) prestage(next_moe(il + 1));
         if (cpu_nrows > 0) {
-            namespace kc = strata::kernels::cpu;
+            namespace kc = almond::glm::kernels::cpu;
             auto tc = std::chrono::steady_clock::now();
             const auto& nf = F->cpu_fmt[(size_t) il];
             constexpr size_t kA = kc::kNativeActBytes, kH = kc::kNativeHBytes;
@@ -3706,7 +3706,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 // experts with enough rows take the multi-row AVX-512 kernel (a weight row unpacked once for all of them,
                 // ~2x ggml's per-pair dots from 8 rows on - kq_avx512.hpp); their activations packed once each
                 static const bool kq_on = [] {
-                    const char* v = getenv("STRATA_GLM_KQ");
+                    const char* v = getenv("ALMOND_GLM_KQ");
                     return kc::kq_avx512_ok() && (v == nullptr || std::atoi(v) != 0);
                 }();
                 const auto kq_use = [&](int type, int act_type, int cnt) {
@@ -3909,10 +3909,10 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         S->mark("combine", s);
         if (calc_run) {
             cudaStreamWaitEvent(s, S->ev_cpart, 0);
-            // STRATA_GLM_PREFILL_CALC_CHECK=1 (debug, synchronous): this GPU computes the other part's share as well -
+            // ALMOND_GLM_PREFILL_CALC_CHECK=1 (debug, synchronous): this GPU computes the other part's share as well -
             // its experts staged here, the same x3_run_set, the window added into a sum of its own (the last T rows of
             // OUTP; OUTP is free after the combine) - and compares that with the sum that came back
-            static const bool calc_check = getenv("STRATA_GLM_PREFILL_CALC_CHECK") != nullptr;
+            static const bool calc_check = getenv("ALMOND_GLM_PREFILL_CALC_CHECK") != nullptr;
             if (calc_check) {
                 float* const chk = M.OUTP + (size_t) (W - T) * E;
                 cudaMemsetAsync(chk, 0, (size_t) T * E * sizeof(float), s);
@@ -4199,23 +4199,23 @@ int Glm5Model::prefill_chunk_for(int64_t nn) const {   // (prefill's own choice 
         if (m->pf_ == nullptr) return 0;
         Tmax = std::min(Tmax, m->pf_->T);
     }
-    return strata::core::prefill_chunk_len(nn, Tmax, split_next_ != nullptr, prefill_floor(nn, 1));
+    return almond::glm::core::prefill_chunk_len(nn, Tmax, split_next_ != nullptr, prefill_floor(nn, 1));
 }
 
 // The fewest chunks a split cuts a call of nn tokens into: the call's own floor (prefill_min_chunks, none under 256
-// tokens) or STRATA_GLM_PREFILL_MIN_CHUNKS's (strata/core/prefill_chunks.hpp), whichever is more; one GPU: 1
+// tokens) or ALMOND_GLM_PREFILL_MIN_CHUNKS's (almond/glm/core/prefill_chunks.hpp), whichever is more; one GPU: 1
 int64_t Glm5Model::prefill_floor(int64_t nn, int call_min) const {
-    static const strata::core::PrefillMinChunks set = [] {
-        const strata::core::PrefillMinChunks s =
-            strata::core::prefill_min_chunks_parse(getenv("STRATA_GLM_PREFILL_MIN_CHUNKS"));
+    static const almond::glm::core::PrefillMinChunks set = [] {
+        const almond::glm::core::PrefillMinChunks s =
+            almond::glm::core::prefill_min_chunks_parse(getenv("ALMOND_GLM_PREFILL_MIN_CHUNKS"));
         if (s.n > 1)
             std::fprintf(stderr, "glm prefill: on a split a prompt-path call is cut into %d chunks at least, none under "
-                                 "%d tokens (MAYA_GLM_PREFILL_MIN_CHUNKS), so the parts pipeline it\n", s.n, s.min_tokens);
+                                 "%d tokens (ALMOND_GLM_PREFILL_MIN_CHUNKS), so the parts pipeline it\n", s.n, s.min_tokens);
         return s;
     }();
     if (split_next_ == nullptr) return 1;
-    return std::max(strata::core::prefill_floor_chunks(nn, call_min, 256),
-                    strata::core::prefill_floor_chunks(nn, set.n, set.min_tokens));
+    return std::max(almond::glm::core::prefill_floor_chunks(nn, call_min, 256),
+                    almond::glm::core::prefill_floor_chunks(nn, set.n, set.min_tokens));
 }
 
 bool Glm5Model::prefill(const std::vector<int32_t>& tokens, std::string& err, int32_t next_token) {
@@ -4229,7 +4229,7 @@ bool Glm5Model::prefill(const std::vector<int32_t>& tokens, std::string& err, in
     // two cooled rounds of three turns): prompt 1,041 / 648 / 521 ms at 32 -> 488 / 405 / 577 at 8 (4: 508 / 397 /
     // 576, 16: 502 / 716 / 540); a split keeps 32
     int64_t min_n = split_next_ == nullptr && n_parts_ <= 1 ? 8 : 32;
-    if (const char* mn = getenv("STRATA_GLM_PREFILL_MIN")) min_n = std::max<int64_t>(1, std::atoll(mn));
+    if (const char* mn = getenv("ALMOND_GLM_PREFILL_MIN")) min_n = std::max<int64_t>(1, std::atoll(mn));
     if ((int64_t) tokens.size() < min_n) return false;
     // the chunk for this prompt: no bigger than it needs (rounded up to 64), so it borrows only that much; a prompt
     // longer than the largest chunk is cut into EQUAL chunks (the parts of a split pipeline chunks)
@@ -4238,10 +4238,10 @@ bool Glm5Model::prefill(const std::vector<int32_t>& tokens, std::string& err, in
     const int64_t nn = (int64_t) tokens.size();
     // one GPU has no pipeline to balance: full chunks and the remainder last - every chunk stages nearly every expert,
     // so 8449 tokens as 8192 + 257 cost about one chunk's experts, as two equal 4225s about two (240 -> ~300 tok/s).
-    // A split: equal chunks, prefill_floor of them at least (prefill_min_chunks, STRATA_GLM_PREFILL_MIN_CHUNKS)
+    // A split: equal chunks, prefill_floor of them at least (prefill_min_chunks, ALMOND_GLM_PREFILL_MIN_CHUNKS)
     const int Trun_max = prefill_force_chunk > 0
                           ? std::min(Tmax, prefill_force_chunk)
-                          : strata::core::prefill_chunk_len(nn, Tmax, split_next_ != nullptr,
+                          : almond::glm::core::prefill_chunk_len(nn, Tmax, split_next_ != nullptr,
                                                             prefill_floor(nn, prefill_min_chunks));
     bool ok = true;
     progress_at("the prompt: lending the expert pool's tail");   // (the serve watchdog's stages, issue #40)
@@ -4271,13 +4271,13 @@ bool Glm5Model::prefill(const std::vector<int32_t>& tokens, std::string& err, in
             if (!m->prefill_lend(err)) { ok = false; break; }
         }
     }
-    // STRATA_GLM_STALL_TEST=<s> (a test of the serve watchdog): every batched prompt stops here for s seconds
+    // ALMOND_GLM_STALL_TEST=<s> (a test of the serve watchdog): every batched prompt stops here for s seconds
     static const int stall_test = [] {
-        const char* v = getenv("STRATA_GLM_STALL_TEST");
+        const char* v = getenv("ALMOND_GLM_STALL_TEST");
         return v ? std::max(0, std::atoi(v)) : 0;
     }();
     if (ok && stall_test > 0) {
-        progress_at("the prompt: MAYA_GLM_STALL_TEST's pause");
+        progress_at("the prompt: ALMOND_GLM_STALL_TEST's pause");
         std::this_thread::sleep_for(std::chrono::seconds(stall_test));
     }
     // a DFlash drafter reads only the prompt's last positions (its window): the captures start there
@@ -4308,10 +4308,10 @@ bool Glm5Model::prefill(const std::vector<int32_t>& tokens, std::string& err, in
     return ok;
 }
 
-// DUAL-LINK PROMPT setup, once: STRATA_GLM_DUAL_PREFILL=1, two parts that reach each other's memory - peer access
+// DUAL-LINK PROMPT setup, once: ALMOND_GLM_DUAL_PREFILL=1, two parts that reach each other's memory - peer access
 // both ways and the events each part's helper records on its own device.  false: the prompt stages as before.
 bool Glm5Model::dual_prefill_ready() {
-    static const bool want = getenv("STRATA_GLM_DUAL_PREFILL") != nullptr && std::atoi(getenv("STRATA_GLM_DUAL_PREFILL")) != 0;
+    static const bool want = getenv("ALMOND_GLM_DUAL_PREFILL") != nullptr && std::atoi(getenv("ALMOND_GLM_DUAL_PREFILL")) != 0;
     Glm5Model* B = split_next_.get();
     if (!want || B == nullptr || B->split_next_ != nullptr || pf_ == nullptr || B->pf_ == nullptr ||
         pf_->gbuf == nullptr || B->pf_->gbuf == nullptr)
@@ -4397,20 +4397,20 @@ bool Glm5Model::dual_prefill_ready() {
     return true;
 }
 
-// THE WAITING PART COMPUTES setup, once: STRATA_GLM_PREFILL_CALC=1, two parts with the prompt path (with peer access the
-// dual-link prompt is the one, STRATA_GLM_DUAL_PREFILL): each part's events on its own GPU and its pinned portable
+// THE WAITING PART COMPUTES setup, once: ALMOND_GLM_PREFILL_CALC=1, two parts with the prompt path (with peer access the
+// dual-link prompt is the one, ALMOND_GLM_DUAL_PREFILL): each part's events on its own GPU and its pinned portable
 // buffers for chunks of its T (the routes - mapped, a kernel writes them -, the other part's sum, the other part's
-// plan; x_h, the CPU lane's, made portable).  STRATA_GLM_PREFILL_CALC_SHARE=<0..0.9> fixes the share (no balance).
+// plan; x_h, the CPU lane's, made portable).  ALMOND_GLM_PREFILL_CALC_SHARE=<0..0.9> fixes the share (no balance).
 // false: the prompt stages as before.
 bool Glm5Model::calc_prefill_ready() {
-    static const bool want = getenv("STRATA_GLM_PREFILL_CALC") != nullptr && std::atoi(getenv("STRATA_GLM_PREFILL_CALC")) != 0;
+    static const bool want = getenv("ALMOND_GLM_PREFILL_CALC") != nullptr && std::atoi(getenv("ALMOND_GLM_PREFILL_CALC")) != 0;
     Glm5Model* B = split_next_.get();
     if (!want || B == nullptr || B->split_next_ != nullptr || pf_ == nullptr || B->pf_ == nullptr || !pf_->has_moe ||
         !B->pf_->has_moe)
         return false;
     if (calc_pf_state_ != 0) return calc_pf_state_ > 0;
     calc_pf_state_ = -1;
-    const char* share_env = getenv("STRATA_GLM_PREFILL_CALC_SHARE");
+    const char* share_env = getenv("ALMOND_GLM_PREFILL_CALC_SHARE");
     bool ok = true;
     for (Glm5Model* m : {this, B}) {
         PrefillState* S = m->pf_;
@@ -4455,7 +4455,7 @@ bool Glm5Model::calc_prefill_ready() {
     cudaSetDevice(dev_);
     if (!ok) {
         cudaGetLastError();
-        std::fprintf(stderr, "glm prefill: the waiting GPU's share (MAYA_GLM_PREFILL_CALC) stays off: its events or pinned "
+        std::fprintf(stderr, "glm prefill: the waiting GPU's share (ALMOND_GLM_PREFILL_CALC) stays off: its events or pinned "
                              "buffers did not allocate\n");
         return false;
     }
@@ -4522,17 +4522,17 @@ bool Glm5Model::prefill_run(const std::vector<int32_t>& tokens, std::string& err
     std::vector<Glm5Model*> parts;
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) parts.push_back(m);
     const int np = (int) parts.size();
-    const bool pipelined = np > 1 && nc > 1 && getenv("STRATA_GLM_PREFILL_SERIAL") == nullptr;
+    const bool pipelined = np > 1 && nc > 1 && getenv("ALMOND_GLM_PREFILL_SERIAL") == nullptr;
     for (Glm5Model* m : parts) {   // (the stage lines' per-prompt sums: the parts accumulate them chunk by chunk)
         m->pf_->pr_wall = 0;
         m->pf_->pr_hop = 0;
     }
     bool cancelled = false;
-    // DUAL-LINK PROMPT (STRATA_GLM_DUAL_PREFILL=1; see PrefillState::help): only here, where one half runs while the
+    // DUAL-LINK PROMPT (ALMOND_GLM_DUAL_PREFILL=1; see PrefillState::help): only here, where one half runs while the
     // other waits - in the pipeline both GPUs' links are busy with their own chunks
     Glm5Model* const other = split_next_.get();
     const bool dual = !pipelined && np == 2 && dual_prefill_ready();
-    // THE WAITING PART COMPUTES (STRATA_GLM_PREFILL_CALC=1; see PrefillState::calc): there, too, only one half after
+    // THE WAITING PART COMPUTES (ALMOND_GLM_PREFILL_CALC=1; see PrefillState::calc): there, too, only one half after
     // the other - and not with the dual-link prompt
     const bool calc = !pipelined && np == 2 && !dual && calc_prefill_ready();
     const std::shared_ptr<void> help_reset(nullptr, [&](void*) {   // every way out of here: no helper set
@@ -4579,9 +4579,9 @@ bool Glm5Model::prefill_run(const std::vector<int32_t>& tokens, std::string& err
         cudaStreamWaitEvent(H->fast_->copy, H->pf_->ev_hidle, 0);
         cudaSetDevice(owner->dev_);
     };
-    // STRATA_GLM_PREFILL_GAPS (prefill_gap): the other requests' decode at a chunk boundary of this read, every part
+    // ALMOND_GLM_PREFILL_GAPS (prefill_gap): the other requests' decode at a chunk boundary of this read, every part
     // idle - not with the dual-link prompt (a part's helper works in the other part's memory) nor with the waiting
-    // part computing a share (STRATA_GLM_PREFILL_CALC: its buffers and turns span the halves)
+    // part computing a share (ALMOND_GLM_PREFILL_CALC: its buffers and turns span the halves)
     const bool gaps = np > 1 && !dual && !calc && prefill_gap && prefill_gap_wanted;
     uint64_t gaps_run = 0;
     double gaps_ms = 0.0;
@@ -4665,8 +4665,8 @@ bool Glm5Model::prefill_run(const std::vector<int32_t>& tokens, std::string& err
         std::condition_variable cv;
         // produced[k]: chunks part k has put in its slots; consumed[k]: chunks part k + 1 has copied out of them
         std::vector<int> produced((size_t) np, 0), consumed((size_t) np, 0);
-        // gaps: the chunks each part has read and the boundaries released (strata/core/prefill_gaps.hpp)
-        strata::core::PipelineGaps G(np, nc);
+        // gaps: the chunks each part has read and the boundaries released (almond/glm/core/prefill_gaps.hpp)
+        almond::glm::core::PipelineGaps G(np, nc);
         bool stop = false;
         std::string stage_err;
         const size_t slot = (size_t) Tc * 4 * E;
@@ -4826,8 +4826,8 @@ bool Glm5Model::prefill_run(const std::vector<int32_t>& tokens, std::string& err
             return false;
         }
     }
-    if (gb::launch_errors() > 0 || strata::kernels::glmf::launch_errors() > 0) {
-        err = "glm prefill: " + std::to_string(gb::launch_errors() + strata::kernels::glmf::launch_errors()) +
+    if (gb::launch_errors() > 0 || almond::glm::kernels::glmf::launch_errors() > 0) {
+        err = "glm prefill: " + std::to_string(gb::launch_errors() + almond::glm::kernels::glmf::launch_errors()) +
               " kernel launch(es) failed (see stderr)";
         return false;
     }
@@ -4851,7 +4851,7 @@ bool Glm5Model::prefill_run(const std::vector<int32_t>& tokens, std::string& err
                      (long long) n, ms, ms / (double) n, 1000.0 * (double) n / ms, nc, nc == 1 ? "" : "s", Tc,
                      per_part.c_str());
     }
-    static const bool verbose = getenv("STRATA_GLM_PREFILL_VERBOSE") != nullptr;
+    static const bool verbose = getenv("ALMOND_GLM_PREFILL_VERBOSE") != nullptr;
     if (verbose) {
         uint64_t sr = 0, sv = 0, sd = 0, rr = 0, rs = 0, ce = 0, cr = 0, pi = 0, ph = 0, pr = 0;
         double plan = 0, mc = 0;
@@ -4876,7 +4876,7 @@ bool Glm5Model::prefill_run(const std::vector<int32_t>& tokens, std::string& err
                      (unsigned long long) sr, (unsigned long long) sd, (unsigned long long) ce, (unsigned long long) cr, mc, pf_->kappa,
                      pf_->row_ms, (unsigned long long) pi, (unsigned long long) ph, (unsigned long long) pr,
                      100.0 * (double) rr / (double) std::max<uint64_t>(1, rr + rs), plan);
-        if (calc_pf_state_ > 0) {   // (STRATA_GLM_PREFILL_CALC: the RAM-tier experts the waiting GPU computed)
+        if (calc_pf_state_ > 0) {   // (ALMOND_GLM_PREFILL_CALC: the RAM-tier experts the waiting GPU computed)
             std::string sh;
             uint64_t xe = 0, xr = 0;
             for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
@@ -4896,4 +4896,4 @@ bool Glm5Model::prefill_run(const std::vector<int32_t>& tokens, std::string& err
     return true;
 }
 
-}  // namespace strata::core
+}  // namespace almond::glm::core

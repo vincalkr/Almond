@@ -115,8 +115,8 @@ core.[0-9]*
 /local/reports/
 /models
 /.venv
-# engines/maya: project-maya's source directories named core (not core dumps)
-!engines/maya/**/core
-build-maya-vision/
+# src/glm: directories named core (not core dumps)
+!src/glm/**/core
+build-vision/
 local/glm-slots/
 local/vision-memory.json

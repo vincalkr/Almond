@@ -1,11 +1,11 @@
-// src/kernels/cuda/glm_kv_stream.cu - see include/strata/kernels/glm_kv_stream.hpp.
-#include "strata/kernels/glm_kv_stream.hpp"
+// src/kernels/cuda/glm_kv_stream.cu - see include/almond/glm/kernels/glm_kv_stream.hpp.
+#include "almond/glm/kernels/glm_kv_stream.hpp"
 
 #include <cuda_runtime.h>
 
 #include <cstdio>
 
-namespace strata::kernels::glmf {
+namespace almond::glm::kernels::glmf {
 namespace {
 
 constexpr int RT = kKvResolveBlock;
@@ -172,4 +172,4 @@ void glm_kv_resolve(const KvStreamMap& m, const uint8_t* host, uint8_t* slots, i
     if (e != cudaSuccess) std::fprintf(stderr, "glm kv stream: resolve: %s\n", cudaGetErrorString(e));
 }
 
-}  // namespace strata::kernels::glmf
+}  // namespace almond::glm::kernels::glmf
