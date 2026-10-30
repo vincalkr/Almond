@@ -15,6 +15,8 @@ Thinking: --nothink, --think (the model's default), --think-max, --think-level L
   /stats             what the server's monitor shows: speed, GPUs, VRAM, CPU, RAM, disk, context, experts, requests
   /forget            clear the conversation cache the engine keeps
   /hide /show        the thinking
+  /agent [on|off]    the agent: the model reads, writes and edits files and runs commands in the working directory;
+                     a write, an edit, a command or a path outside it asks y / n / a (a: always, for that tool)
 
 On a terminal the last line is a status bar: the prompt's reading, the answer's speed, idle the last request's numbers.
 
@@ -25,6 +27,7 @@ returns to the prompt; Ctrl+D (or /quit) leaves.  It speaks Almond's OpenAI API 
 one model's server, ./run.sh): the history and the thinking level live here, the model there.
 """
 import argparse
+import difflib
 import http.client
 import json
 import os
@@ -117,7 +120,7 @@ class Api:
 
 
 class Bar:
-    """The status line at the bottom of the terminal, as ds4's CLI keeps one: a scroll region (DECSTBM) over every
+    """The status line at the bottom of the terminal: a scroll region (DECSTBM) over every
     row but the last, so the conversation scrolls above it.  While a request runs a thread reads /metrics' live state
     four times a second (the prompt's reading: a bar, read / total, tok/s; the answer: tokens, tok/s, the time,
     thinking or answer); idle, the last request's numbers, the model, the thinking level and the context.  Only on a
@@ -229,6 +232,153 @@ def live_text(live: dict, model: str, phase: str, secs: float, width: int) -> st
     return f"{model}  waiting for the engine  {secs:.0f} s" + (f"  ({live['queued']} queued)" if live.get("queued") else "")
 
 
+AGENT_STEPS = 50
+TOOL_OUT = 8000                                 # the most of a tool's output the model sees, in characters
+
+
+def _tool(name, doc, **params):
+    req = [k for k, v in params.items() if not v.pop("optional", False)]
+    return {"type": "function", "function": {"name": name, "description": doc, "parameters": {
+        "type": "object", "properties": params, "required": req}}}
+
+
+TOOLS = [
+    _tool("read_file", "Read a text file; lines numbered from 1.", path={"type": "string"},
+          offset={"type": "integer", "description": "the first line (1)", "optional": True},
+          limit={"type": "integer", "description": "how many lines (all)", "optional": True}),
+    _tool("write_file", "Write a file (created, or replaced whole).", path={"type": "string"},
+          content={"type": "string"}),
+    _tool("edit_file", "Replace the one occurrence of `old` in a file with `new` (old must occur exactly once).",
+          path={"type": "string"}, old={"type": "string"}, new={"type": "string"}),
+    _tool("list_dir", "List a directory (subdirectories end in /).", path={"type": "string"}),
+    _tool("run_command", "Run a bash command in the working directory; its output and exit code.",
+          command={"type": "string"},
+          timeout={"type": "integer", "description": "seconds (120)", "optional": True}),
+]
+
+
+class Agent:
+    """The tools the model may call, and the asking: reads and listings inside the working directory go ahead;
+    a write, an edit, a command or any path outside it asks y (yes) / n (no) / a (always, for that tool, until the
+    end of the session); --yes asks only for a path outside the working directory, which always asks."""
+
+    def __init__(self, yes: bool = False):
+        self.root, self.yes, self.always = Path.cwd().resolve(), yes, set()
+
+    def path(self, p: str) -> Path:
+        return (self.root / os.path.expanduser(p)).resolve()
+
+    def inside(self, p: Path) -> bool:
+        return p == self.root or self.root in p.parents
+
+    def allow(self, name: str, what: str, outside: bool = False) -> bool:
+        if not outside and (self.yes or name in self.always):
+            return True
+        while True:
+            try:
+                a = input(f"{BOLD}{what}{RESET} - allow? [y/n/a] " if TTY else f"{what} - allow? [y/n/a] ").strip().lower()
+            except EOFError:
+                return False
+            if a in ("y", "yes", "s", "si"):
+                return True
+            if a in ("n", "no", ""):
+                return False
+            if a in ("a", "always") and not outside:
+                self.always.add(name)
+                return True
+
+    def run(self, call: dict) -> str:
+        """One call: its line on the terminal, then the result the model gets."""
+        name = call["name"]
+        try:
+            args = json.loads(call["arguments"] or "{}")
+            if not isinstance(args, dict):
+                raise ValueError("not an object")
+        except ValueError as e:
+            say(f"{CYAN}* {name}{RESET} {RED}bad arguments: {e}{RESET}")
+            return f"error: the arguments are not a JSON object ({e})"
+        fn = getattr(self, "t_" + name, None)
+        brief = args.get("command") or args.get("path") or ""
+        say(f"{CYAN}* {name}{RESET} {brief.splitlines()[0] if brief else ''}")
+        if fn is None:
+            return f"error: no tool {name}"
+        try:
+            text = fn(**args)
+        except TypeError as e:
+            text = f"error: {e}"
+        except OSError as e:
+            text = f"error: {e}"
+        if len(text) > TOOL_OUT:
+            text = text[:TOOL_OUT // 2] + f"\n[... {len(text) - TOOL_OUT} characters cut ...]\n" + text[-TOOL_OUT // 2:]
+        first = text.splitlines()[0] if text else ""
+        say(f"{DIM}  {first[:120]}{' ...' if len(text) > len(first) else ''}{RESET}")
+        return text
+
+    def t_read_file(self, path, offset=1, limit=None):
+        p = self.path(path)
+        if not self.inside(p) and not self.allow("read_file", f"read {p} (outside {self.root})", True):
+            return "denied by the user"
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        start = max(1, int(offset or 1))
+        part = lines[start - 1:start - 1 + int(limit)] if limit else lines[start - 1:]
+        return "\n".join(f"{start + i:6}\t{x}" for i, x in enumerate(part)) or "(empty)"
+
+    def t_list_dir(self, path="."):
+        p = self.path(path)
+        if not self.inside(p) and not self.allow("list_dir", f"list {p} (outside {self.root})", True):
+            return "denied by the user"
+        return "\n".join(sorted(x.name + ("/" if x.is_dir() else "") for x in p.iterdir())) or "(empty)"
+
+    def t_write_file(self, path, content):
+        p = self.path(path)
+        old = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else None
+        say(diff_text(old or "", content, str(p)) if old is not None else
+            f"{DIM}  a new file, {len(content.splitlines())} lines{RESET}")
+        where = "" if self.inside(p) else f" (outside {self.root})"
+        if not self.allow("write_file", f"write {p}{where}", bool(where)):
+            return "denied by the user"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return f"wrote {p} ({len(content)} characters)"
+
+    def t_edit_file(self, path, old, new):
+        p = self.path(path)
+        text = p.read_text(encoding="utf-8")
+        n = text.count(old)
+        if n != 1:
+            return f"error: `old` occurs {n} times in {p}; it must occur exactly once"
+        after = text.replace(old, new)
+        say(diff_text(text, after, str(p)))
+        where = "" if self.inside(p) else f" (outside {self.root})"
+        if not self.allow("edit_file", f"edit {p}{where}", bool(where)):
+            return "denied by the user"
+        p.write_text(after, encoding="utf-8")
+        return f"edited {p}"
+
+    def t_run_command(self, command, timeout=120):
+        say(f"{BOLD}  $ {command}{RESET}")
+        if not self.allow("run_command", "run it"):
+            return "denied by the user"
+        try:
+            r = subprocess.run(["bash", "-c", command], cwd=self.root, capture_output=True, text=True,
+                               timeout=float(timeout or 120), errors="replace")
+        except subprocess.TimeoutExpired as e:
+            out = (e.stdout or "") + (e.stderr or "")
+            return (out if isinstance(out, str) else out.decode(errors="replace")) + f"\n[timed out after {timeout} s]"
+        return (r.stdout + r.stderr).rstrip() + f"\n[exit code {r.returncode}]"
+
+
+def diff_text(old: str, new: str, name: str) -> str:
+    """A short unified diff, coloured on a terminal, at most 40 lines."""
+    lines = list(difflib.unified_diff(old.splitlines(), new.splitlines(), name, name, n=2, lineterm=""))[2:]
+    more = len(lines) - 40
+    out = []
+    for x in lines[:40]:
+        c = RED if x.startswith("-") else CYAN if x.startswith("+") else DIM
+        out.append(f"  {c}{x}{RESET}")
+    return "\n".join(out + ([f"  {DIM}... {more} more lines{RESET}"] if more > 0 else []))
+
+
 class Chat:
     def __init__(self, api: Api, a):
         self.api, self.a = api, a
@@ -243,6 +393,8 @@ class Chat:
         self.level = None                       # None: the model's default
         self.ctx_used = 0
         self.bar = Bar(api)
+        self.agent = Agent(a.yes) if a.agent else None
+        self.yes, self.stopped = a.yes, False
 
     # ---- models and levels
     def refresh(self):
@@ -313,11 +465,36 @@ class Chat:
     def ask(self, text: str, out=None) -> bool:
         out = out or sys.stdout
         self.messages.append({"role": "user", "content": text})
+        for step in range(AGENT_STEPS if self.agent else 1):
+            calls = self.reply(out)
+            if calls is None:
+                if step == 0:
+                    self.messages.pop()
+                return False
+            if not calls or self.stopped:
+                return True
+            try:
+                for c in calls:
+                    self.messages.append({"role": "tool", "tool_call_id": c["id"], "content": self.agent.run(c)})
+            except KeyboardInterrupt:
+                say(f"{RESET}\n{DIM}[stopped]{RESET}")
+                for c in calls:                 # every call answered, so the history stays one the model accepts
+                    if not any(m.get("tool_call_id") == c["id"] for m in self.messages):
+                        self.messages.append({"role": "tool", "tool_call_id": c["id"], "content": "stopped by the user"})
+                return True
+        say(f"{DIM}[the agent stopped after {AGENT_STEPS} steps]{RESET}")
+        return True
+
+    def reply(self, out):
+        """One answer streamed; its tool calls ([] for none), None on an error."""
         body = {"model": self.model["id"], "stream": True, "messages": self.wire()}
+        if self.agent:
+            body["tools"] = TOOLS
         if self.level:
             body["reasoning_effort"] = self.level
         body.update(self.sampling)
-        reasoning, content, state, end = [], [], None, None
+        reasoning, content, state, end, calls = [], [], None, None, {}
+        self.stopped = False
         # the thinking goes with the answer on a terminal; otherwise (-p into a pipe or a file) to stderr, so stdout
         # holds the answer alone
         think = sys.stdout if TTY else sys.stderr
@@ -341,9 +518,12 @@ class Chat:
                     bar.phase = "answer"
                     content.append(v)
                     bar.write(out, v)
-                elif kind == "tool":
+                elif kind == "tool":            # the pieces of each call, by index
+                    c = calls.setdefault(v.get("index", len(calls)), {"id": None, "name": "", "arguments": ""})
                     fn = v.get("function") or {}
-                    bar.write(out, f"{CYAN}[tool call {fn.get('name', '')} {fn.get('arguments', '')}]{RESET}")
+                    c["id"] = v.get("id") or c["id"]
+                    c["name"] += fn.get("name") or ""
+                    c["arguments"] += fn.get("arguments") or ""
                 elif kind == "end":
                     end = v
         except KeyboardInterrupt:
@@ -354,12 +534,11 @@ class Chat:
                 pass
             if TTY:
                 out.write(f"{RESET}\n{DIM}[stopped]{RESET}\n")
-            end = {"finish": "stopped"}
+            end, self.stopped, calls = {"finish": "stopped"}, True, {}
         except (RuntimeError, OSError, http.client.HTTPException) as e:
             bar.done()
-            self.messages.pop()
             say(f"{RESET}{RED}error: {e}{RESET}")
-            return False
+            return None
         bar.done()
         if state == "reasoning" and self.show:
             think.write(RESET if TTY else "\n")
@@ -367,6 +546,14 @@ class Chat:
         msg = {"role": "assistant", "content": "".join(content)}
         if reasoning:
             msg["reasoning_content"] = "".join(reasoning)
+        calls = [dict(c, id=c["id"] or f"call_{i}") for i, c in sorted(calls.items())]
+        if calls:
+            msg["tool_calls"] = [{"id": c["id"], "type": "function",
+                                  "function": {"name": c["name"], "arguments": c["arguments"]}} for c in calls]
+            if not self.agent:
+                for c in calls:
+                    say(f"{CYAN}[tool call {c['name']} {c['arguments']}]{RESET}")
+                calls = []
         self.messages.append(msg)
         if end and end.get("usage"):
             u = end["usage"]
@@ -379,7 +566,7 @@ class Chat:
                      f"prompt {t['prompt_per_second']:.0f} tok/s" if t.get("prompt_n", 0) > 1 else None,
                      f"{time.time() - t0:.1f} s", end.get("finish") if end.get("finish") not in ("stop", None) else None]
             say(f"{DIM}[{', '.join(p for p in parts if p)}]{RESET}")
-        return True
+        return calls
 
     def wire(self) -> list:
         sys_msg = [{"role": "system", "content": self.system}] if self.system else []
@@ -429,8 +616,8 @@ class Chat:
     # ---- the conversation
     def banner(self):
         m = self.model
-        say(f"{BOLD}almond{RESET} - {m['id']}, context {m.get('max_context') or '?'}, thinking {self.level_text()}. "
-            f"/help for the commands.")
+        say(f"{BOLD}almond{RESET} - {m['id']}, context {m.get('max_context') or '?'}, thinking {self.level_text()}"
+            + (f", agent in {os.getcwd()}" if self.agent else "") + ". /help for the commands.")
 
     def command(self, line: str) -> bool:
         """A slash command; False to leave."""
@@ -499,6 +686,12 @@ class Chat:
         elif cmd == "ctx":
             say(f"{DIM}{self.ctx_used} of {self.model.get('max_context') or '?'} tokens in use, "
                 f"{len(self.messages)} messages{RESET}")
+        elif cmd == "agent":
+            if arg in ("on", "off"):
+                self.agent = Agent(self.yes) if arg == "on" else None
+            say(f"{DIM}agent {'on' if self.agent else 'off'}"
+                + (f": tools read_file, write_file, edit_file, list_dir, run_command in {os.getcwd()}" if self.agent else "")
+                + RESET)
         elif cmd in ("hide", "show"):
             self.show = cmd == "show"
             say(f"{DIM}thinking {'shown' if self.show else 'hidden'}{RESET}")
@@ -746,6 +939,9 @@ def main() -> int:
     ap.add_argument("--clear-sessions", action="store_true",
                     help="move the conversations kept on disk to the trash (no engine may be running)")
     ap.add_argument("--system", default=None, help="a system prompt")
+    ap.add_argument("--agent", action="store_true",
+                    help="the model may read and edit files and run commands in the working directory (it asks first)")
+    ap.add_argument("--yes", action="store_true", help="with --agent: do not ask before a write, an edit or a command (a path outside the directory still asks)")
     ap.add_argument("--hide-thinking", action="store_true", help="do not print the thinking")
     ap.add_argument("--no-start", action="store_true", help="never start the router")
     ap.add_argument("--keep", action="store_true", help="leave a router this started running on exit")
