@@ -37,10 +37,27 @@ def glm_translate(body: str) -> str:
     k = body.find(KEY_OPEN)
     name = (body if k < 0 else body[:k]).strip()
     pairs = _PAIR_RE.findall(body[k:]) if k >= 0 else []
-    if not name or re.search(r"\s", name) or (k >= 0 and _PAIR_RE.sub("", body[k:]).strip()):
+    if name and not re.search(r"\s", name) and k >= 0 and _PAIR_RE.sub("", body[k:]).strip():
+        pairs = _loose_pairs(body[k:])           # (a value with a stray </arg_value> inside, seen at 3 bits)
+        if pairs is None:
+            return CALL_OPEN + body + CALL_CLOSE
+    elif not name or re.search(r"\s", name):
         return CALL_OPEN + body + CALL_CLOSE
     params = "".join(f"<parameter={key.strip()}>\n{value}\n</parameter>\n" for key, value in pairs)
     return f"{CALL_OPEN}\n<function={name}>\n{params}</function>\n{CALL_CLOSE}"
+
+
+def _loose_pairs(text: str):
+    """The pairs of a call whose values carry an extra </arg_value> (`<arg_value>1</arg_value>8</arg_value>`: 18):
+    each value runs to the next <arg_key>, the closing tags in it dropped; None if a pair has no key or value tag."""
+    pairs = []
+    for seg in text.split(KEY_OPEN)[1:]:
+        key, sep, rest = seg.partition(KEY_CLOSE)
+        rest = rest.strip()
+        if not sep or not rest.startswith(VAL_OPEN) or VAL_CLOSE not in rest:
+            return None
+        pairs.append((key, rest[len(VAL_OPEN):].replace(VAL_CLOSE, "").rstrip()))
+    return pairs
 
 
 def glm_rewrite(buf: str, final: bool) -> tuple[str, str]:
