@@ -145,7 +145,7 @@ __global__ void native_quantize_q8_1_kernel(const float* __restrict__ x,
     const float xi = x[i];
     const float amax = warp_max(fabsf(xi));
     const float sum = warp_sum(xi);
-    const float d = fminf(amax / 127.0f, 65504.0f);   // finite in FP16 (Strata #1448); below that nothing changes
+    const float d = fminf(amax / 127.0f, 65504.0f);   // finite in FP16 (Almond #1448); below that nothing changes
     const int8_t q = amax == 0.0f ? 0 : fmaxf(-127.0f, fminf(127.0f, roundf(xi / d)));
     y[i / Q8K].qs[i % Q8K] = q;
     if (i % Q8K == 0) y[i / Q8K].ds = make_half2(d, fmaxf(-65504.0f, fminf(65504.0f, sum)));

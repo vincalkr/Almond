@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""almond - the terminal chat, in the manner of antirez's ds4 CLI.
+"""almond - Almond's terminal chat.
 
   ./almond                       a conversation (starts the router if nothing answers at --url, stops it on /quit)
   ./almond -p "question"         one prompt, the answer on stdout, then exit
   ./almond -m glm                the model (a name from /models, or the start of one: glm, deepseek)
+  ./almond --ctx 65536           the context window of the models it starts (a running server keeps its own)
 
 Thinking: --nothink, --think (the model's default), --think-max, --think-level LEVEL - the levels are the model's own
 (GLM-5.3-Flash: low / high / max, it always thinks; DeepSeek-V4.1: none / low / high / max = 0 / 50 / 75 / 100).  In the conversation:
@@ -702,11 +703,12 @@ def say(text: str):
     print(text, file=sys.stderr if not TTY else sys.stdout, flush=True)
 
 
-def start_router(api: Api, port: int) -> subprocess.Popen:
+def start_router(api: Api, port: int, ctx: int | None = None) -> subprocess.Popen:
     log = ROOT / "local" / "router.log"
     say(f"{DIM}nothing answers at {api.host}:{api.port}: starting the router (./run.sh --router, log {log}) ...{RESET}")
+    env = dict(os.environ, ALMOND_CTX=str(ctx)) if ctx else None   # (run.sh: every model the router starts)
     p = subprocess.Popen([str(ROOT / "run.sh"), "--router", "--port", str(port)], cwd=ROOT, start_new_session=True,
-                         stdout=open(log, "a"), stderr=subprocess.STDOUT)
+                         stdout=open(log, "a"), stderr=subprocess.STDOUT, env=env)
     for _ in range(240):
         if p.poll() is not None:
             raise SystemExit(f"almond: the router exited with {p.returncode} (see {log})")
@@ -736,6 +738,9 @@ def main() -> int:
     ap.add_argument("--presence-penalty", type=float, default=None)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--max-tokens", type=int, default=None)
+    ap.add_argument("--ctx", type=int, default=None, metavar="TOKENS",
+                    help="the context window of the models this starts (default: each configuration's); a server "
+                         "already running keeps its own")
     ap.add_argument("--monitor", action="store_true", help="what the server's monitor shows, refreshed every second")
     ap.add_argument("--sessions", action="store_true", help="the conversations kept on disk, per model")
     ap.add_argument("--clear-sessions", action="store_true",
@@ -761,10 +766,13 @@ def main() -> int:
     if not api.up():
         if a.no_start or api.host not in ("127.0.0.1", "localhost"):
             raise SystemExit(f"almond: nothing answers at {a.url}")
-        started = start_router(api, api.port)
+        started = start_router(api, api.port, a.ctx)
     chat = Chat(api, a)
     try:
         chat.pick(a.model)
+        if a.ctx and started is None and (chat.model or {}).get("max_context") not in (None, a.ctx):
+            say(f"{DIM}--ctx {a.ctx}: the server was already running with {chat.model.get('max_context')} tokens "
+                f"(./stop.sh, then ./almond --ctx {a.ctx} starts it with yours){RESET}")
         if a.nothink:
             chat.set_level("none")
         elif a.think_max:

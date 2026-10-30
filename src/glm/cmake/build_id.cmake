@@ -1,4 +1,4 @@
-# cmake/build_id.cmake - the commit and the release maya-ds4 is built from, for `maya-ds4 --version` and the
+# cmake/build_id.cmake - the commit and the release the DeepSeek path is built from, for `the DeepSeek path --version` and the
 # "ds4: build <commit>" line --verbose prints.  Run at every build (the maya_build_id target), so a commit made since
 # the last build is seen without configuring again; the header is rewritten only when it changes, and only then is
 # ds4_main.cpp compiled again.

@@ -1,4 +1,4 @@
-# tools/vision - almond-vision, the image encoder for Strata's multimodal path (optional; setup.py builds it when
+# tools/vision - almond-vision, the image encoder for the multimodal path (optional; setup.py builds it when
 # the vision encoder is chosen).  Uses llama.cpp's mtmd library at the same pinned commit as the engine's ggml.
 #
 #   cmake -S tools/vision -B build-vision -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=third_party/llama.cpp
@@ -7,7 +7,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(glm_vision C CXX)
 
-# Maya's build options by the names its docs give them: -DMAYA_X=... sets ALMOND_X, the name this file reads
+# the GLM engine's build options by the names its docs give them: -DMAYA_X=... sets ALMOND_X, the name this file reads
 get_cmake_property(_maya_cache CACHE_VARIABLES)
 foreach(_v IN LISTS _maya_cache)
   if(_v MATCHES "^(MAYA|ALMOND)_(.+)$")   # (Almond: -DALMOND_X as well)

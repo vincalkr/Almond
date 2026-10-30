@@ -178,7 +178,7 @@ __device__ __forceinline__ float vec_dot_ptq1_0_q8_1(const void* __restrict__ vb
     return __half2float(bq->d) * acc;
 }
 
-// Strata-DS4 fork: ONE QUARTER of a PTQ1_0 block per call (Fmt<143> ipb 4; q = iqs = 0..3; bq8_1 = the block's 4
+// ONE QUARTER of a PTQ1_0 block per call (Fmt<143> ipb 4; q = iqs = 0..3; bq8_1 = the block's 4
 // q8_1 sub-blocks).  The whole-block dot gave a K = 5120 row 40 calls for 32 lanes (two rounds, the second 8 lanes
 // wide, each call a 128-weight chain): decode's native_gu_kernel<143> ran at ~136 GB/s (nsys 2026-10-12).  Quarter q:
 //   qs[4q..4q+3]  trits t = 0..4 -> elements 16t + 4q .. +3   (contiguous per t: 5 dp4a, the same SIMD extraction)

@@ -5,7 +5,7 @@ diff -ru a/ggml/src/ggml-cuda/cpy-utils.cuh b/ggml/src/ggml-cuda/cpy-utils.cuh
      y->d = sumq2 > 0 ? sumqx/sumq2 : d;
  }
  
-+// ---- Strata DS4.1 FP4 KV caches (src/ds41/ds41_dense.cpp --kv-fp4).  The graph's fake-quant has already put
++// ---- Almond DS4.1 FP4 KV caches (src/ds41/ds41_dense.cpp --kv-fp4).  The graph's fake-quant has already put
 +// every value on an FP4 grid - the compressed KV on e2m1 x an E4M3 scale per 16 (NVFP4), the indexer keys on
 +// e2m1 x a power-of-2 scale per 32 (MXFP4) - and these two quantizers pack such values EXACTLY: per (sub-)block they
 +// try the scales the grid admits (amax / q, q an e2m1 magnitude, snapped to the scale format) and keep the first that
@@ -107,7 +107,7 @@ diff -ru a/ggml/src/ggml-cuda/dequantize.cuh b/ggml/src/ggml-cuda/dequantize.cuh
      }
  }
  
-+// Strata DS4.1 --kv-fp4: NVFP4 rows for get_rows (a QK_K super-block = 4 NVFP4 blocks; 32 threads x 8 values).
++// Almond DS4.1 --kv-fp4: NVFP4 rows for get_rows (a QK_K super-block = 4 NVFP4 blocks; 32 threads x 8 values).
 +// Same values as dequantize_block_nvfp4 (convert.cu): ue4m3(d) (= E4M3 / 2) x kvalues (= 2 x e2m1) - exact.
 +template<typename dst_t>
 +static __device__ __forceinline__ void dequantize_nvfp4(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
@@ -135,7 +135,7 @@ diff -ru a/ggml/src/ggml-cuda/fattn-common.cuh b/ggml/src/ggml-cuda/fattn-common
      }
  }
  
-+// Strata DS4.1 --kv-fp4: MXFP4 K rows (the lightning indexer's keys).  E8M0(e) x e2m1 - exact values.
++// Almond DS4.1 --kv-fp4: MXFP4 K rows (the lightning indexer's keys).  E8M0(e) x e2m1 - exact values.
 +template <typename T, int ne>
 +static __device__ __forceinline__ void dequantize_V_mxfp4(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
 +    const block_mxfp4 * x = (const block_mxfp4 *) vx;
@@ -176,7 +176,7 @@ diff -ru a/ggml/src/ggml-cuda/getrows.cu b/ggml/src/ggml-cuda/getrows.cu
              get_rows_cuda_kq<32, dst_t, dequantize_mxfp4<dst_t>>(src0_d, src1_d, dst_d,
                  ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
              break;
-+        case GGML_TYPE_NVFP4:   // Strata DS4.1 --kv-fp4
++        case GGML_TYPE_NVFP4:   // Almond DS4.1 --kv-fp4
 +            get_rows_cuda_kq<32, dst_t, dequantize_nvfp4<dst_t>>(src0_d, src1_d, dst_d,
 +                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
 +            break;
@@ -190,7 +190,7 @@ diff -ru a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
                          return true;
                      case GGML_TYPE_IQ4_NL:
                      case GGML_TYPE_MXFP4:
-+                    case GGML_TYPE_NVFP4:   // Strata DS4.1 --kv-fp4 (64-value blocks, 4 per super-block)
++                    case GGML_TYPE_NVFP4:   // Almond DS4.1 --kv-fp4 (64-value blocks, 4 per super-block)
                          // 32-value sub-blocks, the row size does not guarantee
                          // the QK_K super-blocks the get_rows kernel iterates on
                          return op->src[0]->ne[0] % QK_K == 0;
@@ -220,7 +220,7 @@ diff -ru a/ggml/src/ggml-cuda/lightning-indexer.cu b/ggml/src/ggml-cuda/lightnin
              LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 64, k, GGML_TYPE_Q5_1)
              LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 64, k, GGML_TYPE_Q8_0)
              LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 64, k, GGML_TYPE_BF16)
-+            // Strata DS4.1 --kv-fp4: MXFP4 keys on the fp32 vec kernel (as BF16) - the wmma kernel computes in fp16
++            // Almond DS4.1 --kv-fp4: MXFP4 keys on the fp32 vec kernel (as BF16) - the wmma kernel computes in fp16
 +            LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 64, k, GGML_TYPE_MXFP4)
              LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 64, k, GGML_TYPE_F32)
              GGML_ABORT("fatal error");
@@ -236,7 +236,7 @@ diff -ru a/ggml/src/ggml-cuda/lightning-indexer.cu b/ggml/src/ggml-cuda/lightnin
              LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 32, k, GGML_TYPE_Q5_1)
              LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 32, k, GGML_TYPE_Q8_0)
              LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 32, k, GGML_TYPE_BF16)
-+            // Strata DS4.1 --kv-fp4: MXFP4 keys on the fp32 vec kernel (as BF16) - the wmma kernel computes in fp16
++            // Almond DS4.1 --kv-fp4: MXFP4 keys on the fp32 vec kernel (as BF16) - the wmma kernel computes in fp16
 +            LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 32, k, GGML_TYPE_MXFP4)
              LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 32, k, GGML_TYPE_F32)
              GGML_ABORT("fatal error");
@@ -245,7 +245,7 @@ diff -ru a/ggml/src/ggml-cuda/lightning-indexer.cu b/ggml/src/ggml-cuda/lightnin
          case GGML_TYPE_Q5_0:
          case GGML_TYPE_Q4_1:
          case GGML_TYPE_Q4_0:
-+        case GGML_TYPE_MXFP4:   // Strata DS4.1 --kv-fp4
++        case GGML_TYPE_MXFP4:   // Almond DS4.1 --kv-fp4
              return true;
          default:
              return false;
@@ -256,7 +256,7 @@ diff -ru a/ggml/src/ggml-cuda/set-rows.cu b/ggml/src/ggml-cuda/set-rows.cu
              nb1, nb2, nb3,
              stream
          );
-+    } else if (dst->type == GGML_TYPE_NVFP4) {   // Strata DS4.1 --kv-fp4: exact packing of fake-quantized rows
++    } else if (dst->type == GGML_TYPE_NVFP4) {   // Almond DS4.1 --kv-fp4: exact packing of fake-quantized rows
 +        set_rows_cuda_quant<idx_t, block_nvfp4, QK_NVFP4, quantize_f32_nvfp4_ds41_block>(
 +            src0_d, src1_d, (block_nvfp4*)dst->data,
 +            ne00, ne01, ne02, ne03,
@@ -266,7 +266,7 @@ diff -ru a/ggml/src/ggml-cuda/set-rows.cu b/ggml/src/ggml-cuda/set-rows.cu
 +            nb1, nb2, nb3,
 +            stream
 +        );
-+    } else if (dst->type == GGML_TYPE_MXFP4) {   // Strata DS4.1 --kv-fp4
++    } else if (dst->type == GGML_TYPE_MXFP4) {   // Almond DS4.1 --kv-fp4
 +        set_rows_cuda_quant<idx_t, block_mxfp4, QK_MXFP4, quantize_f32_mxfp4_ds41_block>(
 +            src0_d, src1_d, (block_mxfp4*)dst->data,
 +            ne00, ne01, ne02, ne03,

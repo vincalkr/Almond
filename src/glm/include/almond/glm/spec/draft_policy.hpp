@@ -14,7 +14,7 @@
 // times per window size (EMA; sizes not seen yet are scaled from seen ones by a prior shape), so the policy adapts
 // to the machine and the context length. It only chooses which drafts to verify: the output is unchanged.
 //
-// THE COST-AWARE WINDOW (maya-ds4's DS4_DRAFT_COST=1) sizes a block drafter's window (DSpark: its drafts all at
+// THE COST-AWARE WINDOW (the DeepSeek path's DS4_DRAFT_COST=1) sizes a block drafter's window (DSpark: its drafts all at
 // once, each with a confidence) the same way. Verified up to draft k, a window of k + 1 rows commits
 //
 //   E(k) = 1 + q_0 + q_1 + ... + q_(k-1),   q_i = a_0 a_1 ... a_i   (the chance drafts 0..i all hold)
@@ -35,7 +35,7 @@ namespace almond::glm::spec {
 
 class DraftPolicy {
 public:
-    static constexpr int kMaxT = 16;   // (maya-ds4's verify windows; the GLM paths pass 8 at most)
+    static constexpr int kMaxT = 16;   // (the DeepSeek path's verify windows; the GLM paths pass 8 at most)
     static constexpr int kBuckets = 4;
     static constexpr int kBands = 3;   // the cost-aware window's context bands (< 8K, < 64K, longer)
 

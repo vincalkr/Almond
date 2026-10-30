@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Almond's API server (serve/server.py) in front of GLM-5.3-Flash on project-maya's engine (`build-maya-hip/maya
+"""Almond's API server (serve/server.py) in front of GLM-5.3-Flash on the engine (`build-maya-hip/glm
 --serve`, src/glm).  The server is generic and the pack's tokenizer directory carries the model's own
 Jinja chat template; this shim swaps in GLM's differences:
 
@@ -175,7 +175,7 @@ F.ChatTemplate.render = _render_glm
 
 def _expand_glm(self, ids, encoded):
     """GLM-5.3's image markers (<|begin_of_image|><|image|><|end_of_image|>): one <|image|> per image token, the
-    encoder's count for each picture in prompt order (project-maya's layout)."""
+    encoder's count for each picture in prompt order (the layout)."""
     pad = self.tok.encode("<|image|>", parse_special=True)[0]
     start = self.tok.encode("<|begin_of_image|>", parse_special=True)[0]
     literal = self.tok.encode("<|image|>", parse_special=False)

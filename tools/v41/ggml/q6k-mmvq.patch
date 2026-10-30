@@ -12,7 +12,7 @@ index 0714ae3b..b8412356 100644
      const int32_t *  ids_d = ids ? (const int32_t *)  ids->data : nullptr;
      float         *  dst_d =       (float         *)  dst->data;
  
-+    // ds41e (tools/v41/ggml/q6k-mmvq.patch): GGML_CUDA_Q6K_MMVQ=1 (off by default) - a Q6_K matrix times one f32
++    // Almond (tools/v41/ggml/q6k-mmvq.patch): GGML_CUDA_Q6K_MMVQ=1 (off by default) - a Q6_K matrix times one f32
 +    // column (decode) goes to q6k_mmvq_f (mmvq-q6k.cuh): 128-bit weight loads and the f32 column used as it is, so
 +    // there is no quantize_q8_1 launch before it. Other cases, and shapes it has no configuration for, take the path
 +    // below.
@@ -37,7 +37,7 @@ index 0000000..9213aaa
 @@ -0,0 +1,137 @@
 +#pragma once
 +
-+// ds41e (tools/v41/ggml/q6k-mmvq.patch): a Q6_K matrix times one f32 column (decode), for RDNA3 - used by
++// Almond (tools/v41/ggml/q6k-mmvq.patch): a Q6_K matrix times one f32 column (decode), for RDNA3 - used by
 +// ggml_cuda_mul_mat_vec_q when GGML_CUDA_Q6K_MMVQ=1 (off by default); measured with local/bench-v41/q6k-mmvq.hip.
 +//
 +// The weights stay in the standard block_q6_K layout, so the prompt passes (MMQ) read the same tensors. ggml's

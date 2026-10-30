@@ -1,6 +1,6 @@
 # Handover
 
-Where ds41e stands and what is open. How it runs and every measured number: [README](README.md),
+Where Almond stands and what is open. How it runs and every measured number: [README](README.md),
 [docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md), [docs/ds4/AMD_HIP_NOTES.md](docs/ds4/AMD_HIP_NOTES.md).
 
 ## State (2026-10-27)

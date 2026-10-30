@@ -32,7 +32,7 @@ Beyond the API (in the configuration, not DeepSeek's):
 
 `ALMOND_DS41_FREE_SAMPLING=1` passes a request's sampling through as it is (measurements).
 
-## GLM-5.3-Flash (GSQ-RCO 3.0bit, project-maya's engine)
+## GLM-5.3-Flash (GSQ-RCO 3.0bit, the engine)
 
 Source: Z.ai's API reference (docs.z.ai, chat completions, the GLM-5.3-Flash series); the GGUF's
 `general.sampling.temp` 1.0 and `general.sampling.top_p` 0.95 say the same.
@@ -58,7 +58,7 @@ code, one Italian prose, one English explanation, after one asyncio question), t
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | temperature 0 (greedy) | 30.3 | 32.3 | 38.0 | 37.3 | 34.6 | 27.3 | 33.3 | 80.8% |
 | Z.ai's 1.0 / 0.95, top_k off (the default) | 32.1 | 32.1 | 36.4 | 36.5 | 32.8 | 26.1 | 32.7 | 81.2% |
-| 1.0 / 0.95, top_k 20 (project-maya's engine default) | 30.0 | 32.4 | 35.3 | 36.0 | 32.1 | 26.8 | 32.1 | 79.5% |
+| 1.0 / 0.95, top_k 20 (the engine default) | 30.0 | 32.4 | 35.3 | 36.0 | 32.1 | 26.8 | 32.1 | 79.5% |
 
 Sampling at the API's values costs the drafts nothing measurable (one run an arm: the means are within 4%).
 
@@ -76,7 +76,7 @@ GLM-5.3-Flash at max, "cosa sono le terzine incatenate ? citando i versi": the 3
 verses and tries again and again ("nella miseria; e, fuor di mia credenza" - hmm, no), each round a few words
 different. Before: 16,000 tokens of thinking, no answer (twice).
 
-- project-maya's loop guard (`serve/loop_guard.py`, MIT, unchanged; `"loop_guard": true`, `ALMOND_LOOP_GUARD=0/1`):
+- the loop guard (`serve/loop_guard.py`, MIT, unchanged; `"loop_guard": true`, `ALMOND_LOOP_GUARD=0/1`):
   a block repeated back to back gets a short repetition penalty, the third loop in the thinking closes it, a loop that
   comes back in the answer ends it. On this prompt it saw one loop only, at 13,831 tokens (the rounds are not exact).
 - `"reasoning_loop_recovery": "close"`: the passage detector (#728, 12-word passages seen three times over the last
@@ -100,7 +100,7 @@ Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
   (17.26 GiB free right after it was freed). Freeing the dense half's cached graphs and both allocators after it
   changed nothing (15.45): not kept. Clearing ggml-hip's buffer pool
   after the encoder (tried, 2026-10-30) gave back 112 MiB only and the next decode hit an illegal memory access: removed.
-- GLM: project-maya's encoder (`almond-vision`, llama.cpp's mtmd with GLM-5.3's tower, built by `./build.sh` for HIP;
+- GLM: the encoder (`almond-vision`, llama.cpp's mtmd with GLM-5.3's tower, built by `./build.sh` for HIP;
   `local/fetch.sh glm-vision` gets the mmproj F16 + vocab, 1.1 GB) starts only when a picture arrives, in 2.78 GB the
   engine lends it from the tail of card 0's expert pool (273 experts moved to colder slots, 27 dropped) and takes back
   after (`local/glm-local-vision.json`, which `./run.sh --model glm` picks when the encoder is there). Text decode, one
@@ -108,7 +108,7 @@ Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
 
 ## Sessions on disk
 
-- DeepSeek: `--conversation-disk local/conv-cache-rco` (as in ds41e).
+- DeepSeek: `--conversation-disk local/conv-cache-rco` (as in Almond).
 - GLM: `ALMOND_GLM_SLOT_KEEP=1`, `ALMOND_GLM_SLOT_DIR=local/glm-slots`: the conversation in the model is saved when
   the engine ends and taken back after a start. Measured: a 7,163-token prompt read in 13.6 s; after a stop and a
   start the same conversation plus a question was taken back from disk in 0.1 s and read 123 new tokens (2.3 s).

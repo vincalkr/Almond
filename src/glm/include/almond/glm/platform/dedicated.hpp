@@ -2,7 +2,7 @@
 //
 // On Windows, HIP's total memory for an integrated GPU is its carve-out (the memory the BIOS dedicates to it) plus
 // shared system memory: a Radeon 8065S with 160 GB of its own reports ~172.  What the engines put in the shared part
-// pages under Windows - GLM's 8K-token prompts ran at 62 instead of 159 tok/s (#206), DeepSeek's Maya-S decoded at
+// pages under Windows - GLM's 8K-token prompts ran at 62 instead of 159 tok/s (#206), DeepSeek's an IQ2_XXS quant decoded at
 // 2.45 tok/s on a 160 GB Strix Halo (v1.1.19) - so both keep their expert pools within the dedicated memory
 // (glm_fast_path.cu pool_check, ds4_model.cu mem_info).
 #pragma once

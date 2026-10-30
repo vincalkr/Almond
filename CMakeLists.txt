@@ -1,6 +1,6 @@
 # Almond - a multi-model MoE engine (today DeepSeek-V4.1-Flash, src/ds41) and the few libraries it links.
 #
-# Of the Strata libraries this tree started from, exactly the objects ds41_generate links remain (traced with -Wl,--trace on
+# Of the Almond libraries this tree started from, exactly the objects ds41_generate links remain (traced with -Wl,--trace on
 # 2026-10-18): the VRAM expert cache and VMM, pinned host memory, the CPU expert kernels, the HIP MMVQ / IQ kernels and
 # ggml's MMQ instances for the prompt path.  The flags below are the ones those files were built with in the full
 # tree, so the engine binary is the same.
@@ -28,7 +28,7 @@ option(ALMOND_WERROR "Treat compiler warnings as errors" OFF)
 set(ALMOND_GGML_DIR "" CACHE PATH "the llama.cpp checkout ggml comes from (third_party/llama.cpp, with tools/v41/ggml patches)")
 set(ALMOND_GGML_PREBUILT "" CACHE PATH "an existing ggml build directory of ALMOND_GGML_DIR: link its ggml")
 if(NOT ALMOND_ENABLE_HIP)
-  message(FATAL_ERROR "Almond builds the HIP engine only (the CUDA and CPU-only paths left with the Strata tree)")
+  message(FATAL_ERROR "Almond builds the HIP engine only (the CUDA and CPU-only paths left with the Almond tree)")
 endif()
 if(NOT ALMOND_GGML_DIR OR NOT ALMOND_GGML_PREBUILT)
   message(FATAL_ERROR "set ALMOND_GGML_DIR and ALMOND_GGML_PREBUILT (third_party/llama.cpp and its build-hip)")
@@ -134,7 +134,7 @@ endif()
 # ---- the DeepSeek-V4.1 engine ----
 include(${CMAKE_CURRENT_SOURCE_DIR}/src/ds41/v41_engine.cmake)
 
-# GLM-5.3-Flash (src/glm, from project-maya: docs/ENGINE_PLAN.md) -> almond-glm
+# GLM-5.3-Flash (src/glm: docs/ENGINE_PLAN.md) -> almond-glm
 add_subdirectory(src/glm)
 
 # One executable (docs/ENGINE_PLAN.md, step 3): DeepSeek's engine target with GLM's path linked in (glm_program, its

@@ -1,4 +1,4 @@
-"""CPU-only: project-maya's loop guard in Almond's Service.run (python -m unittest serve.test_loop_guard)."""
+"""CPU-only: the loop guard in Almond's Service.run (python -m unittest serve.test_loop_guard)."""
 import threading
 import unittest
 from serve.server import Service, HIGH_EFFORT

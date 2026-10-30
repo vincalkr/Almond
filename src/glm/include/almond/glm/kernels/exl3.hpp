@@ -40,11 +40,11 @@ struct Mat {
     int k2 = 0;                          // twice the bits per weight: 2..16 even (K 1..8), 3 / 5 / 7 (K 1.5 / 2.5 / 3.5)
     int cb = 2;                          // codebook: 0 3inst, 1 mcg, 2 mul1 (the only one with a half-integer K)
     int ld = 0;                          // tiles per 16-row slice in memory (the full matrix's n / 16); 0: n / 16
-    // a GGUF's plain matrix instead (DeepSeek-V4.1's maya-ds4: fmt 1 BF16): raw = [n][ld] (row r = output r, ld
+    // a GGUF's plain matrix instead (DeepSeek-V4.1's the DeepSeek path: fmt 1 BF16): raw = [n][ld] (row r = output r, ld
     // values a row; 0: k), the EXL3 fields unused - the engine sends it to its own kernels, never to these
     int fmt = 0;
     const void* raw = nullptr;
-    int gg_type = 0;   // fmt 4 (maya-ds4's kFmtGG): the ggml block type
+    int gg_type = 0;   // fmt 4 (the DeepSeek path's kFmtGG): the ggml block type
 };
 
 /// Trellis bytes of a k x n matrix at k2 / 2 bits: 16 k2 bytes a 16x16 tile.
@@ -97,8 +97,8 @@ struct ExpertLayout {
     size_t suh[3] = {0, 0, 0}, svh[3] = {0, 0, 0}, trellis[3] = {0, 0, 0};
     int k2[3] = {0, 0, 0};   // each part's bitrate as twice its K (Mat::k2); gate and up alike
     int cb = 2;
-    int fmt = 0;   // 2: a GGUF's MXFP4 expert (maya-ds4's own kernels): trellis[r] = matrix r's offset, [out][in / 32]
-    int gg_type[3] = {0, 0, 0};   // fmt 2: each role's ggml type (0: MXFP4; maya-ds4's expert_type)
+    int fmt = 0;   // 2: a GGUF's MXFP4 expert (the DeepSeek path's own kernels): trellis[r] = matrix r's offset, [out][in / 32]
+    int gg_type[3] = {0, 0, 0};   // fmt 2: each role's ggml type (0: MXFP4; the DeepSeek path's expert_type)
 };
 /// The routed experts of one token (the engine's device plan: plan_ptr[i] = the blob in VRAM, 0 = not on the device;
 /// plan_w[i] its weight).  gate/up over x (n_embd F32) -> clamped swiglu -> h (F32 [k][n_ff], scratch the caller

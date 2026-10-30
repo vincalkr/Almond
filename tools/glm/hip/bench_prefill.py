@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Matched fresh/follow-up prefill probe against an otherwise idle local Strata server.
+"""Matched fresh/follow-up prefill probe against an otherwise idle local Almond server.
 
 Does not start/stop services. Use a dedicated server and its engine log, restart
 between build/configuration arms, and keep model/template/settings identical.

@@ -21,7 +21,7 @@
     "ALMOND_GLM_PREFILL_SUB": "1024",
     "ALMOND_GLM_PREFILL_MB": "4096",
     "ALMOND_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-glm-hipblaslt-100401-local.txt",
-    "ALMOND_GLM_MTP_GGUF": "models/glm53-gsq-rco/GLM-5.3-Flash-Maya-M-NextN.gguf",
+    "ALMOND_GLM_MTP_GGUF": "models/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf",
     "ALMOND_GLM_SLOT_KEEP": "1",
     "ALMOND_GLM_SLOT_DIR": "local/glm-slots"
   },

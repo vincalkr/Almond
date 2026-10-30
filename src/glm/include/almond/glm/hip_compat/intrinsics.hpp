@@ -1,6 +1,6 @@
 #pragma once
 
-// CUDA device intrinsics used by Strata kernels on supported wave32 HIP targets.
+// CUDA device intrinsics used by Almond kernels on supported wave32 HIP targets.
 // This header is included only from the HIP cuda_runtime compatibility shim.
 #if defined(__HIPCC__)
 #include <hip/hip_version.h>

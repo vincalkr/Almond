@@ -16,15 +16,15 @@ namespace almond::kernels::cpu {
 
 /// Bytes of the largest quantized gate/up activation any native layer uses.  DeepSeek-V4's n_embd 4096 as Q8_K
 /// (IQ2_XXS's vec_dot_type) is 16 x 292 = 4672, the largest; 2560 as Q8_K is 2920 and 4096 as Q8_0 is 4352.
-inline constexpr size_t kNativeActBytes = 5840;   // Strata-DS4 fork: DeepSeek-V4.1 n_embd 5120 as Q8_K (20 x 292)
+inline constexpr size_t kNativeActBytes = 5840;   // DeepSeek-V4.1 n_embd 5120 as Q8_K (20 x 292)
 /// Bytes of the largest quantized down activation.  DeepSeek-V4's n_ff 2048 as Q8_K (Q2_K's vec_dot_type) is
 /// 8 x 292 = 2336, the largest; 640 as Q8_0 is 20 x 34 = 680.
-inline constexpr size_t kNativeHBytes = 2628;   // Strata-DS4 fork: DeepSeek-V4.1 n_ff 2304 as Q8_K (9 x 292)
+inline constexpr size_t kNativeHBytes = 2628;   // DeepSeek-V4.1 n_ff 2304 as Q8_K (9 x 292)
 /// The widest native expert intermediate (n_ff) any model has.  DeepSeek-V4's 2048 is more than three times 640, so the
 /// pool's per-expert row buffers (ExpertPool::SplitBufMulti::ff) must be sized by THIS and not by the canonical
 /// `FF` (640) that the Q2_0 pack path uses: `native_gu_rows` writes rows [0, n_ff) of the model's own width, and
 /// a buffer sized for 640 overflows silently into the neighbouring struct (found by tools/ds4/moe_replay).
-inline constexpr int kNativeFFMax = 2304;   // Strata-DS4 fork: DeepSeek-V4.1 n_ff
+inline constexpr int kNativeFFMax = 2304;   // DeepSeek-V4.1 n_ff
 
 /// One layer's native expert geometry.
 struct NativeFmt {

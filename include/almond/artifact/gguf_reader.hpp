@@ -238,7 +238,7 @@ inline bool block_geometry(uint32_t t, int& elems, int& bytes) {
         elems = 64;
         bytes = 18;
         return true;
-    case 143:   // Strata-DS4 fork: PTQ1_0 (128 trits in 28 B: 26 B of base-3 digits + fp16 d)
+    case 143:   // PTQ1_0 (128 trits in 28 B: 26 B of base-3 digits + fp16 d)
         elems = 128;
         bytes = 28;
         return true;
@@ -516,7 +516,7 @@ inline uint64_t tensor_payload_bytes(const TensorInfo& t) {
 }
 
 // The shards of one model (almond::gguf_split_paths), opened together; tensors are looked up across all of them.
-// From eddoursul/Strata 8029fa9, with the split-key validation of #255 (gopinath87607) made a property of the
+// From eddoursul/Almond 8029fa9, with the split-key validation of #255 (gopinath87607) made a property of the
 // model rather than of one loader: a split GGUF carries the model's metadata (general.architecture and the
 // qwen4exp keys) in its FIRST shard only, and the later shards just declare split.count / split.no /
 // split.tensors.count.  The extreme case is a pack whose shard 1 holds the metadata and no tensor at

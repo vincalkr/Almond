@@ -23,7 +23,7 @@ namespace almond::glm::core {
 
 /// A split's DFlash verify window: pipelined (consecutive tokens on the parts at once, glm_window.cu's win_pipe_*) or
 /// batched (all of the window a part at a time, staggered, each part's CPU lane on both parts' pools).
-/// ALMOND_GLM_WIN_PIPE=1 / 0 forces either; by default pipelined from three parts up.  Maya-L, 3090 + 5060 Ti:
+/// ALMOND_GLM_WIN_PIPE=1 / 0 forces either; by default pipelined from three parts up.  an IQ3_S quant, 3090 + 5060 Ti:
 /// batched 21.8 tok/s against MTP's 20.5 (pipelined 17.3); nine GPUs: pipelined 59.8-62.0 against MTP's 42.5.
 inline bool dflash_pipelined(int n_parts) {
     if (n_parts < 2) return false;

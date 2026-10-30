@@ -106,7 +106,7 @@ void quantize_oracle_q8_0(const float* x, int n, ActQ& a) {
         max4 = _mm_max_ps(max4, _mm_movehl_ps(max4, max4));
         max4 = _mm_max_ss(max4, _mm_movehdup_ps(max4));
         const float amax = _mm_cvtss_f32(max4);
-        // the FP16 scale stays finite (Strata #1448: past ~8.3M it overflowed to inf); below that nothing changes
+        // the FP16 scale stays finite (Almond #1448: past ~8.3M it overflowed to inf); below that nothing changes
         const bool big = amax / 127.0f > 65504.0f;
         const float d = big ? 65504.0f : amax / 127.0f;
         const uint16_t half_d = (uint16_t) _mm_cvtsi128_si32(_mm_cvtps_ph(_mm_set_ss(d), 0));
@@ -393,7 +393,7 @@ void cpu_require_expert_support() {
     const CpuFeatures f = cpu_features();
     if (f.usable()) return;
     std::fprintf(stderr,
-                 "maya: this CPU cannot run the expert kernel: %s.\n"
+                 "glm: this CPU cannot run the expert kernel: %s.\n"
                  "        The engine needs AVX512-VNNI and AVX512-VBMI (Intel Ice Lake / AMD Zen 4 or newer).\n"
                  "        The scalar fallback exists for tests only and is far too slow to decode with.\n",
                  f.reason());

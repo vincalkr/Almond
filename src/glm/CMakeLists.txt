@@ -1,6 +1,6 @@
-# src/glm - the GLM-5.3-Flash path (from project-maya v1.1.37, MIT: LICENSE), built inside Almond's project
+# src/glm - the GLM-5.3-Flash path (MIT: LICENSE), built inside Almond's project
 # (add_subdirectory from the top CMakeLists.txt) on Almond's ggml (the top level's prebuilt ggml-base / ggml-cpu and
-# third_party/llama.cpp/ggml's MMQ sources).  HIP only.  Its targets keep project-maya's names until the rename
+# third_party/llama.cpp/ggml's MMQ sources).  HIP only.  Its targets keep the names until the rename
 # (docs/ENGINE_PLAN.md, step 4); the executable is `almond-engine` (the top level's).
 add_compile_definitions(ALMOND_VERSION="${PROJECT_VERSION}")
 include(cmake/hip_backend.cmake)

@@ -4,7 +4,7 @@
      GGML_ASSERT(a->ne[0] >= k);
  
      struct ggml_tensor * result = ggml_argsort(ctx, a, GGML_SORT_ORDER_DESC);
-+    // Strata-DS4 (tools/v41/ggml/rank-argsort.patch): only the first k of each row are read (the view below) - a
++    // Almond (tools/v41/ggml/rank-argsort.patch): only the first k of each row are read (the view below) - a
 +    // backend may select them instead of sorting the whole row (CUDA: k <= 32, ggml-cuda/argsort.cu)
 +    ggml_set_op_params_i32(result, 1, k);
  
@@ -16,7 +16,7 @@
      }
  }
  
-+// Strata-DS4 (tools/v41/ggml/rank-argsort.patch): a row of <= 1024 columns sorted by RANK instead of the bitonic
++// Almond (tools/v41/ggml/rank-argsort.patch): a row of <= 1024 columns sorted by RANK instead of the bitonic
 +// network below.  Each thread owns a column, counts the columns that sort before it (value order, equal values by
 +// ascending column) and writes itself at that rank: one pass over shared memory, one barrier.  The bitonic network
 +// takes 45 barrier steps for 384 -> 512 columns and reads x from global memory per compare: 9 us per 384-wide row on
@@ -58,7 +58,7 @@
 +    }
 +}
 +
-+// Strata-DS4 (tools/v41/ggml/rank-argsort.patch): ggml_argsort_top_k records k in op_params[1] (only the first k
++// Almond (tools/v41/ggml/rank-argsort.patch): ggml_argsort_top_k records k in op_params[1] (only the first k
 +// columns of each sorted row are read through its view).  For k <= 32 of a row of <= 1024 one warp per row selects
 +// them directly: each lane holds its columns' keys (column lane + 32 i) as 64-bit (key << 32 | column) composites in
 +// registers, then k rounds of a 5-step shuffle minimum, the winning lane rescanning only its own columns.  The same
@@ -160,7 +160,7 @@
  
      enum ggml_sort_order order = (enum ggml_sort_order) dst->op_params[0];
  
-+    if (argsort_use_rank((int) ncols)) {   // Strata-DS4: see k_argsort_rank_f32_i32 / k_argsort_topk_warp_f32_i32
++    if (argsort_use_rank((int) ncols)) {   // Almond: see k_argsort_rank_f32_i32 / k_argsort_topk_warp_f32_i32
 +        const int k_used = dst->op_params[1];   // ggml_argsort_top_k: only the first k of a row are read
 +        if (k_used > 0 && k_used <= 32 && k_used <= ncols) {
 +            if (order == GGML_SORT_ORDER_ASC) {

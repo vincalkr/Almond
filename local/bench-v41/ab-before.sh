@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# ab-ds41e.sh - Almond's engine (the trunk behind MoeTrunk) against ds41e's (../ds41e, the same code before the
+# ab-before.sh - Almond's engine (the trunk behind MoeTrunk) against Almond's (../Almond, the same code before the
 # interface), with ab-hip-spin.sh's chat flags, arms alternated, REPS (default 3) rounds; Promessi Sposi (300 tokens)
 # and the 17K prompt (128 tokens, ctx 24576), forced on local/sweep-rco-rq's reference streams ("diff=" counts the
-# tokens whose argmax differs).  The chat servers must be stopped.  Results in local/sweep-ab-ds41e/summary.txt.
+# tokens whose argmax differs).  The chat servers must be stopped.  Results in local/sweep-ab-Almond/summary.txt.
 cd "$(dirname "$0")/../.."
-D=../ds41e
-O=$PWD/${OUT:-local/sweep-ab-ds41e}
+D=../Almond
+O=$PWD/${OUT:-local/sweep-ab-Almond}
 if ss -ltn 2>/dev/null | grep -q ':8150 ' || pgrep -f '[d]s41_generate.*--serve' >/dev/null; then
-    echo "ab-ds41e: a chat server is running: stop it first (./stop.sh)" >&2; exit 3
+    echo "ab-Almond: a chat server is running: stop it first (./stop.sh)" >&2; exit 3
 fi
 mkdir -p $O; cp -n $D/local/sweep-rco-rq/ref-sposi.ids $D/local/sweep-rco-rq/ref-huge17k.ids $O/
 export ARENA=80 RANK=local/rank.bin
@@ -19,7 +19,7 @@ run() {   # arm dir prefix
     bash $2/local/bench-v41/sweep.sh $O local/prompts/sposi.i32 300 $1-r$r "$(envs $3)" $R
 }
 for r in $(seq 1 ${REPS:-3}); do
-    run ds41e $D STRATA
+    run Almond $D STRATA
     run almond . ALMOND
 done
 echo ABDS41EDONE >> $O/summary.txt

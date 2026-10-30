@@ -21,7 +21,7 @@ trap 'trap - INT TERM; kill 0 2>/dev/null' INT TERM
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 DEST=${1:-$HERE/models}
-SRC_REPO=antirez/deepseek-v4.1-flash-gguf
+SRC_REPO=upstream/deepseek-v4.1-flash-gguf
 SRC_FILE=DeepSeek-V4.1-Flash-1017-IQ2_XXS-Q2_K-imatrix.gguf
 CONN=${CONN:-4}
 DRY_RUN=${DRY_RUN:-0}

@@ -1006,7 +1006,7 @@ void Glm5Model::prefill_cap(int T, const char* why) {
     S->T = T;
 }
 
-// Strata's lend cap, settled once the RAM tier exists (prefill_setup sized the chunk with its 90): 90% of the pool's
+// the lend cap, settled once the RAM tier exists (prefill_setup sized the chunk with its 90): 90% of the pool's
 // slots when at least 90% of this card's expert bytes are held pinned - in the VRAM pool or the RAM tier, whose copies
 // are DMA - else 85% (the rest comes from the disk through host copies, the limit there: lending more only streams
 // more through them)
@@ -1122,14 +1122,14 @@ bool Glm5Model::prefill_setup(std::string& err) {
     const auto wsc = weight_scratch(g, has_dsa);
     const int64_t w16_elems = wsc.first, w32_elems = wsc.second;
     const size_t ws_bytes = kPfWorkspace;
-    // ---- the chunk T, as Strata's --prefill (the config's args; ALMOND_GLM_PREFILL, unset = auto).  `auto`: the
+    // ---- the chunk T, as the --prefill (the config's args; ALMOND_GLM_PREFILL, unset = auto).  `auto`: the
     // largest chunk on the 256-token grid, up to 32768 on one GPU and 8192 on a split (each the faster there: one V100,
     // 26K-token prompts 559 tok/s at 32768 against 367 at 8192; two V100s 709 at 8192 against 551 at 32768), whose
     // buffers the expert pool fast_setup carves next can lend.
-    // The pool lends at most ALMOND_PREFILL_LEND_PCT of its slots - Strata's 90 when at least 90% of the expert bytes
+    // The pool lends at most ALMOND_PREFILL_LEND_PCT of its slots - the 90 when at least 90% of the expert bytes
     // are held pinned (the copies are DMA), 85 when host copies are the limit; that share is known once the RAM tier
     // exists, so the chunk is sized with 90 here and prefill_settle() takes it down to 85's when the share falls short
-    // - and keeps every layer a route's experts and the spares (fast_setup's floor).  The prestage buffer is Strata's
+    // - and keeps every layer a route's experts and the spares (fast_setup's floor).  The prestage buffer is Almond's
     // ring and comes out of the same loan: the chunk is the largest that leaves it whole, else the largest that leaves
     // it 16 slots, else none.  A number N: chunks of N tokens, halved until the pool can lend them (only the floor
     // applies - the operator's number).  A split reads in its smallest part's chunk (load_pack_split).
@@ -1152,7 +1152,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
     const int64_t keep = Glm5Model::pool_keep(g.n_exp_used);
     if (getenv("ALMOND_GLM_PREFILL_KEEP") != nullptr)
         std::fprintf(stderr, "glm prefill: CUDA%d the pool keeps %lld slots a layer while a prompt runs "
-                             "(ALMOND_GLM_PREFILL_KEEP; the floor is %d, Strata's is %d)\n",
+                             "(ALMOND_GLM_PREFILL_KEEP; the floor is %d, the is %d)\n",
                      dev_, (long long) keep, g.n_exp_used + gf::kSpares, g.n_exp_used + gf::kSpares + 2);
     size_t avail = part_budget(dev_free, dev_total, (size_t) keep * stride_sum, stride_max).avail;
     // ... less the prompt path's MMQ scratch pool: fast_setup sizes the expert pool without it, so the lendable the
@@ -1168,7 +1168,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
     if (const char* v = getenv("ALMOND_GLM_PRESTAGE")) ring_max = has_moe ? std::max(0, std::atoi(v)) : 0;
     // A COMPLETE pool to come (fast_setup: every expert and the spares in each layer's main slots, this path's buffers
     // in the tail beyond them - the Windows APU's carve-out): no expert is outside VRAM, so there is nothing to prestage
-    // (the ring only copies RAM-tier experts: Maya-S lent 1153 MB for it, ~4 slots a layer more for nothing) and
+    // (the ring only copies RAM-tier experts: an IQ2_XXS quant lent 1153 MB for it, ~4 slots a layer more for nothing) and
     // nothing to land from the disk (the smallest landing ring: ~0.4 GB of the 8065S's 32 GB of OS RAM less pinned).
     // Priced with the largest chunk's buffers and a margin; fast_setup decides from what is free then (short of it
     // there, the pool is the capped one - without a prestage buffer).  ALMOND_GLM_COMPLETE_POOL=0: never (on by
@@ -1220,7 +1220,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
             if (T < kPreMinT || gstride == 0) return ring_max;   // (a chunk this short carves no prestage buffer)
             return std::min<int64_t>(ring_max, (int64_t) ((lendable - nr - 256) / gstride));
         };
-        // Strata's biggest_chunk: every test rises with T, so the largest chunk that passes is a bisection on the grid
+        // the biggest_chunk: every test rises with T, so the largest chunk that passes is a bisection on the grid
         const auto biggest = [&](int64_t floor) -> int64_t {
             int64_t lo = 1, hi = ceiling / 256, best = 0;
             while (lo <= hi) {
@@ -1756,7 +1756,7 @@ bool Glm5Model::lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std:
                 // the victim: a RAM-tier expert of a lower LFU count - and on EQUAL counts the one a route used less
                 // recently (ALMOND_GLM_LEND_PARK_LRU=0: strictly lower only, as before).  The counts age (all halve every
                 // 32768 routing events), so most sit at the same small value, often 0, and the strict rule picked badly:
-                // Maya-S24, one V100, 512 tokens after a fresh 24K prompt (the run's second lend), two rounds each, disk
+                // an IQ2_XXS quant, one V100, 512 tokens after a fresh 24K prompt (the run's second lend), two rounds each, disk
                 // reads 520-578 -> 309-317, of them the lend's RAM victims 392-465 -> 208-213; decode 31.6-32.5 ->
                 // 33.1-33.3 tok/s, VRAM hits 72.2-74.0 -> 73.7-74.5 %
                 static const bool lru_ties = getenv("ALMOND_GLM_LEND_PARK_LRU") == nullptr ||
@@ -2517,7 +2517,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                 sgemm_bf16(Ly.g_b, DI, HD, B.ga, HD, B.g2, DI, tn, 1.0f);
                 S->mark("kda_proj", s);
                 // the recurrence over n_head x 4 blocks (kda_rec_split: the value columns are independent) instead of
-                // one block a head - 32 blocks for a V100's 80 SMs.  Maya-S24, 27K prompts: kda_rec 4.7 / 5.1 -> 3.5 s
+                // one block a head - 32 blocks for a V100's 80 SMs.  an IQ2_XXS quant, 27K prompts: kda_rec 4.7 / 5.1 -> 3.5 s
                 // (8 blocks a head: 5.3 / 5.5 s); state and output within 1e-7 of the one-block kernel.
                 // ALMOND_GLM_KDA_SPLIT=0 / 8: the one-block kernel / 8 a head.  ALMOND_GLM_KDA_SPLIT_CHECK=1 (debug):
                 // the one-block kernel on a copy too, compared
@@ -4225,7 +4225,7 @@ bool Glm5Model::prefill(const std::vector<int32_t>& tokens, std::string& err, in
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get())   // (a tail lent to the vision encoder: the
         if (m->pf_ == nullptr || m->fast_ == nullptr || m->vis_lent_) return false;   // token path, until it is back)
     // a handful of tokens costs less through the token path (the batched path streams every expert they touch).  One
-    // GPU: from 8 tokens - an agent session's later turns (13.5K of history + a short user turn, Maya-S24 on a V100,
+    // GPU: from 8 tokens - an agent session's later turns (13.5K of history + a short user turn, an IQ2_XXS quant on a V100,
     // two cooled rounds of three turns): prompt 1,041 / 648 / 521 ms at 32 -> 488 / 405 / 577 at 8 (4: 508 / 397 /
     // 576, 16: 502 / 716 / 540); a split keeps 32
     int64_t min_n = split_next_ == nullptr && n_parts_ <= 1 ? 8 : 32;

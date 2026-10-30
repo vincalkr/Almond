@@ -19,7 +19,7 @@ std::atomic<bool> oracle_q8_0{false};
 
 [[noreturn]] void unsupported(const char* what) {
     std::fprintf(stderr,
-                 "maya: %s is x86-only (AVX2/AVX-512) and this build has no portable version.\n"
+                 "glm: %s is x86-only (AVX2/AVX-512) and this build has no portable version.\n"
                  "      On this CPU keep every expert in the GPU's expert pool (the CPU expert lane off).\n",
                  what);
     std::abort();
@@ -32,7 +32,7 @@ const char* CpuFeatures::reason() const { return usable() ? "ok" : "not an x86 C
 CpuFeatures cpu_features() { return CpuFeatures{}; }
 
 void cpu_require_expert_support() {
-    std::fprintf(stderr, "maya: the canonical Q2_0 pack's expert kernel needs AVX512-VNNI/VBMI (x86).\n"
+    std::fprintf(stderr, "glm: the canonical Q2_0 pack's expert kernel needs AVX512-VNNI/VBMI (x86).\n"
                          "      On this CPU use a native GGUF pack and keep the CPU expert lane off.\n");
     std::exit(1);
 }

@@ -522,7 +522,7 @@ void dot_rows_nt(int nt, const uint8_t* w, size_t row_bytes, int n, const void* 
 // IQ3_XXS's sign vectors built in registers (sgn7_vec's steps, as neg masks), IQ3_S's 9-bit grid indices
 // built in scalar registers (ggml builds them in vectors, stores and reloads them), the inner loop unrolled.  The
 // integer lanes and the float steps are ggml's, so every result is bit-identical to its dot.  (The multi-token rows
-// above lose to ggml's dot at one token: Maya-L's IQ3_S gate/up pair on one Xeon 6152 core 4.05 vs 3.05 ms.)
+// above lose to ggml's dot at one token: an IQ3_S quant's IQ3_S gate/up pair on one Xeon 6152 core 4.05 vs 3.05 ms.)
 inline float dot1_iq3_xxs(const uint8_t* row, int nb, const block_q8_K* y) {
     const __m256i shifts = _mm256_setr_epi32(0, 0, 7, 7, 14, 14, 21, 21);
     const __m256i spread = _mm256_setr_epi8(0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12,

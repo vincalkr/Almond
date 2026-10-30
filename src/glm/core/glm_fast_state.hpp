@@ -62,7 +62,7 @@ inline void cpu_relax() {
 // "not ready" is no error - it is taken back off the thread's last error, which launch_check reads after every launch.
 // A launch error already pending stays for the caller's check (no submit then).  Elsewhere a no-op.
 // ALMOND_GLM_FLUSH=<n>: the decode submits after its first layer and then every n layers (submit_every), 0: never -
-// the default: on the 8065S (Maya-S, drafting with the MTP rework) a submission every 4 layers lost ~4% of the decode
+// the default: on the 8065S (an IQ2_XXS quant, drafting with the MTP rework) a submission every 4 layers lost ~4% of the decode
 // (26.5 against 27.7 tok/s, same answers); the runtime's own batching plus the service thread's kick keep the GPU fed.
 inline void submit_queued(cudaStream_t s) {
 #if defined(_WIN32) && defined(ALMOND_USE_HIP)
@@ -85,7 +85,7 @@ inline int submit_every() {
 #endif
 }
 // ... and the prompt path after each mixer sub-batch and each layer's experts: ALMOND_GLM_PREFILL_FLUSH=1 (off by
-// default: Maya-S on the 8065S, 2K / 8K / 16K prompts 271 / 323 / 325 tok/s with it against 273-276 / 323-325 /
+// default: an IQ2_XXS quant on the 8065S, 2K / 8K / 16K prompts 271 / 323 / 325 tok/s with it against 273-276 / 323-325 /
 // 329-339 without - the sub-batches are long enough that the runtime's batching costs nothing)
 inline bool prefill_submit() {
 #if defined(_WIN32) && defined(ALMOND_USE_HIP)
@@ -360,12 +360,12 @@ inline size_t expert_stride(size_t blob, int gu_type, int d_type) {
 int64_t zfs_arc_reclaimable();
 
 // --dump-routing (Glm5Model::set_routing_dump): whether a trace file is open, and one route appended to it as
-// Strata's trace record (int32 layer, int32 k, then k int32 expert ids and k float weights), under a lock - the
+// the trace record (int32 layer, int32 k, then k int32 expert ids and k float weights), under a lock - the
 // decode's CPU-lane threads (one per half) and the prompt path write to the same file
 bool route_dumping();
 void route_dump(int layer, int k, const int* ids, const float* w);
 
-// The expert usage file (opt-in, as Strata keeps nothing between starts but --expert-profile-save's profile):
+// The expert usage file (opt-in, as Almond keeps nothing between starts but --expert-profile-save's profile):
 // ALMOND_GLM_USAGE=<file>; unset or 0, none - the warm-up and the split search then go by the expert profile
 std::string usage_file();
 

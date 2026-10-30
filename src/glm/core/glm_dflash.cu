@@ -1775,7 +1775,7 @@ bool Glm5Model::decode_dflash(almond::glm::kernels::SamplerParams& sp, int64_t m
     // the pipelined window (its parts on consecutive tokens at once) or the batched one: dflash_pipelined
     const bool pipe = split_next_ != nullptr && dflash_pipelined(std::max(2, n_parts_));
     // the defaults (n_max / p_min < 0): on the pipelined window a draft after a wrong one costs little (its work is
-    // skipped) - Maya-L over 9 GPUs, 5 prompts: 0.3 / 0.5 / 0.7 / none within ~2% of each other, 0.5 the steadiest on
+    // skipped) - an IQ3_S quant over 9 GPUs, 5 prompts: 0.3 / 0.5 / 0.7 / none within ~2% of each other, 0.5 the steadiest on
     // a long context (53.8 against 43-52 tok/s at 0.3).  The batched window on two GPUs: a draft a round whatever its
     // confidence, then more while the product of the confidences stays at 0.9, up to kSplitDrafts - a window of two
     // costs 1.24 lone tokens there (81 against 65 ms), each more token ~28 ms; per-round stats with every window size

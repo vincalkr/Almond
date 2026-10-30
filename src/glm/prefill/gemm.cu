@@ -7,7 +7,7 @@
 #include <cuda_runtime.h>
 
 #if defined(__HIPCC__) && defined(ALMOND_HIPBLASLT_AVAILABLE)
-// The HIP compatibility shim maps CUDA shuffle spellings to Strata helpers.
+// The HIP compatibility shim maps CUDA shuffle spellings to Almond helpers.
 // hipBLASLt's public headers declare native HIP shuffle functions, so keep
 // those declarations from being macro-expanded in this translation unit.
 #undef __shfl_xor_sync

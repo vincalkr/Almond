@@ -2520,7 +2520,7 @@ void mla_attn(const float* q_abs, const uint16_t* lat, const int* cells, const i
     }
     if (tc_ok[dev] > 0 && !f32_only) {
         // Volta: the two-pass kernel, 32 heads a block, unless ALMOND_GLM_PREFILL_ATTN=tc (the 16-head one).  V100,
-        // Maya-S24, 27K prompts: dsa_attn 22.5 / 23.2 -> 12.2 / 12.5 s, the prompt's GPU time 78.5 / 82.1 -> 70.5 /
+        // an IQ2_XXS quant, 27K prompts: dsa_attn 22.5 / 23.2 -> 12.2 / 12.5 s, the prompt's GPU time 78.5 / 82.1 -> 70.5 /
         // 72.3 s; rel L2 against the F32 kernel 4.4-5.2e-5 (the 16-head one's)
         static const bool want_tc2 = attn_mode == nullptr || std::strcmp(attn_mode, "tc") != 0;
         // the shared-memory attribute is per GPU: set on each one (once set only on the first, a split's later GPUs
@@ -2532,7 +2532,7 @@ void mla_attn(const float* q_abs, const uint16_t* lat, const int* cells, const i
             cudaGetLastError();
         }
         // the one-pass kernel (mla_attn_v70_kernel) by default on Volta (sm_70 / sm_72); ALMOND_GLM_PREFILL_ATTN=tc2:
-        // the two-pass one.  Maya-S24, one V100: dsa_attn of a 27K prompt 6.87 -> 4.09 s, prompts 2K / 8K / 27K +4 / +9 /
+        // the two-pass one.  an IQ2_XXS quant, one V100: dsa_attn of a 27K prompt 6.87 -> 4.09 s, prompts 2K / 8K / 27K +4 / +9 /
         // +9 %; KL against tc2 0.0119 where the exact F32 kernel's is 0.0124; needles 6 / 6 at 40K and 100K (128K context)
         static const bool want_v70 = attn_mode == nullptr || std::strcmp(attn_mode, "v70") == 0;
         static int v70_ok[16] = {};

@@ -1,4 +1,4 @@
-// tools/vision/vision.cpp - the image half of Strata's multimodal path.
+// tools/vision/vision.cpp - the image half of the multimodal path.
 //
 // Turns an image into the embeddings the text model reads in place of its <|image_pad|> tokens, with llama.cpp's
 // mtmd library and the model's mmproj file (vision encoder + projector).  The engine does the rest: it places the

@@ -1,8 +1,8 @@
 # Almond: the plan
 
-Almond is ds41e (../ds41e) made multi-model. Today it runs what ds41e runs, renamed (`strata` -> `almond` in the code,
+Almond is a multi-model engine. Today it runs DeepSeek-V4.1-Flash, with its names (`strata` -> `almond` in the code,
 `STRATA_*` -> `ALMOND_*` in the environment, `include/almond/`); it builds with `./build.sh` and the server tests pass.
-`models/` is a symlink to `../ds41e/models`. Nothing below is built yet; nothing below has a measured number yet.
+`models/` is a symlink to `../Almond/models`. Nothing below is built yet; nothing below has a measured number yet.
 
 ## Rules that stay
 
@@ -14,7 +14,7 @@ Almond is ds41e (../ds41e) made multi-model. Today it runs what ds41e runs, rena
 
 ## Models, in order
 
-1. **DeepSeek-V4.1-Flash-1017** (what ds41e runs, GSQ-RCO IQ2_XXS pack): unchanged, the reference.
+1. **DeepSeek-V4.1-Flash-1017** (what Almond runs, GSQ-RCO IQ2_XXS pack): unchanged, the reference.
 2. **GLM-5.3-Flash** (321 B, 18 B active): first new model.
 3. **Qwen3.8-Flash-Next** (125 B MoE): second new model. Smaller than the two above: on 48 GB of VRAM plus RAM most of
    it is in VRAM, so it should be far faster.
@@ -25,11 +25,11 @@ All five sources are MIT. Their code is read and ported by hand; nothing downloa
 
 | source | what it has | what Almond takes |
 | --- | --- | --- |
-| ds41e (ours) | DeepSeek-V4.1 on HIP: VRAM / peer card / RAM arena / NVMe tiers, exact routing, Engram, vision, server | the base: tiers, kernels, server |
-| Strata (../Strata) | DeepSeek-V4.1 engine (`src/dsv41`), Qwen 3.5/3.6 (`src/qwen35`), many kernels, CUDA/HIP/SYCL/Metal | kernels and pack tools where they beat ours; Qwen's layer code as a reference |
-| project-maya (../project-maya) | GLM-5.3 on HIP (`src/core/glm_*`: fast path, prefill, DFlash, MTP, CPU lane), MiniMax M3.1, Qwen-3.8-Flash-Next (GGUF, text) | GLM's model and attention code (it already runs on this box, Maya-M / Maya-S24); its `TRUNK_KEEP` / `MISS_SKIP` only as opt-in lossy options |
-| Xolotl (github.com/Indras-Mirror/Xolotl, a Strata fork) | DeepSeek-V4.1, GLM-5.3, Qwen3.8-Flash-Next, Qwen3.8-27B; NVIDIA only | Qwen3.8-Flash-Next's model code and its numbers as a target; not its GLM defaults (`--route-bias 0.25` + soft prune: lossy) |
-| ds4 (github.com/antirez/ds4) | DeepSeek V4 Flash/PRO, GLM 5.2/5.3, Qwen3.8 Flash Next; Metal and CUDA, ROCm on Strix Halo; exact routing | a small, readable reference for each architecture (attention, router, MTP) to check ours against |
+| Almond (ours) | DeepSeek-V4.1 on HIP: VRAM / peer card / RAM arena / NVMe tiers, exact routing, Engram, vision, server | the base: tiers, kernels, server |
+| Almond (../Almond) | DeepSeek-V4.1 engine (`src/dsv41`), Qwen 3.5/3.6 (`src/qwen35`), many kernels, CUDA/HIP/SYCL/Metal | kernels and pack tools where they beat ours; Qwen's layer code as a reference |
+| the GLM engine (../the GLM engine's origin) | GLM-5.3 on HIP (`src/core/glm_*`: fast path, prefill, DFlash, MTP, CPU lane), MiniMax M3.1, Qwen-3.8-Flash-Next (GGUF, text) | GLM's model and attention code (it already runs on this box, an IQ2_S quant / an IQ2_XXS quant); its `TRUNK_KEEP` / `MISS_SKIP` only as opt-in lossy options |
+|  (github.com/Indras-Mirror/a Almond fork) | DeepSeek-V4.1, GLM-5.3, Qwen3.8-Flash-Next, Qwen3.8-27B; NVIDIA only | Qwen3.8-Flash-Next's model code and its numbers as a target; not its GLM defaults (`--route-bias 0.25` + soft prune: lossy) |
+| ds4 (github.com/upstream/ds4) | DeepSeek V4 Flash/PRO, GLM 5.2/5.3, Qwen3.8 Flash Next; Metal and CUDA, ROCm on Strix Halo; exact routing | a small, readable reference for each architecture (attention, router, MTP) to check ours against |
 | llama.cpp (`third_party/llama.cpp/ggml`) | ggml and its HIP kernels (MMQ, MMVQ, flash attention) | stays the kernel base; GGUF readers for the new architectures |
 
 Which piece is "the best" for a model is decided by a measurement on this box, not by the source: each candidate is
@@ -37,25 +37,25 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
 
 ## Phases
 
-1. **Rename** (done): Strata -> Almond, builds, server tests.
+1. **Rename** (done): Almond -> Almond, builds, server tests.
 2. **A model interface in the engine.** Split `src/ds41` into what every MoE model shares (the expert tiers:
    VRAM cache, peer card, RAM arena, NVMe reads; the pool; the sampler; the serve loop) and what is DeepSeek's (MLA /
    compressed attention, HC mixes, Engram, router). A `Model` with `load`, `prefill`, `decode_step`, `route(layer)`,
-   `expert_layout`; DeepSeek becomes the first implementation. Gate: the same tok/s as ds41e (3 alternated runs,
+   `expert_layout`; DeepSeek becomes the first implementation. Gate: the same tok/s as Almond (3 alternated runs,
    Promessi Sposi and 17K) and the same forced-token argmax.
    **Done (2026-10-29):** `src/ds41/moe_trunk.hpp` (`MoeTrunk`, `TrunkConfig`, `TrunkInfo`, `make_trunk`);
    `Ds41Dense` implements it; the driver and the conversation stores use only the interface.  Measured with
-   `local/bench-v41/ab-ds41e.sh` (ab-hip-spin.sh's chat flags, power-tune on, forced on the reference streams):
+   `local/bench-v41/ab-before.sh` (ab-hip-spin.sh's chat flags, power-tune on, forced on the reference streams):
 
    | arm | 17K, 128 tokens (tok/s) | Promessi Sposi, 300 tokens (tok/s) | argmax diffs (17K / Sposi) |
    | --- | --- | --- | --- |
-   | ds41e | 19.18 / 19.15 / 19.09 | 23.44 / 23.52 / 23.50 | 1 / 2 |
+   | Almond | 19.18 / 19.15 / 19.09 | 23.44 / 23.52 / 23.50 | 1 / 2 |
    | Almond | 19.02 / 19.00 / 19.12 | 23.14 / 23.03 / 23.49 | 1 / 0-2 |
 
    Within the run-to-run noise (Almond -0.5% / -1.1% on the means, its third round equal); the same diffs.
-3. **GLM-5.3-Flash.** Port project-maya's GLM layers onto the interface, experts through Almond's tiers. Read GGUF
-   (GSQ-RCO 3.0bit, 117.5 GB; Maya-M for comparison). Gate: KL / top-1 against project-maya on the same pack, then speed
-   against project-maya on this box.
+3. **GLM-5.3-Flash.** Port the GLM layers onto the interface, experts through Almond's tiers. Read GGUF
+   (GSQ-RCO 3.0bit, 117.5 GB; an IQ2_S quant for comparison). Gate: KL / top-1 against the GLM engine on the same pack, then speed
+   against the GLM engine on this box.
    **First version done (2026-10-29), exact, not yet fast:** `src/ds41/glm_trunk.cpp` (llama.cpp's glm5-next
    graph as a MoeTrunk), the experts through Ds41MoeTier (`Ds41FileBlobs` reads llama.cpp's stacked expert tensors;
    Q4_K down added to the grouped GPU kernel). Checked on GSQ-RCO 3.0bit (`pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF`,
@@ -92,12 +92,12 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    experts ~31 ms: 210 of the 336 picks a token; 11% VRAM hits), finish 2.6 ms. The trunk's GPU work is ~0.55 ms a
    layer (rocprofv3) against ~1.0-1.3 ms of wall time: the rest is the dispatch gap of ~80 kernels a layer; ggml's
    HIP graphs change nothing (`GGML_CUDA_DISABLE_GRAPHS=1`: 1.03 vs 1.05 ms a KDA layer). Missing: the layer-major batch, the next-layer prediction, cached graphs, conversation reuse, the serve
-   path's chat template, project-maya's packs (`glm5next`: their GGUF names one key prefix differently, read already).
-   **project-maya's engine, vendored (2026-10-29): the GLM path that runs.** The trunk above has a floor: ~45 ms a
-   token of attention and router alone, where project-maya's whole token on this box is ~28 ms (Maya-M, 82% VRAM
+   path's chat template, the packs (`glm5next`: their GGUF names one key prefix differently, read already).
+   **the engine, vendored (2026-10-29): the GLM path that runs.** The trunk above has a floor: ~45 ms a
+   token of attention and router alone, where the whole token on this box is ~28 ms (an IQ2_S quant, 82% VRAM
    hits, `NOTES-AMD-2x7900.md`). Its engine reads our GGUF as it is, through its pack (`local/glm-pack.sh`, 1 GB, a few
-   seconds), so it is vendored instead of ported piece by piece: `engines/maya` (project-maya v1.1.37, 7ee8f27, MIT,
-   with its pinned ggml), built by `./build.sh` into `build-maya-hip/maya`, served by Almond's server through
+   seconds), so it is vendored instead of ported piece by piece: `engines/glm` (the GLM engine v1.1.37, 7ee8f27, MIT,
+   with its pinned ggml), built by `./build.sh` into `build-maya-hip/glm`, served by Almond's server through
    `tools/glm/serve/serve_glm.py` (GLM's `<arg_key>` tool calls translated into the server's form, as serve_ds41.py
    does for DSML) and `./run.sh --model glm` (`local/glm-local.json`, 128K context). It splits the layers over the two
    cards (0-22 / 23-44), each card's experts in its own LRU pool (~4300 slots), a pinned RAM tier and a CPU lane.
@@ -107,17 +107,17 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    | --- | ---: | ---: | ---: |
    | llama.cpp | | | 7.1997 |
    | Almond trunk (above) | 10.3334 | 0.547 | 7.2401 |
-   | project-maya's engine | 10.3788 | 0.545 | 7.0003 |
+   | the engine | 10.3788 | 0.545 | 7.0003 |
 
    (KL from the Almond trunk 0.063 mean, 0.035 median; argmax agree 88.4%.) Decode, 128-token prompt, 130 tokens,
    greedy, a cold start: 7.77 -> 20.71 tok/s (VRAM hits 11% -> 66%, CPU experts 210 -> 97 a token). Through the
    server (`./run.sh --model glm`, power-tune on, thinking off, 700 tokens of code three times): 21.1, 25.1, 25.4
    tok/s; a short Italian answer 24.7 then 28.8 (85% hits). Tool calls (OpenAI, streamed, the tool's result back),
    Anthropic thinking: checked by hand. The Almond trunk (`--trunk glm` in ds41_generate) stays as the reference.
-   **MTP drafts (2026-10-29, on by default):** the GSQ-RCO GGUF has no draft block (nextn 0); project-maya's Maya-M
+   **MTP drafts (2026-10-29, on by default):** the GSQ-RCO GGUF has no draft block (nextn 0); an IQ2_S quant
    has one (blk.45, NextN), and the engine takes a block from another quant of the same model (`STRATA_GLM_MTP_GGUF`:
-   it reads the trunk's hidden state and the embedding). `local/glm-mtp-extract.py` copies blk.45 out of Maya-M's third
-   shard into `models/glm53-gsq-rco/GLM-5.3-Flash-Maya-M-NextN.gguf` (3.6 GB, 29 tensors), and `local/glm-local.json`
+   it reads the trunk's hidden state and the embedding). `local/glm-mtp-extract.py` copies blk.45 out of an IQ2_S quant's third
+   shard into `models/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf` (3.6 GB, 29 tensors), and `local/glm-local.json`
    names it. The second card drafts, the first verifies. Server, power-tune on, temperature 0, thinking off, 600
    tokens each, a fresh start each arm (three times the same code prompt, an Italian history prompt, an English
    explanation):
@@ -125,7 +125,7 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    | arm | code 1 | code 2 | code 3 | Italian | English | drafts accepted |
    | --- | ---: | ---: | ---: | ---: | ---: | ---: |
    | no drafts | 23.6 | 26.3 | 26.3 | 27.3 | 25.6 | |
-   | Maya-M's shard | 29.8 | 36.1 | 36.2 | 33.5 | 28.5 | 82.1% |
+   | an IQ2_S quant's shard | 29.8 | 36.1 | 36.2 | 33.5 | 28.5 | 82.1% |
    | the extracted block | 24.7 | 35.7 | 35.8 | 32.3 | 27.8 | 81.3% |
    | the same, default config | 29.9 | 36.4 | 35.5 | 33.4 | 29.8 | 82.6% |
 
@@ -135,20 +135,20 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    **The expert profile (2026-10-29, on by default):** the engine starts each card's VRAM pool from a profile (the
    most routed experts first, and each layer's share of slots) and saves what it routed into it on quit and every
    10 minutes; the pools stay LRU while it runs. `local/glm-local.json` passes `--expert-profile` and
-   `--expert-profile-save` on `local/glm-expert-profile.bin`, which run.sh seeds with project-maya's
-   (`engines/maya/data/expert-profile-glm.bin`). A fresh start each arm, six 600-token requests (temperature 0,
+   `--expert-profile-save` on `local/glm-expert-profile.bin`, which run.sh seeds with its shipped
+   (`engines/glm/data/expert-profile-glm.bin`). A fresh start each arm, six 600-token requests (temperature 0,
    thinking off, MTP on), tok/s:
 
    | arm | 1st | 2nd | 3rd | 4th | 5th | 6th | mean |
    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
    | no profile | 24.1 | 33.8 | 26.2 | 38.1 | 34.3 | 27.7 | 30.7 |
-   | project-maya's | 31.9 | 34.1 | 37.2 | 38.1 | 34.6 | 28.3 | 34.0 |
+   | the | 31.9 | 34.1 | 37.2 | 38.1 | 34.6 | 28.3 | 34.0 |
    | learning, first start | 32.1 | 33.8 | 38.0 | 37.9 | 33.4 | 27.5 | 33.8 |
    | no profile, another first prompt | 31.2 | 33.0 | 37.3 | 36.2 | 33.8 | 25.9 | 32.9 |
    | learned, the same | 30.8 | 33.9 | 38.8 | 38.2 | 35.2 | 28.1 | 34.2 |
 
    (One run an arm: +4-11% on the mean, most of it in the first answers after a start.)
-4. **Qwen3.8-Flash-Next**, the same way (Xolotl, Strata and ds4 as references).
+4. **Qwen3.8-Flash-Next**, the same way (Almond and ds4 as references).
 5. **The server stays in Python** (`serve/`, ~9,900 lines: OpenAI / Anthropic API, streaming, chat templates, tool
    calls, web app, MCP, the engine's process). A token's time is all in the engine; the server only moves text and
    JSON, so rewriting it would change no tok/s. Each new model adds its chat template and tool-call format here. If one
@@ -159,4 +159,4 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
 ## Open questions
 
 - Engine binary: one `almond` with `--model deepseek41|glm53|qwen38`, or one binary per model sharing libraries.
-- GLM pack: GSQ-RCO 3.0bit GGUF directly, or project-maya's pack format.
+- GLM pack: GSQ-RCO 3.0bit GGUF directly, or the pack format.

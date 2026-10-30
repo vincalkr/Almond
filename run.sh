@@ -39,19 +39,20 @@ fi
 echo "run.sh: ALMOND_HOME=$ALMOND_HOME, python $PY"
 
 # --gpu and --config are taken out of the arguments; the rest go to the server as they are.
-GPU=""; CFG=""; MODEL=ds41; ROUTER=""
+GPU=""; CFG=""; MODEL=ds41; ROUTER=""; CTX=${ALMOND_CTX:-}
 n=$#
 while [ "$n" -gt 0 ]; do
     a=$1; shift; n=$((n - 1))
     case $a in
-        --gpu|--config|--model)
+        --gpu|--config|--model|--ctx)
             [ "$n" -gt 0 ] || { echo "run.sh: $a needs a value" >&2; exit 1; }
-            case $a in --gpu) GPU=$1 ;; --config) CFG=$1 ;; *) MODEL=$1 ;; esac
+            case $a in --gpu) GPU=$1 ;; --config) CFG=$1 ;; --ctx) CTX=$1 ;; *) MODEL=$1 ;; esac
             shift; n=$((n - 1)); continue ;;
         --model=*) MODEL=${a#--model=}; continue ;;
         --router) ROUTER=1; continue ;;
         --gpu=*) GPU=${a#--gpu=}; continue ;;
         --config=*) CFG=${a#--config=}; continue ;;
+        --ctx=*) CTX=${a#--ctx=}; continue ;;
     esac
     set -- "$@" "$a"
 done
@@ -76,7 +77,7 @@ case $MODEL in
                 CFG="$R/local/glm-local-vision.json"
         fi
         [ -x "$R/build-hip-fused/almond-engine" ] || { echo "run.sh: build-hip-fused/almond-engine is not built (./build.sh builds it)" >&2; exit 1; }
-        # the expert profile the engine starts its VRAM pools from and saves what it learns into: project-maya's
+        # the expert profile the engine starts its VRAM pools from and saves what it learns into: its shipped
         # until this machine has its own
         [ -s "$R/local/glm-expert-profile.bin" ] || cp "$R/tools/glm/data/expert-profile-glm.bin" "$R/local/glm-expert-profile.bin" ;;
     *) echo "run.sh: --model takes ds41 or glm (got '$MODEL')" >&2; exit 1 ;;
@@ -99,7 +100,23 @@ if [ -z "$CFG" ]; then
         echo "run.sh: no vision encoder + vision configuration for $base: text only"
     fi
 fi
-echo "run.sh: config $CFG, cards ${GPU:-as the config says}"
+# --ctx N (or ALMOND_CTX, which the router's models inherit): the context window, in a copy of the configuration
+# (DeepSeek's --ctx, GLM's --max-context); the configuration itself is not changed
+if [ -n "$CTX" ]; then
+    case $CTX in *[!0-9]*|"") echo "run.sh: --ctx takes a number of tokens (got '$CTX')" >&2; exit 1 ;; esac
+    TMPCFG="$R/local/.run-ctx-$(basename "$CFG")"
+    "$PY" - "$CFG" "$TMPCFG" "$CTX" <<'EOF'
+import json, sys
+src, dst, ctx = sys.argv[1:]
+c = json.load(open(src)); a = c["args"]
+flag = "--max-context" if "--glm-pack" in a else "--ctx"
+if flag in a: a[a.index(flag) + 1] = ctx
+else: a += [flag, ctx]
+open(dst, "w").write(json.dumps(c, indent=2) + "\n")
+EOF
+    CFG=$TMPCFG
+fi
+echo "run.sh: config $CFG, cards ${GPU:-as the config says}${CTX:+, context $CTX}"
 set -- --config "$CFG" ${GPU:+--gpu "$GPU"} "$@"
 
 # The model files the configuration names (-m, --engram, its tokenizer) must be there.
@@ -140,7 +157,7 @@ fi
 # local/power-tune.sh for as long as the server runs (+11% short answers, +21% at ~25K context, measured 2026-10-21):
 # only when local/install-power-tune.sh has been run once with sudo (a root-owned copy and a sudo rule for it alone);
 # otherwise nothing changes.  DS41_POWER_TUNE=0 leaves the machine's settings alone.
-PT=/usr/local/sbin/ds41e-power-tune
+PT=/usr/local/sbin/almond-power-tune
 tuned=0
 if [ "${DS41_POWER_TUNE:-1}" != 0 ] && [ -x "$PT" ] && sudo -n "$PT" on >/dev/null 2>&1; then
     tuned=1
@@ -162,7 +179,7 @@ rc=0
 "$PY" "$SHIM" \
     "--engine" "almond" \
     "--port" "8150" "$@" || rc=$?
-# Another ds41e server may have started meanwhile (a restart, an A/B that stops one and starts the next): it switched
+# Another Almond server may have started meanwhile (a restart, an A/B that stops one and starts the next): it switched
 # power-tune on and still needs it, so it stays on until the last server ends.
 if pgrep -f "[t]ools/(v41/serve/serve_ds41|glm/serve/serve_glm).py" >/dev/null 2>&1; then
     echo "run.sh: another Almond server is running: power-tune stays on"

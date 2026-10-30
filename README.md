@@ -3,7 +3,7 @@
 <p align="center"><b>DeepSeek-V4.1-Flash-1017 (the published GSQ-RCO IQ2_XXS pack) with exact routing on one or two RX 7900 XTX, its experts across VRAM, pinned RAM and NVMe</b><br>
 Linux - ROCm/HIP - MIT</p>
 
-A C++/HIP inference engine for large MoE models, born from ds41e (today DeepSeek-V4.1-Flash; GLM-5.3-Flash and Qwen next: docs/ALMOND_PLAN.md), and an OpenAI- and Anthropic-compatible server with a web chat
+A C++/HIP inference engine for large MoE models, born from Almond (today DeepSeek-V4.1-Flash; GLM-5.3-Flash and Qwen next: docs/ALMOND_PLAN.md), and an OpenAI- and Anthropic-compatible server with a web chat
 and monitor. The model is DeepSeek-V4.1-Flash-1017 as the [ISTA-DASLab GSQ-RCO pack](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)
 (IQ2_XXS/IQ2_XS/IQ1_M experts, four shards, 138.2 GB), read through the geometry overlay `DS41_META` because its GGUF
 carries llama.cpp metadata instead of this engine's `deepseek41.*` keys; every expert the model routes to is computed (no route bias),
@@ -73,7 +73,7 @@ local/fetch-rco-1017.sh                                               # everythi
 ## Models, the router and the chat
 
 Almond serves DeepSeek-V4.1-Flash (`./run.sh`, the default) and GLM-5.3-Flash (`./run.sh --model glm`, on
-its own engine in `src/glm` (from project-maya, MIT; `build-hip-fused/almond-glm`); `local/glm-pack.sh` and `local/glm-mtp-extract.py` prepare its files, see
+its own engine in `src/glm` (MIT: src/glm/LICENSE; `build-hip-fused/almond-glm`); `local/glm-pack.sh` and `local/glm-mtp-extract.py` prepare its files, see
 docs/ALMOND_PLAN.md). `./run.sh --router` puts every model of `local/router.json` behind one address, as llama-server's
 router mode does: `GET /v1/models` lists them with their status (loaded / loading / unloaded), context and thinking
 levels (`reasoning_levels`, `reasoning_default`); `POST /models/load` / `/models/unload {"model": NAME}`; a request that
@@ -81,7 +81,7 @@ names another model loads it, stopping the one running once its requests are don
 GLM loaded in 32 s, DeepSeek in 38 s from the file cache). The others go to the loaded model; `--no-autoload` refuses
 instead.
 
-`./almond` is the chat in the terminal, in the manner of antirez's ds4 CLI (it starts the router when nothing answers):
+`./almond` is the chat in the terminal, in the manner of a terminal chat (it starts the router when nothing answers):
 
 ```sh
 ./almond                                   # a conversation; /help lists the commands

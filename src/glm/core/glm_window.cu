@@ -580,7 +580,7 @@ bool Glm5Model::fast_moe_window(int il, int t0, int T, int part, int gid, std::s
     // word; the scratch slots once each), then each distinct expert once for all of them (gf::moe_win_experts), then
     // the CPU lane's answers - which ran while the GPU computed.  ALMOND_GLM_WIN_BATCH=0: token by token (A/B).  Off by
     // default on AMD: the batched experts' kernels are the generic ones, the token path's are RDNA3's (the Halo APUs'
-    // expert kernels) - a Radeon 8065S's MTP decode (Maya-S, 256-token answers) ran 26.7 / 25.7 tok/s token by token,
+    // expert kernels) - a Radeon 8065S's MTP decode (an IQ2_XXS quant, 256-token answers) ran 26.7 / 25.7 tok/s token by token,
     // 22.7 / 22.3 batched (and 17.2 / 16.5 batched and staggered, below), the same tokens
     static const bool batch_env = glmfast::off_by_default_on_amd("ALMOND_GLM_WIN_BATCH");
     static const bool prof_b = getenv("ALMOND_GLM_WIN_PROF") != nullptr;

@@ -78,7 +78,7 @@ struct Q3KBlock {
     uint8_t scales[12];
     half d;
 };
-#include "fork/fork_mmvq_q2k_block.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_mmvq_q2k_block.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 struct IQ4XSBlock {
     half d;
     uint16_t scales_h;
@@ -386,7 +386,7 @@ __device__ __forceinline__ float q3_q8_dot_impl(int vl, int vh, const int* __res
     return d3 * sumf;
 }
 
-#include "fork/fork_mmvq_q2k_dot.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_mmvq_q2k_dot.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 __device__ __forceinline__ float q3_q8_dot(const Q3KBlock* __restrict__ w,
                                           const Q81Block* __restrict__ x, int iqs) {
     const int bq8_offset = 4 * (iqs / 8);
@@ -943,7 +943,7 @@ struct Q20Traits {
         return r.d2 * d8 * sumi;
     }
 };
-#include "fork/fork_mmvq_q2k_traits.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_mmvq_q2k_traits.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 struct Q3KTraits {
     using Block = Q3KBlock;
     static constexpr int DIV = 256, T = 16, KBY = 8, BPI = WARPS * WARP / 16;
@@ -2181,7 +2181,7 @@ void native_q2_0_f32(const void* weights, const float* x, void* scratch_q8_1,
     native_q2_0_mmvq(weights, scratch_q8_1, y, n_in, n_out, ncols, stream);
 }
 
-#include "fork/fork_mmvq_q2k_launch.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_mmvq_q2k_launch.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream) {
     validate_shape(n_in, ncols, 256);

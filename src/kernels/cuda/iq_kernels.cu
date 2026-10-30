@@ -37,7 +37,7 @@ __device__ __forceinline__ int get_int_b2(const void* x, const int& i32) {
     return x32;
 }
 __device__ __forceinline__ int get_int_b4(const void* x, const int& i32) { return ((const int*) x)[i32]; }
-#include "fork/fork_helpers.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_helpers.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 __device__ __forceinline__ uint32_t unpack_ksigns(const uint8_t v) {
     const uint32_t p = __popc(v) & 1;
     const uint32_t s = v ^ p << 7;
@@ -310,10 +310,10 @@ __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(const void* __restrict__ vb
 
 // ---------------------------------------------------------------- K-quant experts
 // Q4_K / Q5_K gate/up and Q5_1 / Q8_0 down: llama.cpp's vec_dot_*_q8_1 (vecdotq.cuh, VDR 2 each), transcribed; the
-// Q5_1 min term is the one departure (below).  Via eddoursul/Strata 8029fa9 (iq_dot.cuh) and #255 (Q8_0,
+// Q5_1 min term is the one departure (below).  Via eddoursul/Almond 8029fa9 (iq_dot.cuh) and #255 (Q8_0,
 // gopinath87607), which agree with llama.cpp and with each other.
 constexpr int VDR_Q4_K = 2, VDR_Q5_K = 2, VDR_Q5_1 = 2, VDR_Q5_0 = 2, VDR_Q4_1 = 2, VDR_Q4_0 = 2, VDR_Q8_0 = 2, VDR_Q6_K = 1;
-#include "fork/fork_vecdot.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_vecdot.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 
 __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(const int* __restrict__ v, const int* __restrict__ u,
                                                              const uint8_t* __restrict__ sc, const uint8_t* __restrict__ m,
@@ -421,7 +421,7 @@ __device__ __forceinline__ float vec_dot_q5_K_q8_1(const void* __restrict__ vbq,
 // Q5_1: llama.cpp's integer chain, but the min term multiplies the sum of the QUANTIZED activations (dp4a with
 // 0x01010101, times d8) instead of the q8_1 block's `ds.y`, which our quantizer (like llama.cpp's) fills with the sum
 // of the ORIGINAL activations.  That is ggml-cpu's convention (its q8_1 `s` is d * sum(q)) and the one the K-quant
-// mins above use; the scaled and the min term then see the same activation (eddoursul/Strata measured 1.1-1.2%
+// mins above use; the scaled and the min term then see the same activation (eddoursul/Almond measured 1.1-1.2%
 // against 1.9% relative error per expert).  Result: sumi * (d5 * d8) + sumu * (m5 * d8).
 // Q5_0: llama.cpp's integer chain verbatim (vecdotq.cuh vec_dot_q5_0_q8_1_impl) -- symmetric (one delta, no
 // learned min), so unlike Q5_1 there is no min-term rounding choice to make: the constant -16 per-weight offset
@@ -619,7 +619,7 @@ template<> struct Fmt<8> { static constexpr int qk = 32, ipb = QI8_0 / VDR_Q8_0,
 // native_expert_supported3 refuses the pack at tier init.
 #define ALMOND_D_FMTS(X) X(16) X(17) X(20) X(23) X(29) X(42) X(12) X(7) X(6) X(2) X(3) X(8)
 #define ALMOND_MMVQ_FMTS(X) X(16) X(17) X(18) X(20) X(21) X(22) X(23) X(29) X(42) X(12) X(13) X(7) X(6) X(2) X(3) X(8)
-#include "fork/fork_fmt.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_fmt.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 
 __device__ __forceinline__ float warp_sum(float v) {
 #pragma unroll
@@ -1239,7 +1239,7 @@ __global__ void __launch_bounds__(256) native_gu_kernel(const unsigned long long
     }
 }
 
-#include "fork/fork_gu_mixed.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_gu_mixed.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 // native_gu_kernel with the group's entries taken GRP_NC at a time, each weight part decoded once per pass.
 // A group has at most one entry per token of the window (kVerifyMaxT = 8; setup writes --spec 4, and a split window
 // has halves of <= 4), so 4 takes such windows in one pass; 8 would take ~64-80 registers against ~48 (ptxas -v).
@@ -1868,7 +1868,7 @@ __device__ void dq_q8_0(const void* vx, int64_t ibs, dst_t* yy, int tid) {
     for (int j = 0; j < 8; ++j) y[j] = cvt<dst_t>((float) x[ib].qs[8 * il + j] * d);
 }
 
-#include "fork/fork_dq.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_dq.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 // BF16 (the token embedding as the checkpoint ships it, tools/embd_bf16_pack.py): 8 values per thread.
 template<typename dst_t>
 __device__ void dq_bf16(const void* vx, int64_t ibs, dst_t* yy, int tid) {
@@ -2360,7 +2360,7 @@ void s26_launch_l(const NativeExpertLayout& L, int64_t cap_groups, cudaStream_t 
     const dim3 gd((unsigned) (L.n_embd / (8 * RD)), (unsigned) cap_groups);
     s26_down_l_kernel<LX, RD, SL, TS, BD><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
 }
-#include "fork/fork_prom.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_prom.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 // ---------------------------------------------------------------- stream B: UD-Q4_K_XL grouped decode experts
 // ALMOND_EXPERT_V2K=1: s26_gu_l_kernel / s26_down_l_kernel's structure (4 interleaved rows per warp, the chunk's q8_1
 // activation rows in LDS, SwiGLU + q8_1 fused, optionally ALMOND_TSUM's transposed butterfly) for Q4_K / Q5_K gate/up
@@ -2831,7 +2831,7 @@ NativeExpertLayout native_expert_layout(int gu_type, int d_type, int64_t n_embd,
     return L;
 }
 
-#include "fork/fork_layout.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_layout.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 size_t native_expert_scratch_bytes(int64_t cap, int64_t n_ff) {
     const size_t f = (size_t) cap * (size_t) n_ff * sizeof(float);
     return 3 * ((f + 255) & ~(size_t) 255) + (((size_t) cap * (size_t) (n_ff / 32) * sizeof(block_q8_1) + 255) & ~(size_t) 255);
@@ -3462,7 +3462,7 @@ int exp_mode() {
 #endif
 }
 #endif
-// Strata-DS4 fork (docs/UPSTREAM_SYNC.md): ALMOND_EXP_MODE_T<type>=<mode> overrides exp_mode() for one weight
+// Almond fork (docs/UPSTREAM_SYNC.md): ALMOND_EXP_MODE_T<type>=<mode> overrides exp_mode() for one weight
 // type's gate/up and down launches (e.g. ALMOND_EXP_MODE_T143=4: PTQ1_0 four rows per warp).  Unset = em0.
 #if ALMOND_EXP_LAYOUTS
 int exp_mode_type(int t, int em0) {
@@ -3682,5 +3682,5 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     check("native_expert_grouped/down");
 }
 
-#include "fork/fork_weighted_sum.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
+#include "fork/fork_weighted_sum.cuh"   // Almond fork code (docs/UPSTREAM_SYNC.md)
 }  // namespace almond::kernels

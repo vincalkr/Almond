@@ -12,7 +12,7 @@
 // The bytes are the grid's own (build_codes checks every entry at first use) and the rest is iq_avx512.cpp's row_dot:
 // exact integer sums, folded to ggml's 8 lanes, then ggml's float steps in ggml's order - so every result is
 // bit-identical to ggml-cpu's dot (native_expert.cpp checks this against ggml before it uses the rows). On a Ryzen 7
-// 9700X (Zen 5), Maya-S24's IQ2_XXS gate/up rows: ~1.4x ggml's dot at 8 threads (a whole expert with its IQ2_S down
+// 9700X (Zen 5), an IQ2_XXS quant's IQ2_XXS gate/up rows: ~1.4x ggml's dot at 8 threads (a whole expert with its IQ2_S down
 // rows: ~1.26x).
 #include "almond/glm/kernels/cpu/iq_avx512_one.hpp"
 #include "almond/glm/kernels/cpu/expert_layout.hpp"

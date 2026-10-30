@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for serve_ds41.py (CPU, seconds).  Run under Almond's venv:
-  /home/mal/AI/Strata/.venv/bin/python tools/v41/serve/test_serve_ds41.py [TOKENIZER_DIR]
+  /home/mal/AI/Almond/.venv/bin/python tools/v41/serve/test_serve_ds41.py [TOKENIZER_DIR]
 TOKENIZER_DIR (export_tokenizer.py's output) enables the tokenizer and the HTTP tests (server --engine mock)."""
 import json
 import os
@@ -184,7 +184,7 @@ def post(port, path, body):
 def t_http(tok_dir):
     port = free_port()
     script = "need the file" + E.thinking_end_token + dsml([("read_file", {"path": "a.txt", "lines": 3})])
-    # the server subprocess runs under the interpreter running this test (the author's ~/AI/Strata/.venv path is
+    # the server subprocess runs under the interpreter running this test (the author's ~/AI/Almond/.venv path is
     # not where everyone's venv is); ALMOND_TEST_PY overrides it
     py = os.environ.get("ALMOND_TEST_PY") or sys.executable
     proc = subprocess.Popen([py, str(HERE / "serve_ds41.py"), "--engine", "mock", "--port", str(port),

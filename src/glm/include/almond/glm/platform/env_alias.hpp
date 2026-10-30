@@ -1,4 +1,4 @@
-// include/almond/glm/platform/env_alias.hpp - Maya's settings by the names its docs give them: every ALMOND_X in the
+// include/almond/glm/platform/env_alias.hpp - the GLM engine's settings by the names its docs give them: every ALMOND_X in the
 // environment also sets the older ALMOND_X, the name the code still reads (over an older value: ALMOND_X counts) - so a
 // setting works under either name.  Each program calls it first thing in main().
 #pragma once

@@ -343,7 +343,7 @@ struct Options {
 
 void usage() {
     std::fprintf(stderr,
-                 "maya generate --pack DIR --tokens \"1,2,3\" [options]\n"
+                 "glm generate --pack DIR --tokens \"1,2,3\" [options]\n"
                  "\n"
                  "  --pack DIR           the pack directory (default pack/full)\n"
                  "  --glm-pack DIR       a GLM-5.3-Flash pack (M3.1): the verified Glm5Model runner behind the\n"
@@ -581,7 +581,7 @@ void drive_pool(void* user, const float* x_f, const int32_t* ids, const float* w
         // anything keyed on the layer index, which is exactly what a cache profile is, would have been wrong.
         const int32_t layer_idx = (int32_t) (t->d.layers - 1);
         if (layer_idx < 0 || layer_idx >= 48) {
-            std::fprintf(stderr, "maya generate: the routing trace saw layer %d, outside 0..47\n", layer_idx);
+            std::fprintf(stderr, "glm generate: the routing trace saw layer %d, outside 0..47\n", layer_idx);
             return;
         }
         const int32_t rec[2] = {layer_idx, (int32_t) k};
@@ -709,7 +709,7 @@ MemSample mem_sample() {
 
 void stall_report(std::FILE* f, uint64_t layers_during) {
     almond::glm::core::Progress& p = almond::glm::core::progress();
-    std::fprintf(f, "maya serve: stall report (engine %s): stage \"%s %lld\" for %lld s; %llu layers served since the "
+    std::fprintf(f, "glm serve: stall report (engine %s): stage \"%s %lld\" for %lld s; %llu layers served since the "
                     "last finished step (0 = stopped, more = slow)\n", ALMOND_VERSION, p.where.load(),
                  (long long) p.detail.load(), (long long) ((almond::glm::core::progress_now_ms() - p.since_ms.load()) / 1000),
                  (unsigned long long) layers_during);
@@ -771,7 +771,7 @@ void start_serve_watchdog(int default_s) {
             const uint64_t b = p.beats.load();
             if (!p.busy.load() || b != last) { last = b; ticks_at = p.ticks.load(); since = now; continue; }
             if (now - since < std::chrono::seconds(limit)) continue;
-            std::fprintf(stderr, "maya serve: no progress for %d s during a request (%s %lld) - stopping "
+            std::fprintf(stderr, "glm serve: no progress for %d s during a request (%s %lld) - stopping "
                                  "the engine so the server starts it again (issue #29)\n",
                          limit, p.where.load(), (long long) p.detail.load());
             stall_report(stderr, p.ticks.load() - ticks_at);
@@ -789,7 +789,7 @@ void mem_mark(const char* where) {
     if (!on) return;
     size_t free_b = 0, total_b = 0;
     cudaMemGetInfo(&free_b, &total_b);
-    std::fprintf(stderr, "maya trace: %lld MiB free after %s\n", (long long) (free_b >> 20), where);
+    std::fprintf(stderr, "glm trace: %lld MiB free after %s\n", (long long) (free_b >> 20), where);
 }
 
 int argmax(const std::vector<float>& v) {
@@ -896,7 +896,7 @@ bool load_control_vectors(const Options& o, const almond::glm::core::ModelGeomet
             }
             const almond::glm::MetaValue* hint = f.get("controlvector.model_hint");
             if (hint != nullptr && hint->s != "qwen4exp")
-                std::fprintf(stderr, "maya generate: %s was made for '%s', not qwen4exp\n", path.c_str(), hint->s.c_str());
+                std::fprintf(stderr, "glm generate: %s was made for '%s', not qwen4exp\n", path.c_str(), hint->s.c_str());
             int found = 0;
             for (const almond::glm::TensorInfo& t : f.tensors()) {
                 if (t.name.rfind("direction.", 0) != 0) continue;
@@ -948,7 +948,7 @@ bool load_control_vectors(const Options& o, const almond::glm::core::ModelGeomet
     summary = std::string(o.cvec_mode == 0 ? "project" : "add") + ":" + std::to_string(first) + "-" + std::to_string(last) +
               (single >= 0 ? ":single" + std::to_string(single) : "");
     // the line llama.cpp's patched build prints, so a log shows the same thing
-    std::fprintf(stderr, "maya generate: control vector mode = %s, dir = %s, layers %d..%d (%d steered)\n",
+    std::fprintf(stderr, "glm generate: control vector mode = %s, dir = %s, layers %d..%d (%d steered)\n",
                  o.cvec_mode == 0 ? "project" : "add", single >= 0 ? "single" : "per-layer", first, last, steered);
     return true;
 }
@@ -1060,7 +1060,7 @@ static int glm_pack_generate(const Options& o) {
 #endif
     almond::glm::core::Glm5Model model;
     std::string err;
-    // the prompt chunk, set in the config's args like Strata's: --prefill auto | N (a chunk of N tokens) | 0
+    // the prompt chunk, set in the config's args like Almond's: --prefill auto | N (a chunk of N tokens) | 0
     // (the engine reads it as ALMOND_GLM_PREFILL; without either, auto)
     if (!o.prefill_arg.empty()) set_env("ALMOND_GLM_PREFILL", o.prefill_arg.c_str());
     // the DFlash2 drafter (--dflash, else ALMOND_GLM_DFLASH): loaded with the model, on the device of its head
@@ -1068,16 +1068,16 @@ static int glm_pack_generate(const Options& o) {
     // --spec-follow / --spec-follow-save (else ALMOND_GLM_SPEC_FOLLOW / _SAVE): read below, once the vocabulary is known
     if (!o.spec_follow.empty()) set_env("ALMOND_GLM_SPEC_FOLLOW", o.spec_follow.c_str());
     if (!o.spec_follow_save.empty()) set_env("ALMOND_GLM_SPEC_FOLLOW_SAVE", o.spec_follow_save.c_str());
-    // the expert profile (Strata's profile.bin: setup passes data/expert-profile-glm.bin) and the routing trace
+    // the expert profile (the profile.bin: setup passes data/expert-profile-glm.bin) and the routing trace
     // (--dump-routing: tools/make_profile.py's input), before the load reads the one and the first prompt the other
     if (!o.expert_profile.empty()) model.set_expert_profile(o.expert_profile);
     if (!o.dump_routing.empty() && !almond::glm::core::Glm5Model::set_routing_dump(o.dump_routing, err)) {
-        std::fprintf(stderr, "maya generate: --dump-routing: %s\n", err.c_str());
+        std::fprintf(stderr, "glm generate: --dump-routing: %s\n", err.c_str());
         return 1;
     }
     // the layer split across the visible GPUs: ALMOND_GLM_SPLIT, else --layer-split (auto | K1,K2,..)
     if (!model.load_pack_env(o.glm_pack, o.max_context, err, o.layer_split)) {
-        std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+        std::fprintf(stderr, "glm generate: %s\n", err.c_str());
         return 1;
     }
     const int64_t n_vocab = model.geometry().n_vocab;
@@ -1113,7 +1113,7 @@ static int glm_pack_generate(const Options& o) {
         if (const auto cc = model.commit_capped(); cc.first > 0) {
             std::printf("NOTE experts: %.0f GB stay off the GPU - Windows' page file is too small to hold them there; "
                         "a page file of %zu GB keeps them on the GPU (System > About > Advanced system settings > "
-                        "Performance > Advanced > Virtual memory), then restart Maya\n", (double) cc.first / 1e9, cc.second);
+                        "Performance > Advanced > Virtual memory), then restart the GLM engine\n", (double) cc.first / 1e9, cc.second);
             std::printf("INFO gpu_commit_capped_gb=%.0f pagefile_hint_gb=%zu\n", std::ceil((double) cc.first / 1e9),
                         cc.second);
         }
@@ -1138,7 +1138,7 @@ static int glm_pack_generate(const Options& o) {
         const int64_t n = c == std::string::npos ? 64 : std::atoll(spec.c_str() + c + 1);
         const auto& t = o.tokens;
         if (n <= 0 || (int64_t) t.size() <= n) {
-            std::fprintf(stderr, "maya generate: ALMOND_GLM_KL_DUMP needs more than %lld tokens\n", (long long) n);
+            std::fprintf(stderr, "glm generate: ALMOND_GLM_KL_DUMP needs more than %lld tokens\n", (long long) n);
             return 2;
         }
         model.set_host_logits(true);
@@ -1147,24 +1147,24 @@ static int glm_pack_generate(const Options& o) {
         const std::vector<int32_t> head(t.begin(), t.end() - n);
         const bool pok = model.fast() && model.prefill(head, err, (int32_t) t[t.size() - (size_t) n]);
         if (!pok && (!err.empty() || !model.forward(head, lg, err))) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         std::FILE* f = std::fopen(path.c_str(), "wb");
         if (f == nullptr) {
-            std::fprintf(stderr, "maya generate: cannot write %s\n", path.c_str());
+            std::fprintf(stderr, "glm generate: cannot write %s\n", path.c_str());
             return 1;
         }
         for (size_t i = t.size() - (size_t) n; i < t.size(); ++i) {
             if (!model.forward({(int32_t) t[i]}, lg, err) || (int64_t) lg.size() < n_vocab) {
-                std::fprintf(stderr, "maya generate: %s\n", err.empty() ? "no logits" : err.c_str());
+                std::fprintf(stderr, "glm generate: %s\n", err.empty() ? "no logits" : err.c_str());
                 std::fclose(f);
                 return 1;
             }
             std::fwrite(lg.data(), sizeof(float), (size_t) n_vocab, f);
         }
         std::fclose(f);
-        std::fprintf(stderr, "maya generate: %lld positions' logits in %s\n", (long long) n, path.c_str());
+        std::fprintf(stderr, "glm generate: %lld positions' logits in %s\n", (long long) n, path.c_str());
         return 0;
     }
 
@@ -2049,7 +2049,7 @@ static int glm_pack_generate(const Options& o) {
         for (const int64_t t : v)
             if (e.empty() && t >= n_vocab) e = "token " + std::to_string(t) + " is past the vocabulary";
         if (!e.empty()) {
-            std::fprintf(stderr, "maya generate: ALMOND_GLM_SPEC_FOLLOW %s: %s\n", fp, e.c_str());
+            std::fprintf(stderr, "glm generate: ALMOND_GLM_SPEC_FOLLOW %s: %s\n", fp, e.c_str());
             return 2;
         }
         follow_ids.assign(v.begin(), v.end());
@@ -3754,7 +3754,7 @@ static int glm_pack_generate(const Options& o) {
 
     if (!o.serve) {
         if (o.tokens.empty()) {
-            std::fprintf(stderr, "maya generate: --tokens is required (this build has no tokenizer; see the "
+            std::fprintf(stderr, "glm generate: --tokens is required (this build has no tokenizer; see the "
                                  "header of src/program/generate.cpp)\n");
             return 2;
         }
@@ -3777,7 +3777,7 @@ static int glm_pack_generate(const Options& o) {
             int32_t tk = 0;
             if ((dump && dump[0] && !df) || (ref && ref[0] && !rf) || (tkf && tkf[0] && !tf) ||
                 (tf && (std::fread(&tk, sizeof tk, 1, tf) != 1 || tk <= 0 || tk > n_vocab))) {
-                std::fprintf(stderr, "maya generate: cannot open the score dump/reference\n");
+                std::fprintf(stderr, "glm generate: cannot open the score dump/reference\n");
                 return 1;
             }
             std::vector<int32_t> tid((size_t) std::max(tk, 1));
@@ -3926,20 +3926,20 @@ static int glm_pack_generate(const Options& o) {
         if (fm < 0) continue;
         const int64_t ok_mib = i == 0 ? 256 : 512;
         if (fm >= ok_mib) {
-            std::fprintf(stderr, "maya serve: CUDA%d: %lld MiB of VRAM free with everything loaded\n", pv.dev, (long long) fm);
+            std::fprintf(stderr, "glm serve: CUDA%d: %lld MiB of VRAM free with everything loaded\n", pv.dev, (long long) fm);
         } else if (pv.adapted) {
-            std::fprintf(stderr, "maya serve: WARNING: CUDA%d: %lld MiB of VRAM free with everything loaded - this card "
+            std::fprintf(stderr, "glm serve: WARNING: CUDA%d: %lld MiB of VRAM free with everything loaded - this card "
                                  "only just fits the model (the VRAM reserve was lowered to %d MiB so the expert pool "
                                  "fits): requests may stall. Close other programs that use the GPU, or lower "
                                  "--max-context\n", pv.dev, (long long) fm, pv.reserve_mib);
         } else {
-            std::fprintf(stderr, "maya serve: CUDA%d: %lld MiB of VRAM free with everything loaded - LOW: requests may "
+            std::fprintf(stderr, "glm serve: CUDA%d: %lld MiB of VRAM free with everything loaded - LOW: requests may "
                                  "stall; add %s %lld to the config's args (or lower --max-context)\n", pv.dev,
                          (long long) fm, i == 0 ? "--vram-reserve-mib" : "--vram-reserve-later-mib",
                          (long long) (pv.reserve_mib + (i == 0 ? 512 : 768) - fm));
             // a number of the user's own (--expert-cache N) is not checked against the VRAM once written (auto is)
             if (pv.fixed > 0)
-                std::fprintf(stderr, "maya serve: the expert pool was set with --expert-cache %lld: a smaller one - or "
+                std::fprintf(stderr, "glm serve: the expert pool was set with --expert-cache %lld: a smaller one - or "
                                      "--expert-cache auto, which checks the free VRAM once the pool is written - leaves "
                                      "room\n", (long long) pv.fixed);
         }
@@ -3950,7 +3950,7 @@ static int glm_pack_generate(const Options& o) {
     // "pause": PAUSE keeps the written state; "multi=<n>": n conversations at once (GEN rid=<id>, see gen_admit)
     if (multi) std::printf("READY %lld stop pause multi=%d\n", (long long) o.max_context, model.seq_count());
     else std::printf("READY %lld stop pause\n", (long long) o.max_context);
-    std::fprintf(stderr, "maya generate: glm5-next serve (M3.1): GEN <max_new> [keys] <ids>, GENI <max_new> [keys] "
+    std::fprintf(stderr, "glm generate: glm5-next serve (M3.1): GEN <max_new> [keys] <ids>, GENI <max_new> [keys] "
                          "<embeddings> <ids>; QUIT to end\n");
     // GENI: the embeddings file is one or more almond-vision records (int32 'SVE1', n, nx, ny, n_embd, then n x n_embd
     // floats) in prompt order; their rows stand in for the prompt's <|image|> tokens, in order (GLM-5.3's image
@@ -3964,9 +3964,9 @@ static int glm_pack_generate(const Options& o) {
         if (o.expert_profile_save.empty() || !model.fast()) return;
         std::string e;
         if (model.save_expert_profile(o.expert_profile_save, e))
-            std::fprintf(stderr, "maya serve: expert profile saved to %s (%s)\n", o.expert_profile_save.c_str(), why);
+            std::fprintf(stderr, "glm serve: expert profile saved to %s (%s)\n", o.expert_profile_save.c_str(), why);
         else
-            std::fprintf(stderr, "maya serve: the expert profile was not saved: %s\n", e.c_str());
+            std::fprintf(stderr, "glm serve: the expert profile was not saved: %s\n", e.c_str());
         profile_saved_at = Clock::now();
     };
     std::string line;
@@ -4306,7 +4306,7 @@ int glm_main(int argc, char** argv) {
     }
 #if defined(_WIN32)
     // Windows' power throttling (EcoQoS) runs a process whose windows are all in the background on a hybrid CPU's
-    // efficiency cores at low clocks, and the CPU lane crawled there - an i7-13700: decode 9-12 tok/s with Maya's
+    // efficiency cores at low clocks, and the CPU lane crawled there - an i7-13700: decode 9-12 tok/s with the GLM engine's
     // window focused, ~2 tok/s behind other windows, the same either way once `powercfg /powerthrottling disable`
     // named the engine (#114).  The engine opts out itself.  Resolved at runtime as PrefetchVirtualMemory is
     // (expert_source.cpp): the struct is PROCESS_POWER_THROTTLING_STATE (version 1; EXECUTION_SPEED managed, and off)
@@ -4534,7 +4534,7 @@ int glm_main(int argc, char** argv) {
         else if (a == "--experts-from-gguf") {
             o.experts_from_gguf = next("--experts-from-gguf");
             if (o.experts_from_gguf != "auto" && o.experts_from_gguf != "on" && o.experts_from_gguf != "off") {
-                std::fprintf(stderr, "maya generate: --experts-from-gguf takes auto, on or off\n");
+                std::fprintf(stderr, "glm generate: --experts-from-gguf takes auto, on or off\n");
                 return 2;
             }
         }
@@ -4569,7 +4569,7 @@ int glm_main(int argc, char** argv) {
         } else if (o.kv_streaming == "off") {
             o.kv_resident = 0;
         } else {
-            std::fprintf(stderr, "maya generate: --kv-streaming takes on or off (not %s)\n", o.kv_streaming.c_str());
+            std::fprintf(stderr, "glm generate: --kv-streaming takes on or off (not %s)\n", o.kv_streaming.c_str());
             return 2;
         }
     }
@@ -4578,7 +4578,7 @@ int glm_main(int argc, char** argv) {
         if (o.kv == "int8" && std::getenv("ALMOND_GLM_KV_INT8") == nullptr) set_env("ALMOND_GLM_KV_INT8", "1");
         // --kv-resident N: KV streaming of the DSA latent cache (Glm5Model::kv_resident_cells, read at load)
         if (o.kv_resident < 0) {
-            std::fprintf(stderr, "maya generate: --kv-resident must be 0 or more\n");
+            std::fprintf(stderr, "glm generate: --kv-resident must be 0 or more\n");
             return 2;
         }
         if (o.kv_resident > 0 && std::getenv("ALMOND_GLM_KV_RESIDENT") == nullptr)
@@ -4588,11 +4588,11 @@ int glm_main(int argc, char** argv) {
         // ALMOND_GLM_RESERVE_MB and ALMOND_GLM_RESERVE_LATER_MB; given here, they win over the environment):
         // --expert-cache auto | N (0 = auto), --vram-reserve-mib N, --vram-reserve-later-mib N
         if (o.expert_cache < -1) {
-            std::fprintf(stderr, "maya generate: --expert-cache takes auto or a number of experts\n");
+            std::fprintf(stderr, "glm generate: --expert-cache takes auto or a number of experts\n");
             return 2;
         }
         if ((o.vram_reserve_given && o.vram_reserve_mib < 0) || o.vram_reserve_later_mib < -1) {
-            std::fprintf(stderr, "maya generate: --vram-reserve-mib and --vram-reserve-later-mib take 0 or more MiB\n");
+            std::fprintf(stderr, "glm generate: --vram-reserve-mib and --vram-reserve-later-mib take 0 or more MiB\n");
             return 2;
         }
         if (o.expert_cache != 0)
@@ -4601,7 +4601,7 @@ int glm_main(int argc, char** argv) {
         if (o.vram_reserve_later_mib >= 0)
             set_env("ALMOND_GLM_RESERVE_LATER_MB", std::to_string(o.vram_reserve_later_mib).c_str());
         if (o.pack != "pack/full") {
-            std::fprintf(stderr, "maya generate: note: --glm-pack supersedes --pack (%s ignored)\n", o.pack.c_str());
+            std::fprintf(stderr, "glm generate: note: --glm-pack supersedes --pack (%s ignored)\n", o.pack.c_str());
         }
         return glm_pack_generate(o);
     }
@@ -4638,7 +4638,7 @@ int glm_main(int argc, char** argv) {
         if (ok && !split_auto && split_devs.empty() && split_at.size() == 1) split_devs.push_back(0);   // one GPU
         split_same = ok && split_devs.size() == 1 && split_devs[0] == 0 && !split_auto;
         if (ok && split_auto && split_devs.empty()) {
-            std::fprintf(stderr, "maya generate: --layer-split auto: one GPU visible, so no split\n");
+            std::fprintf(stderr, "glm generate: --layer-split auto: one GPU visible, so no split\n");
             o.layer_split.clear();
             split_auto = false;
         } else if (ok) {
@@ -4650,20 +4650,20 @@ int glm_main(int argc, char** argv) {
             }
         }
         if (!ok) {
-            std::fprintf(stderr, "maya generate: --layer-split K[,K2..]|auto needs --serve, rising K from 2, and one "
+            std::fprintf(stderr, "glm generate: --layer-split K[,K2..]|auto needs --serve, rising K from 2, and one "
                                  "distinct GPU per K in --split-device (1..%d; or 0 with one K: the same GPU)\n", n_dev - 1);
             return 2;
         }
     }
     const bool multi_gpu = !split_devs.empty() && !split_same;
     if (o.resident_cpu_experts && (!o.mmap_experts || o.expert_profile.empty() || o.adapt_every != 0)) {
-        std::fprintf(stderr, "maya generate: --resident-cpu-experts requires --mmap-experts, a static --expert-profile and --adapt-every 0\n");
+        std::fprintf(stderr, "glm generate: --resident-cpu-experts requires --mmap-experts, a static --expert-profile and --adapt-every 0\n");
         return 2;
     }
     if (o.resident_cpu_experts &&
         (!o.layer_split.empty() || o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 ||
          o.expert_cache_remote[2] > 0)) {
-        std::fprintf(stderr, "maya generate: --resident-cpu-experts does not support layer splits or remote expert caches\n");
+        std::fprintf(stderr, "glm generate: --resident-cpu-experts does not support layer splits or remote expert caches\n");
         return 2;
     }
     // the helper-GPU expert caches (--expert-cache-remote): CUDA1..3 on one GPU; with a layer
@@ -4671,7 +4671,7 @@ int glm_main(int argc, char** argv) {
     int remote_dev[3] = {1, 2, 3};
     if (multi_gpu) {
         if (o.expert_profile.empty()) {
-            std::fprintf(stderr, "maya generate: a layer split across GPUs needs --expert-profile\n");
+            std::fprintf(stderr, "glm generate: a layer split across GPUs needs --expert-profile\n");
             return 2;
         }
         o.no_prefill_borrow = true;   // each stage's prompt path has its own buffers
@@ -4684,7 +4684,7 @@ int glm_main(int argc, char** argv) {
             while (next_free < n_vis &&
                    std::find(split_devs.begin(), split_devs.end(), next_free) != split_devs.end()) ++next_free;
             if (next_free >= n_vis) {
-                std::fprintf(stderr, "maya generate: --expert-cache-remote with a layer split needs a GPU that runs no "
+                std::fprintf(stderr, "glm generate: --expert-cache-remote with a layer split needs a GPU that runs no "
                                      "stage (%d visible, %zu used by the split)\n", n_vis, split_devs.size() + 1);
                 return 2;
             }
@@ -4692,7 +4692,7 @@ int glm_main(int argc, char** argv) {
         }
         std::string devs;
         for (const int d : split_devs) devs += (devs.empty() ? "" : ",") + std::to_string(d);
-        std::fprintf(stderr, "maya generate: layer split across %zu GPUs: CUDA0, then CUDA%s (split %s)\n",
+        std::fprintf(stderr, "glm generate: layer split across %zu GPUs: CUDA0, then CUDA%s (split %s)\n",
                      split_devs.size() + 1, devs.c_str(), o.layer_split.c_str());
     }
     if (o.prefill_auto && (o.no_prefill_borrow || o.expert_profile.empty())) {
@@ -4706,7 +4706,7 @@ int glm_main(int argc, char** argv) {
         o.stop_eos = true;
     }
     if (!have_tokens) {
-        std::fprintf(stderr, "maya generate: --tokens is required (this build has no tokenizer; see the "
+        std::fprintf(stderr, "glm generate: --tokens is required (this build has no tokenizer; see the "
                              "header of src/program/generate.cpp)\n");
         usage();
         return 2;
@@ -4714,23 +4714,23 @@ int glm_main(int argc, char** argv) {
 
     if ((o.ple_io != "direct" && o.ple_io != "mmap") || o.ple_row_cache < 0 || o.ple_inflight < 1 ||
         o.ple_inflight > 1024 || !(o.ple_delay_us >= 0)) {
-        std::fprintf(stderr, "maya generate: invalid --ple-io/--ple-row-cache/--ple-inflight/--ple-delay-us\n");
+        std::fprintf(stderr, "glm generate: invalid --ple-io/--ple-row-cache/--ple-inflight/--ple-delay-us\n");
         return 2;
     }
     if (o.kv == "q4") o.kv = "q4_0";
     if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0" && o.kv != "k8v4") {
-        std::fprintf(stderr, "maya generate: --kv must be fp16, int8, q4_0 or k8v4\n");
+        std::fprintf(stderr, "glm generate: --kv must be fp16, int8, q4_0 or k8v4\n");
         return 2;
     }
     almond::glm::core::qsa_set_kv_int8(o.kv == "int8");
     almond::glm::core::qsa_set_kv_q4(o.kv == "q4_0");   // PR #21: 4-bit codes after a Hadamard rotation (kv_q4.hpp)
     almond::glm::core::qsa_set_kv_hybrid(o.kv == "k8v4");   // K8V4: INT8 K + rotated Q4_0 V, 816 B/cell
     if (o.kv_resident < 0) {
-        std::fprintf(stderr, "maya generate: --kv-resident must be >= 0\n");
+        std::fprintf(stderr, "glm generate: --kv-resident must be >= 0\n");
         return 2;
     }
     if (o.kv == "k8v4" && o.kv_resident > 0) {
-        std::fprintf(stderr, "maya generate: --kv k8v4 does not support --kv-resident streaming (yet)\n");
+        std::fprintf(stderr, "glm generate: --kv k8v4 does not support --kv-resident streaming (yet)\n");
         return 2;
     }
     almond::glm::core::qsa_set_kv_resident(o.kv_resident);
@@ -4744,7 +4744,7 @@ int glm_main(int argc, char** argv) {
     almond::glm::core::layer_set_shared_early(!o.shared_late);
     if (!o.native_preset.empty()) {
         if (o.no_ple || o.ple_gguf.empty()) {
-            std::fprintf(stderr, "maya generate: --native requires --ple-gguf (the PLE key is native too)\n");
+            std::fprintf(stderr, "glm generate: --native requires --ple-gguf (the PLE key is native too)\n");
             return 2;
         }
         o.stream_token = true;
@@ -4764,29 +4764,29 @@ int glm_main(int argc, char** argv) {
         // cost 27.0 vs 17.2 ms/token of pool time and G-C does not need it; `--cpu-oracle-q8-0` still selects it.
     }
     if (o.logits_stride > 1 && (o.max_new != 1 || o.dump_logits.empty())) {
-        std::fprintf(stderr, "maya generate: --logits-stride > 1 requires --max-new 1 and --dump-logits\n");
+        std::fprintf(stderr, "glm generate: --logits-stride > 1 requires --max-new 1 and --dump-logits\n");
         return 2;
     }
     if (o.no_ple && !o.ple_gguf.empty()) {
-        std::fprintf(stderr, "maya generate: --no-ple and --ple-gguf are mutually exclusive\n");
+        std::fprintf(stderr, "glm generate: --no-ple and --ple-gguf are mutually exclusive\n");
         return 2;
     }
     if (o.native_ple_postops && o.no_ple) {
-        std::fprintf(stderr, "maya generate: --native-ple-postops requires PLE enabled\n");
+        std::fprintf(stderr, "glm generate: --native-ple-postops requires PLE enabled\n");
         return 2;
     }
     if (!o.no_ple && o.ple_gguf.empty()) {
-        std::fprintf(stderr, "maya generate: --ple-gguf is required; --no-ple explicitly enables a diagnostic ablation\n");
+        std::fprintf(stderr, "glm generate: --ple-gguf is required; --no-ple explicitly enables a diagnostic ablation\n");
         return 2;
     }
     // P7 audit: positions, cells and pooled-block indices are cast to int32 on the device path.
     if (o.max_context > 2147483647LL - 8) {
-        std::fprintf(stderr, "maya generate: --max-context must be below 2^31\n");
+        std::fprintf(stderr, "glm generate: --max-context must be below 2^31\n");
         return 2;
     }
     if (o.max_new <= 0 || o.max_context <= 0 || o.max_new > o.max_context ||
         o.tokens.size() > (size_t) (o.max_context - o.max_new)) {
-        std::fprintf(stderr, "maya generate: positive --max-new and --max-context must fit the prompt and generation\n");
+        std::fprintf(stderr, "glm generate: positive --max-new and --max-context must fit the prompt and generation\n");
         return 2;
     }
     if (!std::isfinite(o.temperature) || o.temperature < 0 || !std::isfinite(o.top_p) ||
@@ -4795,28 +4795,28 @@ int glm_main(int argc, char** argv) {
                                            [](int slots) { return slots < 0; }) ||
         (o.expert_cache_remote[1] > 0 && o.expert_cache_remote[0] == 0) ||
         (o.expert_cache_remote[2] > 0 && o.expert_cache_remote[1] == 0)) {
-        std::fprintf(stderr, "maya generate: invalid sampling or resource parameter\n");
+        std::fprintf(stderr, "glm generate: invalid sampling or resource parameter\n");
         return 2;
     }
     if (o.expert_cache_remote_placement != "stripe" && o.expert_cache_remote_placement != "layer") {
-        std::fprintf(stderr, "maya generate: --expert-cache-remote-placement must be stripe or layer\n");
+        std::fprintf(stderr, "glm generate: --expert-cache-remote-placement must be stripe or layer\n");
         return 2;
     }
 
     if (o.native_flash_attn_short && o.max_context > 256) {
-        std::fprintf(stderr, "maya generate: --native-flash-attn-short requires --max-context <=256\n");
+        std::fprintf(stderr, "glm generate: --native-flash-attn-short requires --max-context <=256\n");
         return 2;
     }
     if (o.native_flash_attn_short && (o.gpu_only_full || o.graph_only || o.gpu_stages)) {
-        std::fprintf(stderr, "maya generate: --native-flash-attn-short requires the normal decode loop for status validation\n");
+        std::fprintf(stderr, "glm generate: --native-flash-attn-short requires the normal decode loop for status validation\n");
         return 2;
     }
     if (o.native_ple_key && (o.native_dense_gguf.empty() || o.no_ple)) {
-        std::fprintf(stderr, "maya generate: --native-ple-key requires PLE and --native-dense-gguf\n");
+        std::fprintf(stderr, "glm generate: --native-ple-key requires PLE and --native-dense-gguf\n");
         return 2;
     }
     if (o.cpu_oracle_q8_0 && (o.expert_cache != 0 || !o.expert_profile.empty())) {
-        std::fprintf(stderr, "maya generate: --cpu-oracle-q8-0 cannot be combined with --expert-cache or --expert-profile until the GPU expert contract matches\n");
+        std::fprintf(stderr, "glm generate: --cpu-oracle-q8-0 cannot be combined with --expert-cache or --expert-profile until the GPU expert contract matches\n");
         return 2;
     }
 
@@ -4836,7 +4836,7 @@ int glm_main(int argc, char** argv) {
     {
         const almond::glm::core::ModelGeometry g0;
         if (!almond::glm::kernels::cpu::expert_layout_load(o.pack, g0.n_layers, g0.n_expert, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
     }
@@ -4846,10 +4846,10 @@ int glm_main(int argc, char** argv) {
         // allocating GPU0 weights or mapping the large host expert arena.
         double free_gib = 0;
         if (!almond::glm::core::RemoteExperts::preflight(remote_dev[0], free_gib, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "maya generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
+        std::fprintf(stderr, "glm generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
                      remote_dev[0], free_gib);
     }
     // plan v0.3 P6: the PCIe share of the missed experts, measured per kind of pack (the paper, finding on PCIe).
@@ -4866,34 +4866,34 @@ int glm_main(int argc, char** argv) {
             // below ~4 GB/s (an x1 link: ~0.9 GB/s) a missed expert's 1.4 MB takes longer to cross than the CPU
             // pool takes to compute it, so none of them go over the link
             o.pcie_frac = bw >= 20.0 ? base : bw < 4.0 ? 0.0 : std::min(base, std::max(0.05, base * (bw / 26.0)));
-            std::fprintf(stderr, "maya generate: PCIe probe: %.1f GB/s host->device -> pcie_frac %.2f (default %.2f)\n",
+            std::fprintf(stderr, "glm generate: PCIe probe: %.1f GB/s host->device -> pcie_frac %.2f (default %.2f)\n",
                          bw, o.pcie_frac, base);
         } else {
             o.pcie_frac = base;
-            std::fprintf(stderr, "maya generate: PCIe probe failed -> pcie_frac default %.2f\n", base);
+            std::fprintf(stderr, "glm generate: PCIe probe failed -> pcie_frac default %.2f\n", base);
         }
     }
     // the canonical Q2_0 pack's CPU kernels are AVX-512 only; a native pack runs on AVX2 CPUs as well
     if (!native_pack) almond::glm::kernels::cpu::cpu_require_expert_support();
     else if (!almond::glm::kernels::cpu::cpu_avx512_ok())
-        std::fprintf(stderr, "maya generate: this CPU has no AVX-512: the expert kernels run on %s "
+        std::fprintf(stderr, "glm generate: this CPU has no AVX-512: the expert kernels run on %s "
                              "(multi-token for the i-quant gate/up rows)\n",
                      std::getenv("ALMOND_NO_IQ256") == nullptr ? "AVX-2" : "ggml-cpu vec_dot (ALMOND_NO_IQ256 set)");
     almond::glm::core::NativeEmbed native_embed;
     if (native_pack) {
         if (o.native_preset.empty() || o.spec < 2 || o.keep_canonical ||
             (o.prefill_chunk <= 0 && o.tokens.size() > 1)) {
-            std::fprintf(stderr, "maya generate: %s is a native (IQ) pack: it needs --native SHARD1, --spec T (T >= 2) "
+            std::fprintf(stderr, "glm generate: %s is a native (IQ) pack: it needs --native SHARD1, --spec T (T >= 2) "
                                  "and --prefill CHUNK\n", o.pack.c_str());
             return 2;
         }
         const almond::glm::core::ModelGeometry g0;
         if (!native_embed.load(o.native_preset, g0.n_embd, 248320, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         almond::glm::core::set_native_embed(&native_embed);
-        std::fprintf(stderr, "maya generate: native pack: %s experts (largest blob %.2f MB), token embedding "
+        std::fprintf(stderr, "glm generate: native pack: %s experts (largest blob %.2f MB), token embedding "
                              "type %d in mapped host memory (%.0f MiB)\n",
                      o.pack.c_str(), (double) almond::glm::kernels::cpu::expert_layout().max_blob / 1e6,
                      native_embed.type(), (double) native_embed.bytes() / 1048576.0);
@@ -4904,7 +4904,7 @@ int glm_main(int argc, char** argv) {
     if (!o.keep_canonical) {
         if (!o.native_dense_gguf.empty() &&
             !almond::glm::core::NativeDense::served_names(o.native_dense_gguf, o.native_ple_key, skip, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         if (!o.native_head_gguf.empty()) skip.insert("output.weight");
@@ -4914,31 +4914,31 @@ int glm_main(int argc, char** argv) {
     }
     uint64_t pool_bytes = 0;
     if (!almond::glm::core::WeightTable::pool_bytes(o.pack, pool_bytes, err, skip.empty() ? nullptr : &skip)) {
-        std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+        std::fprintf(stderr, "glm generate: %s\n", err.c_str());
         return 1;
     }
     void* arena = nullptr;
     if (cudaMalloc(&arena, pool_bytes) != cudaSuccess) {
-        std::fprintf(stderr, "maya generate: cudaMalloc(%llu) for the weight arena failed\n",
+        std::fprintf(stderr, "glm generate: cudaMalloc(%llu) for the weight arena failed\n",
                      (unsigned long long) pool_bytes);
         return 1;
     }
     almond::glm::core::WeightTable wt;
     if (!wt.load(o.pack, arena, pool_bytes, err, skip.empty() ? nullptr : &skip)) {
-        std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+        std::fprintf(stderr, "glm generate: %s\n", err.c_str());
         return 1;
     }
-    std::fprintf(stderr, "maya generate: %llu MiB of weights loaded from %s (%zu canonical tensors skipped: "
+    std::fprintf(stderr, "glm generate: %llu MiB of weights loaded from %s (%zu canonical tensors skipped: "
                          "served natively)\n",
                  (unsigned long long) (pool_bytes >> 20), o.pack.c_str(), skip.size());
 
     almond::glm::core::NativeDense native_dense;
     if (!o.native_dense_gguf.empty()) {
         if (!native_dense.load(o.native_dense_gguf, wt, err, o.native_ple_key)) {
-            std::fprintf(stderr, "maya generate: native dense projections: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: native dense projections: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "maya generate: %zu native projection matrices, %.2f MiB of weights\n",
+        std::fprintf(stderr, "glm generate: %zu native projection matrices, %.2f MiB of weights\n",
                      native_dense.tensor_count(), (double) native_dense.weight_bytes() / (1024.0 * 1024.0));
     }
 
@@ -4974,7 +4974,7 @@ int glm_main(int argc, char** argv) {
         if (cudaMalloc(&d_mrope, mrope_host.size() * sizeof(int32_t)) != cudaSuccess ||
             cudaMemcpy(d_mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
                 cudaSuccess) {
-            std::fprintf(stderr, "maya generate: cannot allocate the image position table\n");
+            std::fprintf(stderr, "glm generate: cannot allocate the image position table\n");
             return 1;
         }
         almond::glm::kernels::mrope_table_set(d_mrope);
@@ -4995,17 +4995,17 @@ int glm_main(int argc, char** argv) {
                 // this GGUF belongs to the GLM runner, not the qwen4exp session/graph machinery:
                 // point at the pack path instead of dying inside check_all with shape mismatches.
                 std::fprintf(stderr,
-                             "maya generate: %s declares architecture %s (GLM-5.3-Flash)\n"
-                             "maya generate: the qwen4exp driver path cannot serve it - run the pack instead:\n"
-                             "maya generate:   maya generate --glm-pack <pack_dir> --tokens ... (the verified\n"
-                             "maya generate:   Glm5Model runner; docs/GLM5-FLASH.md §9)\n",
+                             "glm generate: %s declares architecture %s (GLM-5.3-Flash)\n"
+                             "glm generate: the qwen4exp driver path cannot serve it - run the pack instead:\n"
+                             "glm generate:   glm generate --glm-pack <pack_dir> --tokens ... (the verified\n"
+                             "glm generate:   Glm5Model runner; docs/GLM5-FLASH.md §9)\n",
                              o.native_preset.c_str(), v->s.c_str());
                 return 2;
             }
             if (const almond::glm::MetaValue* v = model_gguf.get("qwen4exp.expert_count")) g.n_expert = (int64_t) v->u;
             if (const almond::glm::MetaValue* v = model_gguf.get("qwen4exp.expert_used_count")) K = (int64_t) v->u;
         } catch (const std::exception& e) {
-            std::fprintf(stderr, "maya generate: reading the model's expert shape from %s: %s\n",
+            std::fprintf(stderr, "glm generate: reading the model's expert shape from %s: %s\n",
                          o.native_preset.c_str(), e.what());
             return 1;
         }
@@ -5015,19 +5015,19 @@ int glm_main(int argc, char** argv) {
     if (!o.cvec_files.empty()) {
         std::string ce;
         if (!load_control_vectors(o, g, cvec_summary, ce)) {
-            std::fprintf(stderr, "maya generate: control vector: %s\n", ce.c_str());
+            std::fprintf(stderr, "glm generate: control vector: %s\n", ce.c_str());
             return 2;
         }
     }
     if (o.max_context < (int64_t) o.tokens.size() + o.max_new) {
-        std::fprintf(stderr, "maya generate: --max-context %lld cannot hold %zu prompt + %lld new tokens\n",
+        std::fprintf(stderr, "glm generate: --max-context %lld cannot hold %zu prompt + %lld new tokens\n",
                      (long long) o.max_context, o.tokens.size(), (long long) o.max_new);
         return 2;
     }
 
     void* sbuf = nullptr;
     if (cudaMalloc(&sbuf, almond::glm::core::session_bytes(g, o.max_context, K)) != cudaSuccess) {
-        std::fprintf(stderr, "maya generate: session state allocation failed\n");
+        std::fprintf(stderr, "glm generate: session state allocation failed\n");
         return 1;
     }
     almond::glm::core::SessionState ss;
@@ -5040,16 +5040,16 @@ int glm_main(int argc, char** argv) {
     // 0.805 us inside a graph.  **That is an ~8x penalty on every launch in the engine.**
     cudaStream_t main_stream = nullptr;
     if (cudaStreamCreateWithFlags(&main_stream, cudaStreamNonBlocking) != cudaSuccess) {
-        std::fprintf(stderr, "maya generate: cannot create the main stream\n");
+        std::fprintf(stderr, "glm generate: cannot create the main stream\n");
         return 1;
     }
     void* const main_cs = (void*) main_stream;
     if (almond::glm::core::session_init(g, o.max_context, K, sbuf, ss) == 0) {
-        std::fprintf(stderr, "maya generate: session_init failed\n");
+        std::fprintf(stderr, "glm generate: session_init failed\n");
         return 1;
     }
     if (g.n_qsa_layers() > 0 && ss.qsa_states[0].kv_mode == 1)
-        std::fprintf(stderr, "maya generate: KV streaming: %lld of %lld cells per QSA layer in VRAM, the K/V in "
+        std::fprintf(stderr, "glm generate: KV streaming: %lld of %lld cells per QSA layer in VRAM, the K/V in "
                              "%.2f GiB of pinned RAM\n", (long long) (ss.qsa_states[0].n_slots * 4),
                      (long long) o.max_context, (double) almond::glm::core::qsa_kv_host_bytes() / 1073741824.0);
 
@@ -5066,12 +5066,12 @@ int glm_main(int argc, char** argv) {
     if (!o.dump_halves.empty()) {
         half_dump = std::fopen(o.dump_halves.c_str(), "wb");
         if (half_dump == nullptr) {
-            std::fprintf(stderr, "maya generate: cannot write %s\n", o.dump_halves.c_str());
+            std::fprintf(stderr, "glm generate: cannot write %s\n", o.dump_halves.c_str());
             return 1;
         }
         const size_t n = (size_t) g.n_layers * (size_t) half_stride;
         if (cudaHostAlloc((void**) &half_stage, n * sizeof(float), cudaHostAllocDefault) != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: cannot pin the half-dump staging buffer\n");
+            std::fprintf(stderr, "glm generate: cannot pin the half-dump staging buffer\n");
             return 1;
         }
         ss.block.dump = half_stage;
@@ -5079,7 +5079,7 @@ int glm_main(int argc, char** argv) {
 
     almond::glm::core::Doorbell db;
     if (almond::glm::core::doorbell_init(g, K, db) == 0) {
-        std::fprintf(stderr, "maya generate: doorbell_init failed\n");
+        std::fprintf(stderr, "glm generate: doorbell_init failed\n");
         return 1;
     }
     ss.db = &db;
@@ -5101,7 +5101,7 @@ int glm_main(int argc, char** argv) {
         pio.cache_rows = (uint64_t) o.ple_row_cache;
         pio.io_thread = !o.ple_sync_submit;
         if (!ple_table.open(o.ple_gguf, err, pio)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         const almond::glm::core::WeightRef* wk = wt.find("blk.1.ple_key.weight");
@@ -5111,7 +5111,7 @@ int glm_main(int argc, char** argv) {
         const almond::glm::core::WeightRef* wnc = wt.find("blk.1.ple_norm_conv.weight");
         const almond::glm::core::WeightRef* wc = wt.find("blk.1.ple_conv1d.weight");
         if (!wk || !wv || !wnk || !wnq || !wnc || !wc) {
-            std::fprintf(stderr, "maya generate: the pack has no blk.1.ple_* tensors, so the PLE cannot be "
+            std::fprintf(stderr, "glm generate: the pack has no blk.1.ple_* tensors, so the PLE cannot be "
                                  "wired - and running without it is a DIFFERENT MODEL (LEDGER L123)\n");
             return 1;
         }
@@ -5126,7 +5126,7 @@ int glm_main(int argc, char** argv) {
         }
         if (o.native_ple_key && wk->quantized()) {
             if (!wk->native_data || (wk->native_type != 42 && wk->native_type != 18 && wk->native_type != 23) || !wk->native_q8_1) {
-                std::fprintf(stderr, "maya generate: native PLE key is absent or incompatible\n");
+                std::fprintf(stderr, "glm generate: native PLE key is absent or incompatible\n");
                 return 1;
             }
             ss.ple.w.key_native_data = wk->native_data;
@@ -5147,27 +5147,27 @@ int glm_main(int argc, char** argv) {
         ss.ple.emb_host = ple_emb_host.data();
         if (cudaMalloc((void**) &ple_emb_dev, (size_t) almond::glm::kernels::NG_N_EMBD * 4) != cudaSuccess ||
             cudaMalloc((void**) &ple_scratch, almond::glm::core::ple_run_scratch_bytes()) != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: the PLE buffers failed\n");
+            std::fprintf(stderr, "glm generate: the PLE buffers failed\n");
             return 1;
         }
         ss.ple.emb_dev = ple_emb_dev;
         ss.ple.scratch = ple_scratch;
         if (!ss.ple.ready()) {
-            std::fprintf(stderr, "maya generate: the PLE run is not ready after construction\n");
+            std::fprintf(stderr, "glm generate: the PLE run is not ready after construction\n");
             return 1;
         }
-        std::fprintf(stderr, "maya generate: PLE on, table %llu rows of %s\n",
+        std::fprintf(stderr, "glm generate: PLE on, table %llu rows of %s\n",
                      (unsigned long long) ple_table.rows(), o.ple_gguf.c_str());
     } else {
         std::fprintf(stderr,
-                     "maya generate: PLE OFF by explicit --no-ple diagnostic request.\n"
+                     "glm generate: PLE OFF by explicit --no-ple diagnostic request.\n"
                      "  The tokens below are NOT this model's; this is only useful for A/B measurement.\n");
     }
 
     float* d_parts = nullptr;
     if (cudaMalloc(&d_parts, (size_t) K * g.n_embd * 4) != cudaSuccess ||
         cudaMemset(d_parts, 0, (size_t) K * g.n_embd * 4) != cudaSuccess) {
-        std::fprintf(stderr, "maya generate: the parts buffer failed\n");
+        std::fprintf(stderr, "glm generate: the parts buffer failed\n");
         return 1;
     }
 
@@ -5181,19 +5181,19 @@ int glm_main(int argc, char** argv) {
         const bool last = i + 1 == split_devs.size();
         double free_gib = 0;
         if (!almond::glm::core::RemoteExperts::preflight(st.dev, free_gib, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         const almond::glm::core::OnDevice on(st.dev);
         void* arena_s = nullptr;
         if (cudaMalloc(&arena_s, pool_bytes) != cudaSuccess ||
             !st.wt.load(o.pack, arena_s, pool_bytes, err, skip.empty() ? nullptr : &skip)) {
-            std::fprintf(stderr, "maya generate: layer split, CUDA%d weights: %s\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split, CUDA%d weights: %s\n", st.dev,
                          err.empty() ? "the weight arena does not fit" : err.c_str());
             return 1;
         }
         if (!o.native_dense_gguf.empty() && !st.dense.load(o.native_dense_gguf, st.wt, err, o.native_ple_key)) {
-            std::fprintf(stderr, "maya generate: layer split, CUDA%d native dense projections: %s\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split, CUDA%d native dense projections: %s\n", st.dev,
                          err.c_str());
             return 1;
         }
@@ -5203,19 +5203,19 @@ int glm_main(int argc, char** argv) {
             cudaStreamCreateWithFlags(&st.stream, cudaStreamNonBlocking) != cudaSuccess ||
             cudaStreamCreateWithFlags(&st.adapt_stream, cudaStreamNonBlocking) != cudaSuccess ||
             cudaEventCreateWithFlags(&st.adapt_ev, cudaEventDisableTiming) != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: layer split, CUDA%d: the session state failed\n", st.dev);
+            std::fprintf(stderr, "glm generate: layer split, CUDA%d: the session state failed\n", st.dev);
             return 1;
         }
         const almond::glm::core::WeightRef* wo_s = st.wt.find("output.weight");
         if (wo_s == nullptr ||
             (last && !o.native_head_gguf.empty() && !st.head.load(o.native_head_gguf, g.n_embd, wo_s->ne1, err))) {
-            std::fprintf(stderr, "maya generate: layer split, CUDA%d head: %s\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split, CUDA%d head: %s\n", st.dev,
                          wo_s == nullptr ? "output.weight is missing" : err.c_str());
             return 1;
         }
         // a control vector (the speed projection): its tables on this device too - the stage's layers apply it here
         if (!almond::glm::kernels::cvec_replicate(err)) {
-            std::fprintf(stderr, "maya generate: layer split, CUDA%d: %s\n", st.dev, err.c_str());
+            std::fprintf(stderr, "glm generate: layer split, CUDA%d: %s\n", st.dev, err.c_str());
             return 1;
         }
         // --vision: this device's image-position table (the identity until a picture request), read by every rope
@@ -5224,7 +5224,7 @@ int glm_main(int argc, char** argv) {
             if (cudaMalloc(&st.mrope, mrope_host.size() * sizeof(int32_t)) != cudaSuccess ||
                 cudaMemcpy(st.mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
                     cudaSuccess) {
-                std::fprintf(stderr, "maya generate: layer split, CUDA%d: the image position table failed\n", st.dev);
+                std::fprintf(stderr, "glm generate: layer split, CUDA%d: the image position table failed\n", st.dev);
                 return 1;
             }
             almond::glm::kernels::mrope_table_set(st.mrope);
@@ -5234,12 +5234,12 @@ int glm_main(int argc, char** argv) {
         if (!pcie_given && native_pack) {
             const double bw = probe_pcie_h2d_gbps();
             if (bw > 0.0) st.pcie_frac = bw >= 20.0 ? 0.55 : bw < 4.0 ? 0.0 : std::min(0.55, std::max(0.05, 0.55 * (bw / 26.0)));
-            std::fprintf(stderr, "maya generate: layer split: CUDA%d PCIe probe %.1f GB/s -> pcie_frac %.2f\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split: CUDA%d PCIe probe %.1f GB/s -> pcie_frac %.2f\n", st.dev,
                          bw, st.pcie_frac);
         }
         size_t fb = 0, tb = 0;
         cudaMemGetInfo(&fb, &tb);
-        std::fprintf(stderr, "maya generate: layer split: CUDA%d holds its weights, session%s; %.2f GiB free\n",
+        std::fprintf(stderr, "glm generate: layer split: CUDA%d holds its weights, session%s; %.2f GiB free\n",
                      st.dev, last ? " and head" : "", (double) fb / 1073741824.0);
     }
     GpuStage* const last_st = stages.empty() ? nullptr : stages.back().get();
@@ -5249,7 +5249,7 @@ int glm_main(int argc, char** argv) {
     almond::glm::core::MtpDrafter mtp;
     if (!o.mtp.empty()) {
         if (o.spec < 2) {
-            std::fprintf(stderr, "maya generate: --mtp is ignored without --spec T (T >= 2)\n");
+            std::fprintf(stderr, "glm generate: --mtp is ignored without --spec T (T >= 2)\n");
             o.mtp.clear();
         }
         if (!o.mtp.empty()) mtp.set_prompt_len((int64_t) o.tokens.size());
@@ -5258,17 +5258,17 @@ int glm_main(int argc, char** argv) {
         static const almond::glm::core::ModelGeometry draft_geometry{};
         // with a layer split across GPUs the drafter reads the last stage's residual: it lives on that device
         const almond::glm::core::OnDevice on_mtp(last_st ? last_st->dev : -1);
-        if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st ? last_st->ss : ss, o.spec, err, o.mtp_window)) { std::fprintf(stderr, "maya generate: %s\n", err.c_str()); return 1; }
+        if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st ? last_st->ss : ss, o.spec, err, o.mtp_window)) { std::fprintf(stderr, "glm generate: %s\n", err.c_str()); return 1; }
     }
     // Create the additional contexts after MTP has secured CUDA0 memory, but
     // before the host arena maps its expert pages into their address spaces.
     for (int r = 1; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0) {
         double free_gib = 0;
         if (!almond::glm::core::RemoteExperts::preflight(remote_dev[r], free_gib, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "maya generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
+        std::fprintf(stderr, "glm generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
                      remote_dev[r], free_gib);
     }
 
@@ -5307,10 +5307,10 @@ int glm_main(int argc, char** argv) {
           almond::glm::core::expert_ram_room() < almond::glm::kernels::cpu::expert_layout().total + (2ull << 30)));
     if (from_gguf) {
         if (!gguf_src.open(o.native_preset, g.n_layers, g.n_expert, (int64_t) almond::glm::kernels::cpu::MAXT * K, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "maya generate: %s (the RAM tier is chosen once the GPUs hold theirs)\n",
+        std::fprintf(stderr, "glm generate: %s (the RAM tier is chosen once the GPUs hold theirs)\n",
                      gguf_src.note().c_str());
         srcp = &gguf_src;
     } else if (o.mmap_experts) {
@@ -5319,16 +5319,16 @@ int glm_main(int argc, char** argv) {
         // mode: the experts come from the file through the OS cache instead of a pinned copy in RAM, for a PC whose
         // GPU holds most of them but whose RAM cannot hold them all.
         if (native_pack && !std::filesystem::exists(std::filesystem::path(o.pack) / "experts.bin")) {
-            std::fprintf(stderr, "maya generate: --mmap-experts needs the pack's experts.bin; %s is a native (IQ) pack "
+            std::fprintf(stderr, "glm generate: --mmap-experts needs the pack's experts.bin; %s is a native (IQ) pack "
                                  "built without it: python tools/iq_pack.py --gguf <shard 1> --out %s --experts-bin\n",
                          o.pack.c_str(), o.pack.c_str());
             return 2;
         }
         if (!src.open(o.pack, g.n_layers, g.n_expert, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "maya generate: experts via mmap (--mmap-experts; the A/B arm of R2.1)\n");
+        std::fprintf(stderr, "glm generate: experts via mmap (--mmap-experts; the A/B arm of R2.1)\n");
         srcp = &src;
     } else {
         arena_src.set_gguf(o.native_preset);   // plan v0.3 P6: a native pack may take its experts from shard 1
@@ -5338,11 +5338,11 @@ int glm_main(int argc, char** argv) {
         // allocation - measured on the 5080 + 3090 rig: cudaMemGetInfo and the next cudaMalloc fail)
         const uint64_t pin_limit = (o.expert_cache_remote[0] > 0 || multi_gpu) ? (8ull << 30) : 0;
         if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err, pin_limit)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "maya generate: expert arena: %s\n", arena_src.note().c_str());
-        std::fprintf(stderr, "maya generate: loaded %.2f GiB at %.2f GiB/s\n",
+        std::fprintf(stderr, "glm generate: expert arena: %s\n", arena_src.note().c_str());
+        std::fprintf(stderr, "glm generate: loaded %.2f GiB at %.2f GiB/s\n",
                      (double) almond::glm::kernels::cpu::expert_layout().total / (1024.0 * 1024 * 1024),
                      arena_src.load_gib_per_second());
         // A rate under ~0.2 GiB/s is not the hardware.  Task Scheduler / service contexts throttle this
@@ -5352,8 +5352,8 @@ int glm_main(int argc, char** argv) {
 #ifdef _WIN32   // a Windows launch context; elsewhere a load this slow is the disk
         if (arena_src.load_gib_per_second() > 0.0 && arena_src.load_gib_per_second() < 0.2) {
             std::fprintf(stderr,
-                         "maya generate: hint: ~24x below what this hardware streams from a normal "
-                         "launch. If Maya is started by Task Scheduler or a service, register the task "
+                         "glm generate: hint: ~24x below what this hardware streams from a normal "
+                         "launch. If the GLM engine is started by Task Scheduler or a service, register the task "
                          "with Priority 4 (Normal) and 'Run with highest privileges' - the scheduler's "
                          "defaults (Below normal + a least-privilege token) throttle the load.\n");
         }
@@ -5371,14 +5371,14 @@ int glm_main(int argc, char** argv) {
     if (!o.expert_profile.empty()) {
         int64_t pslots = 0;
         if (!almond::glm::core::read_expert_profile(o.expert_profile, g.n_layers, g.n_expert, profile, pslots, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         // An explicit number truncates the ranked list ("what would 2,000 slots give" without rebuilding the
         // file).  `--expert-cache 0` used to take the count the profile was built for; the profile now ranks
         // every pair (issue #46: a card that holds more than the old 8,000 used to stop there), so it means auto.
         if (o.expert_cache == 0) o.expert_cache = -1;
-        std::fprintf(stderr, "maya generate: profile %s: %zu ranked pairs, built for %lld slots\n",
+        std::fprintf(stderr, "glm generate: profile %s: %zu ranked pairs, built for %lld slots\n",
                      o.expert_profile.c_str(), profile.size(), (long long) pslots);
     }
     // ---- layer split across GPUs: "auto" places the split points by a cost model of one decode window, measured on
@@ -5399,7 +5399,7 @@ int glm_main(int argc, char** argv) {
         const almond::glm::core::OnDevice on(dev);
         size_t fb = 0, tb = 0;
         if (const cudaError_t e = cudaMemGetInfo(&fb, &tb); e != cudaSuccess)
-            std::fprintf(stderr, "maya generate: layer split: CUDA%d free memory: %s\n", dev < 0 ? 0 : dev,
+            std::fprintf(stderr, "glm generate: layer split: CUDA%d free memory: %s\n", dev < 0 ? 0 : dev,
                          cudaGetErrorString(e));
         const int64_t reserve = ((int64_t) o.vram_reserve_mib + split_pf_mib + (later ? 1024 : 0)) << 20;
         return std::max<int64_t>((int64_t) fb - reserve, 0);
@@ -5418,7 +5418,7 @@ int glm_main(int argc, char** argv) {
             cudaGetLastError();
             const double speed = std::max(1.0, (double) sms * (double) khz / 1e6);   // SMs x GHz
             layer_ms[(size_t) i] = 0.33 * (84.0 * 2.617) / speed;
-            std::fprintf(stderr, "maya generate: layer split auto: CUDA%d %d SMs at %.2f GHz -> %.2f ms per layer, "
+            std::fprintf(stderr, "glm generate: layer split auto: CUDA%d %d SMs at %.2f GHz -> %.2f ms per layer, "
                                  "%.2f GiB for experts\n", dev, sms, khz / 1e6, layer_ms[(size_t) i],
                          (double) cap[(size_t) i] / 1073741824.0);
         }
@@ -5482,13 +5482,13 @@ int glm_main(int argc, char** argv) {
         split_at = best;
         std::string ks;
         for (const int64_t k : split_at) ks += (ks.empty() ? "" : ",") + std::to_string(k);
-        std::fprintf(stderr, "maya generate: layer split auto: K=%s - predicted %.1f ms per decode window; the caches "
+        std::fprintf(stderr, "glm generate: layer split auto: K=%s - predicted %.1f ms per decode window; the caches "
                              "hold %lld of %zu profiled pairs (~%.1f%% of the routed mass)\n", ks.c_str(), best_ms,
                      (long long) best_held, profile.size(), 100.0 * best_mass);
     }
     for (size_t i = 0; i < split_at.size(); ++i)
         if (split_at[i] >= g.n_layers) {
-            std::fprintf(stderr, "maya generate: --layer-split: layer %lld is past the last (%lld)\n",
+            std::fprintf(stderr, "glm generate: --layer-split: layer %lld is past the last (%lld)\n",
                          (long long) split_at[i], (long long) (g.n_layers - 1));
             return 2;
         }
@@ -5515,21 +5515,21 @@ int glm_main(int argc, char** argv) {
     // the 700 MiB: 128K IQ3_S ended with 30 MiB free, the driver paged, and a request stalled for good at its first
     // verify window.  Loaded first, the cache is sized around it.
     const almond::glm::core::WeightRef* wo = wt.find("output.weight");
-    if (wo == nullptr) { std::fprintf(stderr, "maya generate: output.weight is missing\n"); return 1; }
+    if (wo == nullptr) { std::fprintf(stderr, "glm generate: output.weight is missing\n"); return 1; }
     const int64_t n_vocab = wo->ne1;
     almond::glm::core::NativeHead native_head;
     if (!o.native_head_gguf.empty() && !multi_gpu) {   // a layer split's head is on its last stage
         if (!native_head.load(o.native_head_gguf, g.n_embd, n_vocab, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "maya generate: experimental native Q5_K head, %llu bytes\n",
+        std::fprintf(stderr, "glm generate: experimental native Q5_K head, %llu bytes\n",
                      (unsigned long long) native_head.weight_bytes());
     }
     std::vector<float> logits((size_t) n_vocab);
     float* d_logits = nullptr;
     if (cudaMalloc(&d_logits, (size_t) n_vocab * 4) != cudaSuccess) {
-        std::fprintf(stderr, "maya generate: the logits buffer failed\n");
+        std::fprintf(stderr, "glm generate: the logits buffer failed\n");
         return 1;
     }
     const bool auto_cache = o.expert_cache < 0;
@@ -5545,7 +5545,7 @@ int glm_main(int argc, char** argv) {
         int64_t slots = ((int64_t) free_b - reserve) / (int64_t) almond::glm::kernels::cpu::expert_layout().max_blob;
         if (!profile.empty()) slots = std::min<int64_t>(slots, (int64_t) profile.size());
         o.expert_cache = (int) std::max<int64_t>(slots, 0);
-        std::fprintf(stderr, "maya generate: expert cache auto: %.2f GiB free, %d MiB reserved -> %d slots\n",
+        std::fprintf(stderr, "glm generate: expert cache auto: %.2f GiB free, %d MiB reserved -> %d slots\n",
                      (double) free_b / 1073741824.0, o.vram_reserve_mib, o.expert_cache);
     } else if (multi_gpu && o.expert_cache > 0) {
         // a layer split's prompt path has its own buffers (it borrows no slots): an explicit cache size leaves room
@@ -5556,7 +5556,7 @@ int glm_main(int argc, char** argv) {
         const int64_t reserve = ((int64_t) o.vram_reserve_mib + prefill_mib) << 20;
         const int64_t fit = std::max<int64_t>(((int64_t) free_b - reserve) / (int64_t) almond::glm::kernels::cpu::expert_layout().max_blob, 0);
         if (o.expert_cache > fit) {
-            std::fprintf(stderr, "maya generate: layer split: --expert-cache %d leaves no room for the prompt path's "
+            std::fprintf(stderr, "glm generate: layer split: --expert-cache %d leaves no room for the prompt path's "
                                  "buffers (%lld MiB) on CUDA0: %lld slots\n", o.expert_cache, (long long) prefill_mib,
                          (long long) fit);
             o.expert_cache = (int) fit;
@@ -5636,13 +5636,13 @@ int glm_main(int argc, char** argv) {
 #endif
                 if (auto_cache && failed < 8 && shrink_to(cache_bytes() / 4 * 3)) {
                     ++failed;
-                    std::fprintf(stderr, "maya generate: %s%s; trying a smaller expert cache: %d slots\n", err.c_str(),
+                    std::fprintf(stderr, "glm generate: %s%s; trying a smaller expert cache: %d slots\n", err.c_str(),
                                  commit, o.expert_cache);
                     continue;
                 }
-                std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: %s\n", err.c_str());
 #if defined(_WIN32)
-                std::fprintf(stderr, "maya generate: on Windows the graphics card's memory also needs room in the page "
+                std::fprintf(stderr, "glm generate: on Windows the graphics card's memory also needs room in the page "
                                      "file: set it to \"System managed\" (System > About > Advanced system settings > "
                                      "Performance > Advanced > Virtual memory), or lower --expert-cache\n");
 #endif
@@ -5659,18 +5659,18 @@ int glm_main(int argc, char** argv) {
             int64_t give = want - (int64_t) free_b + (64ll << 20);
             if (free_b < ((size_t) 16 << 20)) give = std::max<int64_t>(give, xcache.bytes() / 4);
             const int64_t keep_bytes = xcache.bytes() - give;
-            std::fprintf(stderr, "maya generate: only %lld MiB free once the slots are written (reserve %d MiB); "
+            std::fprintf(stderr, "glm generate: only %lld MiB free once the slots are written (reserve %d MiB); "
                                  "shrinking the expert cache\n", (long long) (free_b >> 20), o.vram_reserve_mib);
             xcache.close();
             if (!shrink_to(keep_bytes)) break;
         }
         if (failed > 0 && o.expert_cache > 0)
-            std::fprintf(stderr, "maya generate: expert cache: %d slots (%.2f GiB) after %d smaller tries - a bigger "
+            std::fprintf(stderr, "glm generate: expert cache: %d slots (%.2f GiB) after %d smaller tries - a bigger "
                                  "page file lets it use more of the free VRAM\n",
                          o.expert_cache, (double) xcache.bytes() / 1073741824.0, failed);
     }
     if (o.expert_cache > 0) {
-        std::fprintf(stderr, "maya generate: expert cache %lld slots, %.2f GiB of VRAM; policy is\n",
+        std::fprintf(stderr, "glm generate: expert cache %lld slots, %.2f GiB of VRAM; policy is\n",
                      (long long) xcache.slots(), xcache.gib());
         mem_mark("opening the expert cache");
         xcache.set_per_layer_admission(o.expert_cache_per_layer);
@@ -5681,7 +5681,7 @@ int glm_main(int argc, char** argv) {
         // forced on 2,557 tokens (bench/results/2026-09-27-cache-parity): 95-98% same top-1, and perplexity equal
         // (on - off = -0.005 +- 0.005 nats). Neither output is more correct than the other.
         std::fprintf(stderr,
-                     "maya generate: the GPU computes the experts in the cache; it rounds differently from the CPU,\n"
+                     "glm generate: the GPU computes the experts in the cache; it rounds differently from the CPU,\n"
                      "                 so a reply can differ slightly from a run without the cache (the same quality).\n");
         if (o.expert_cache_per_layer) {
             int64_t lo = 0, hi = 0;
@@ -5707,7 +5707,7 @@ int glm_main(int argc, char** argv) {
             const uint8_t* b = srcp->blob(profile[(size_t) i].first, profile[(size_t) i].second);
             if (b == nullptr || !xcache.fill_slot_blocking(slot, b, err,
                     (int64_t) almond::glm::kernels::cpu::expert_layout().blob_bytes(profile[(size_t) i].first))) {
-                std::fprintf(stderr, "maya generate: the profile fill failed at pair %lld: %s\n",
+                std::fprintf(stderr, "glm generate: the profile fill failed at pair %lld: %s\n",
                              (long long) i, err.c_str());
                 return 1;
             }
@@ -5719,20 +5719,20 @@ int glm_main(int argc, char** argv) {
         if (prefilled > 0 && !xcache.verify_slot(xcache.slot_of(profile[0].first, profile[0].second),
                                 srcp->blob(profile[0].first, profile[0].second), err,
                                 (int64_t) almond::glm::kernels::cpu::expert_layout().blob_bytes(profile[0].first))) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         mem_mark("the profile fill");
-        std::fprintf(stderr, "maya generate: pre-filled %lld of %lld slots from the profile; slot 0 verified\n",
+        std::fprintf(stderr, "glm generate: pre-filled %lld of %lld slots from the profile; slot 0 verified\n",
                      (long long) prefilled, (long long) want);
     }
 
     if (o.resident_cpu_experts) {
         if (!src.pin_cache_complement(xcache, err, /*pin=*/false)) {
-            std::fprintf(stderr, "maya generate: CPU expert residency: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: CPU expert residency: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "maya generate: steady-state CPU cache misses are resident in ordinary RAM; borrowed cache entries may use mmap during prompt prefill\n");
+        std::fprintf(stderr, "glm generate: steady-state CPU cache misses are resident in ordinary RAM; borrowed cache entries may use mmap during prompt prefill\n");
     }
 
     for (auto& stp : stages) {
@@ -5751,7 +5751,7 @@ int glm_main(int argc, char** argv) {
         if (sized.empty() ||
             !(native_pack ? st.cache.open_sized(sized, g.n_layers, g.n_expert, err)
                           : st.cache.open((int64_t) sized.size(), g.n_layers, g.n_expert, (int64_t) lay.max_blob, err))) {
-            std::fprintf(stderr, "maya generate: layer split, CUDA%d expert cache: %s\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split, CUDA%d expert cache: %s\n", st.dev,
                          sized.empty() ? "no room" : err.c_str());
             return 1;
         }
@@ -5762,7 +5762,7 @@ int glm_main(int argc, char** argv) {
             if (slot == almond::glm::core::kNotResident) break;
             const uint8_t* b = srcp->blob(pr.first, pr.second);
             if (b == nullptr || !st.cache.fill_slot_blocking(slot, b, err, (int64_t) lay.blob_bytes(pr.first))) {
-                std::fprintf(stderr, "maya generate: layer split, CUDA%d profile fill failed at pair %lld: %s\n",
+                std::fprintf(stderr, "glm generate: layer split, CUDA%d profile fill failed at pair %lld: %s\n",
                              st.dev, (long long) filled, err.c_str());
                 return 1;
             }
@@ -5771,23 +5771,23 @@ int glm_main(int argc, char** argv) {
         if (filled == 0 || !st.cache.verify_slot(st.cache.slot_of(st.profile[0].first, st.profile[0].second),
                                                  srcp->blob(st.profile[0].first, st.profile[0].second), err,
                                                  (int64_t) lay.blob_bytes(st.profile[0].first))) {
-            std::fprintf(stderr, "maya generate: layer split, CUDA%d expert cache: %s\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split, CUDA%d expert cache: %s\n", st.dev,
                          filled == 0 ? "nothing filled" : err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "maya generate: layer split: CUDA%d runs layers %lld-%lld, expert cache %lld slots "
+        std::fprintf(stderr, "glm generate: layer split: CUDA%d runs layers %lld-%lld, expert cache %lld slots "
                              "(%.2f GiB), %lld of its %zu profiled pairs; slot 0 verified\n",
                      st.dev, (long long) st.lb, (long long) (st.le - 1), (long long) st.cache.slots(), st.cache.gib(),
                      (long long) filled, st.profile.size());
     }
     if (multi_gpu)
-        std::fprintf(stderr, "maya generate: layer split: CUDA0 runs layers 0-%lld\n", (long long) (split_at[0] - 1));
+        std::fprintf(stderr, "glm generate: layer split: CUDA0 runs layers 0-%lld\n", (long long) (split_at[0] - 1));
 
     std::array<almond::glm::core::RemoteExperts, 3> remote_experts;
     const bool multi_remote = o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
     if (o.expert_cache_remote[0] > 0) {
         if (o.expert_cache <= 0 || profile.empty() || o.no_pool) {
-            std::fprintf(stderr, "maya generate: remote experts need --expert-profile, "
+            std::fprintf(stderr, "glm generate: remote experts need --expert-profile, "
                                  "a CUDA0 expert cache and the expert pool\n");
             return 2;
         }
@@ -5809,7 +5809,7 @@ int glm_main(int argc, char** argv) {
                 for (int64_t l = 0; l < g.n_layers; ++l)
                     if (!seen[(size_t) l * (size_t) g.n_expert + (size_t) e])
                         ranked.emplace_back((int32_t) l, (int32_t) e);
-            std::fprintf(stderr, "maya generate: remote ranking: %zu profiled pairs, "
+            std::fprintf(stderr, "glm generate: remote ranking: %zu profiled pairs, "
                                  "%zu other pairs to fill CUDA1..3\n", profile.size(), ranked.size() - profile.size());
         }
         std::array<std::vector<std::pair<int32_t, int32_t>>, 3> by_device;
@@ -5844,7 +5844,7 @@ int glm_main(int argc, char** argv) {
                 by_device[(size_t) target].push_back(pair);
                 next = (target + 1) % devices;
             }
-            std::fprintf(stderr, "maya generate: remote ranks %s across %d CUDA devices\n",
+            std::fprintf(stderr, "glm generate: remote ranks %s across %d CUDA devices\n",
                          o.expert_cache_remote_placement == "layer" ? "grouped by layer" : "striped", devices);
         } else {
             by_device[0] = std::move(ranked);
@@ -5857,10 +5857,10 @@ int glm_main(int argc, char** argv) {
         for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0) {
             if (!remote_experts[(size_t) r].open(remote_dev[r], o.expert_cache_remote[(size_t) r],
                      g.n_layers, g.n_expert, by_device[(size_t) r], xcache, *srcp, claimed, err)) {
-                std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: %s\n", err.c_str());
                 return 1;
             }
-            std::fprintf(stderr, "maya generate: CUDA%d: %lld additional experts, %.2f GiB; "
+            std::fprintf(stderr, "glm generate: CUDA%d: %lld additional experts, %.2f GiB; "
                                  "results return through pinned host rows\n", remote_dev[r],
                          (long long) remote_experts[(size_t) r].resident(), remote_experts[(size_t) r].gib());
         }
@@ -5891,11 +5891,11 @@ int glm_main(int argc, char** argv) {
                 if (!seen[(size_t) (l * g.n_expert + e)]) order.emplace_back((int32_t) l, (int32_t) e);
         const uint64_t pin_limit = (o.expert_cache_remote[0] > 0 || multi_gpu) ? (8ull << 30) : 0;
         if (!gguf_src.make_resident(order, 0, pin_limit, /*threads=*/6, drop, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         mem_mark("the experts' RAM tier");
-        std::fprintf(stderr, "maya generate: experts: %s; read in %.1f s\n", gguf_src.note().c_str(),
+        std::fprintf(stderr, "glm generate: experts: %s; read in %.1f s\n", gguf_src.note().c_str(),
                      gguf_src.load_seconds());
     }
 
@@ -5928,7 +5928,7 @@ int glm_main(int argc, char** argv) {
             // every chunk, and the reason enabling the cache changed the tokens.
             cudaMalloc((void**) &d_hit_q8_scale, (size_t) (g.n_embd / 32) * sizeof(float)) != cudaSuccess ||
             cudaMalloc((void**) &d_hit_out, (size_t) K * g.n_embd * 4) != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: the R4 hit path could not allocate its device buffers\n");
+            std::fprintf(stderr, "glm generate: the R4 hit path could not allocate its device buffers\n");
             return 1;
         }
         drive.d.cache = &xcache;
@@ -5948,14 +5948,14 @@ int glm_main(int argc, char** argv) {
         drive.d.h_slot.resize((size_t) K);
         cudaEvent_t hit_done = nullptr;
         if (cudaEventCreate(&hit_done) != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: the hit path could not create its probe event\n");
+            std::fprintf(stderr, "glm generate: the hit path could not create its probe event\n");
             return 1;
         }
         drive.d.hit_done = (void*) hit_done;
         drive.d.hit_poke = !o.no_hit_poke;
         drive.d.h_dst.resize((size_t) K);
         mem_mark("the R4 hit path");
-        std::fprintf(stderr, "maya generate: R4 hit path ON - resident experts are computed on the GPU\n");
+        std::fprintf(stderr, "glm generate: R4 hit path ON - resident experts are computed on the GPU\n");
     }
     // ---- P0.S8: the routing trace.  Only meaningful with the pool running, because the ids arrive through
     // the doorbell that the pool consumes - so `--no-pool` is refused rather than silently producing an empty
@@ -5965,13 +5965,13 @@ int glm_main(int argc, char** argv) {
     // "every stage is free".  Refusing is the fix.
     if (o.stage_timing) {
         if (!o.no_capture) {
-            std::fprintf(stderr, "maya generate: --stage-timing records CUDA events inside the layer path, "
+            std::fprintf(stderr, "glm generate: --stage-timing records CUDA events inside the layer path, "
                                  "and an event record inside a stream capture is silently dropped. Pass "
                                  "--no-capture as well.\n");
             return 2;
         }
         if (!almond::glm::core::stage_timing_enable()) {
-            std::fprintf(stderr, "maya generate: stage_timing_enable failed\n");
+            std::fprintf(stderr, "glm generate: stage_timing_enable failed\n");
             return 1;
         }
         almond::glm::core::stage_timing_name(0, "gr_read (attn)");
@@ -5996,13 +5996,13 @@ int glm_main(int argc, char** argv) {
     std::FILE* routing = nullptr;
     if (!o.dump_routing.empty()) {
         if (o.no_pool) {
-            std::fprintf(stderr, "maya generate: --dump-routing needs the expert pool; the routed ids reach "
+            std::fprintf(stderr, "glm generate: --dump-routing needs the expert pool; the routed ids reach "
                                  "the host through the doorbell the pool reads. Drop --no-pool.\n");
             return 2;
         }
         routing = std::fopen(o.dump_routing.c_str(), "wb");
         if (routing == nullptr) {
-            std::fprintf(stderr, "maya generate: cannot write %s\n", o.dump_routing.c_str());
+            std::fprintf(stderr, "glm generate: cannot write %s\n", o.dump_routing.c_str());
             return 1;
         }
         drive.routing = routing;
@@ -6013,7 +6013,7 @@ int glm_main(int argc, char** argv) {
     almond::glm::core::HitFn hit_fn =
         (o.no_pool || o.expert_cache <= 0) ? nullptr : &almond::glm::core::expert_hit_run;
     void* pool_user = o.no_pool ? nullptr : (void*) &drive;
-    std::fprintf(stderr, "maya generate: %d expert-pool workers%s%s\n", pool.workers(),
+    std::fprintf(stderr, "glm generate: %d expert-pool workers%s%s\n", pool.workers(),
                  pool.host_works() ? " + the host thread" : "",
                  o.no_pool ? " (UNUSED: --no-pool)" : "");
 
@@ -6035,7 +6035,7 @@ int glm_main(int argc, char** argv) {
     almond::glm::core::SessionGraphs gr;
     if (!o.no_capture && !native_pack) {   // plan v0.3 P6: a native pack runs verify windows only
         if (!almond::glm::core::session_capture(wt, g, ss, d_parts, gr, err, /*split=*/o.gpu_stages)) {
-            std::fprintf(stderr, "maya generate: session_capture: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: session_capture: %s\n", err.c_str());
             return 1;
         }
     }
@@ -6051,7 +6051,7 @@ int glm_main(int argc, char** argv) {
     // Refusing is the fix.  `--no-pool` is the explicit way to say "I want the GPU-only floor".
     if (o.no_capture && !o.no_pool) {
         std::fprintf(stderr,
-                     "maya generate: --no-capture runs `session_token`, which has NO CPU expert pool hook, so "
+                     "glm generate: --no-capture runs `session_token`, which has NO CPU expert pool hook, so "
                      "the routed experts would silently contribute nothing. Pass --no-pool as well if the "
                      "GPU-only floor is what you want.\n");
         return 2;
@@ -6061,19 +6061,19 @@ int glm_main(int argc, char** argv) {
     // than as a mistake.  `--no-capture` without `--no-pool` is already refused above, so this catches the pair.
     if (o.no_capture && !o.dump_layers.empty()) {
         std::fprintf(stderr,
-                     "maya generate: --dump-layers is written by `session_loop`; `--no-capture` runs "
+                     "glm generate: --dump-layers is written by `session_loop`; `--no-capture` runs "
                      "`session_token` instead, which never fills the staging buffer. Drop one of the two.\n");
         return 2;
     }
     if (o.no_capture && !o.dump_halves.empty()) {
         std::fprintf(stderr,
-                     "maya generate: --dump-halves is CAPTURED into the layer graphs, so it needs the "
+                     "glm generate: --dump-halves is CAPTURED into the layer graphs, so it needs the "
                      "captured path; `--no-capture` never records it. Drop one of the two.\n");
         return 2;
     }
 
     mem_mark("the expert cache and the graphs");
-    std::fprintf(stderr, "maya generate: session is up (engine %s)\n", ALMOND_VERSION);
+    std::fprintf(stderr, "glm generate: session is up (engine %s)\n", ALMOND_VERSION);
     auto run_head = [&](void* stream) -> bool {
         if (!native_head.loaded())
             return almond::glm::core::lm_head(wt, g, ss.block, d_logits, stream, err);
@@ -6082,7 +6082,7 @@ int glm_main(int argc, char** argv) {
     };
     float* d_emb = nullptr;
     if (cudaMalloc(&d_emb, (size_t) g.n_embd * 4) != cudaSuccess) {
-        std::fprintf(stderr, "maya generate: the embedding buffer failed\n");
+        std::fprintf(stderr, "glm generate: the embedding buffer failed\n");
         return 1;
     }
     // **`sample_tokens` TAKES DEVICE POINTERS.**  It is a kernel launch; `logits` and `out` are both read and
@@ -6091,7 +6091,7 @@ int glm_main(int argc, char** argv) {
     // illegal access on a weight plane.  Nothing in the parameter names said device.
     int* d_next = nullptr;
     if (cudaMalloc(&d_next, sizeof(int)) != cudaSuccess) {
-        std::fprintf(stderr, "maya generate: the sampler output buffer failed\n");
+        std::fprintf(stderr, "glm generate: the sampler output buffer failed\n");
         return 1;
     }
 
@@ -6102,7 +6102,7 @@ int glm_main(int argc, char** argv) {
     void* token_stream = o.stream_token ? main_cs : nullptr;
     auto put_input = [&](int64_t tok, int64_t pos) -> bool {
         if (!almond::glm::core::embed_row(wt, g, tok, d_emb, token_stream, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return false;
         }
         if (pos == 0) {
@@ -6111,7 +6111,7 @@ int glm_main(int argc, char** argv) {
             for (int64_t c = 0; c < g.hc; ++c)
                 if (cudaMemcpyAsync(ss.R + (size_t) c * g.n_embd, d_emb, (size_t) g.n_embd * 4,
                                     cudaMemcpyDeviceToDevice, (cudaStream_t) token_stream) != cudaSuccess) {
-                    std::fprintf(stderr, "maya generate: the residual broadcast failed\n");
+                    std::fprintf(stderr, "glm generate: the residual broadcast failed\n");
                     return false;
                 }
         }
@@ -6128,9 +6128,9 @@ int glm_main(int argc, char** argv) {
     // per request instead
     if (!o.serve) {
         if (sp.greedy || sp.temperature <= 0.0f)
-            std::fprintf(stderr, "maya generate: sampling greedy\n");
+            std::fprintf(stderr, "glm generate: sampling greedy\n");
         else
-            std::fprintf(stderr, "maya generate: sampling temperature=%g top_k=%d top_p=%g seed=%llu\n",
+            std::fprintf(stderr, "glm generate: sampling temperature=%g top_k=%d top_p=%g seed=%llu\n",
                          (double) sp.temperature, sp.top_k > 0 && sp.top_k < 64 ? sp.top_k : 64, (double) sp.top_p,
                          (unsigned long long) sp.seed);
     }
@@ -6139,12 +6139,12 @@ int glm_main(int argc, char** argv) {
     const int64_t dump_positions = (int64_t) o.tokens.size() - 1 + o.max_new;
     if (!o.dump_logits.empty()) {
         if (dump_positions > INT32_MAX || n_vocab > INT32_MAX) {
-            std::fprintf(stderr, "maya generate: logits dump dimensions exceed int32\n");
+            std::fprintf(stderr, "glm generate: logits dump dimensions exceed int32\n");
             return 2;
         }
         dump = std::fopen(o.dump_logits.c_str(), "wb");
         if (dump == nullptr) {
-            std::fprintf(stderr, "maya generate: cannot write %s\n", o.dump_logits.c_str());
+            std::fprintf(stderr, "glm generate: cannot write %s\n", o.dump_logits.c_str());
             return 1;
         }
         // **THE COUNT IS `n_prompt - 1 + max_new`, NOT `n_prompt + max_new`.**  The loop writes one row per
@@ -6157,7 +6157,7 @@ int glm_main(int argc, char** argv) {
         const int32_t n_rows = (int32_t) almond::glm::program::logits_selection::row_count(dump_positions, o.logits_stride);
         const int32_t hdr[2] = {(int32_t) n_vocab, n_rows};
         if (std::fwrite(hdr, sizeof hdr, 1, dump) != 1) {
-            std::fprintf(stderr, "maya generate: cannot write logits header\n");
+            std::fprintf(stderr, "glm generate: cannot write logits header\n");
             std::fclose(dump);
             return 1;
         }
@@ -6173,12 +6173,12 @@ int glm_main(int argc, char** argv) {
     if (!o.dump_layers.empty()) {
         layer_dump = std::fopen(o.dump_layers.c_str(), "wb");
         if (layer_dump == nullptr) {
-            std::fprintf(stderr, "maya generate: cannot write %s\n", o.dump_layers.c_str());
+            std::fprintf(stderr, "glm generate: cannot write %s\n", o.dump_layers.c_str());
             return 1;
         }
         if (cudaHostAlloc((void**) &layer_stage, layer_floats * sizeof(float), cudaHostAllocDefault) !=
             cudaSuccess) {
-            std::fprintf(stderr, "maya generate: cannot pin the layer-dump staging buffer\n");
+            std::fprintf(stderr, "glm generate: cannot pin the layer-dump staging buffer\n");
             return 1;
         }
     }
@@ -6217,14 +6217,14 @@ int glm_main(int argc, char** argv) {
         almond::glm::core::doorbell_reset(db);
         double mix = 0, ffn = 0, post = 0;
         if (!almond::glm::core::session_replay_stages(g, 0, 0, ss, gr, main_cs, mix, ffn, post, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         const int reps = 20;
         double t_mix = 0, t_ffn = 0, t_post = 0;
         for (int r = 0; r < reps; ++r) {
             if (!almond::glm::core::session_replay_stages(g, 0, 0, ss, gr, main_cs, mix, ffn, post, err)) {
-                std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: %s\n", err.c_str());
                 return 1;
             }
             t_mix += mix;
@@ -6255,7 +6255,7 @@ int glm_main(int argc, char** argv) {
             double f2 = 0, p2 = 0;
             for (int r = 0; r < reps; ++r) {
                 if (!almond::glm::core::session_replay_stages_per_layer(g, 0, 0, ss, gr, main_cs, per, f2, p2, err)) {
-                    std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+                    std::fprintf(stderr, "glm generate: %s\n", err.c_str());
                     return 1;
                 }
                 for (int64_t l = 0; l < g.n_layers; ++l) acc[(size_t) l] += per[(size_t) l];
@@ -6287,7 +6287,7 @@ int glm_main(int argc, char** argv) {
             std::vector<double> acc5(5, 0.0), per, s5;
             for (int r = 0; r < reps; ++r) {
                 if (!almond::glm::core::session_replay_stage_prefixes(g, 0, 0, ss, gr, main_cs, s5, per, err)) {
-                    std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+                    std::fprintf(stderr, "glm generate: %s\n", err.c_str());
                     return 1;
                 }
                 for (int k = 0; k < 5; ++k) acc5[(size_t) k] += s5[(size_t) k];
@@ -6328,7 +6328,7 @@ int glm_main(int argc, char** argv) {
                     double acc = 0, one = 0;
                     for (int r = 0; r < reps; ++r) {
                         if (!almond::glm::core::session_replay_stage_sweep(g, 0, 0, ss, gr, main_cs, k, one, err)) {
-                            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+                            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
                             return 1;
                         }
                         acc += one;
@@ -6360,23 +6360,23 @@ int glm_main(int argc, char** argv) {
         almond::glm::core::doorbell_reset(db);
         // one warm pass so the first launch does not pay for page mapping
         if (!almond::glm::core::session_replay(g, 0, 0, ss, gr, main_cs, err)) {
-            std::fprintf(stderr, "maya generate: session_replay warm: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: session_replay warm: %s\n", err.c_str());
             return 1;
         }
         if (cudaDeviceSynchronize() != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: session_replay warm faulted\n");
+            std::fprintf(stderr, "glm generate: session_replay warm faulted\n");
             return 1;
         }
         const int reps = 20;
         const Clock::time_point t0 = Clock::now();
         for (int r = 0; r < reps; ++r) {
             if (!almond::glm::core::session_replay(g, 0, 0, ss, gr, main_cs, err)) {
-                std::fprintf(stderr, "maya generate: session_replay: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: session_replay: %s\n", err.c_str());
                 return 1;
             }
         }
         if (cudaDeviceSynchronize() != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: session_replay faulted: %s\n", cudaGetErrorString(cudaGetLastError()));
+            std::fprintf(stderr, "glm generate: session_replay faulted: %s\n", cudaGetErrorString(cudaGetLastError()));
             return 1;
         }
         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count() / (double) reps;
@@ -6403,22 +6403,22 @@ int glm_main(int argc, char** argv) {
         for (int r = -1; r < reps; ++r) {          // r == -1 is the warm pass, not counted
             const Clock::time_point t0 = Clock::now();
             if (!almond::glm::core::session_replay_full(g, 0, 0, ss, gr, main_cs, err)) {
-                std::fprintf(stderr, "maya generate: session_replay_full: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: session_replay_full: %s\n", err.c_str());
                 return 1;
             }
             // The sync is INSIDE the interval on purpose: it is the wait for the GPU, so t1 - t0 is GPU time.
             if (cudaStreamSynchronize((cudaStream_t) main_cs) != cudaSuccess) {
-                std::fprintf(stderr, "maya generate: gpu-only-full layers faulted: %s\n",
+                std::fprintf(stderr, "glm generate: gpu-only-full layers faulted: %s\n",
                              cudaGetErrorString(cudaGetLastError()));
                 return 1;
             }
             const Clock::time_point t1 = Clock::now();
             if (!run_head(main_cs)) {
-                std::fprintf(stderr, "maya generate: gpu-only-full lm_head: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: gpu-only-full lm_head: %s\n", err.c_str());
                 return 1;
             }
             if (cudaStreamSynchronize((cudaStream_t) main_cs) != cudaSuccess) {
-                std::fprintf(stderr, "maya generate: gpu-only-full head faulted: %s\n",
+                std::fprintf(stderr, "glm generate: gpu-only-full head faulted: %s\n",
                              cudaGetErrorString(cudaGetLastError()));
                 return 1;
             }
@@ -6453,7 +6453,7 @@ int glm_main(int argc, char** argv) {
     // passing a default-constructed one is an error rather than a fallback.  (It was, and the guard caught it -
     // which is the point of the guard.)  One allocation at setup either way.
     if (!loop_scratch.init((size_t) K * g.n_embd * 4, err)) {
-        std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+        std::fprintf(stderr, "glm generate: %s\n", err.c_str());
         return 1;
     }
     // Plan v0.3 P3: the whole token as ONE graph whenever nothing needs a host step between the ring and post[l]
@@ -6483,7 +6483,7 @@ int glm_main(int argc, char** argv) {
         if (cudaMalloc((void**) &d_res, host_res.size() * sizeof(int32_t)) != cudaSuccess ||
             cudaMalloc((void**) &d_hit_count, sizeof(int32_t)) != cudaSuccess ||
             cudaMemcpy(d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: the device residency table could not be staged\n");
+            std::fprintf(stderr, "glm generate: the device residency table could not be staged\n");
             return 1;
         }
         thits.d_res = d_res;
@@ -6493,7 +6493,7 @@ int glm_main(int argc, char** argv) {
             if (cudaMalloc((void**) &st->d_res, host_res.size() * sizeof(int32_t)) != cudaSuccess ||
                 cudaMemcpy(st->d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
                     cudaSuccess) {
-                std::fprintf(stderr, "maya generate: layer split: CUDA%d residency table failed\n", st->dev);
+                std::fprintf(stderr, "glm generate: layer split: CUDA%d residency table failed\n", st->dev);
                 return 1;
             }
         }
@@ -6508,17 +6508,17 @@ int glm_main(int argc, char** argv) {
         thits.hit_out = drive.d.hit_out;
         drive.d.host_res = host_res.data();
         if (from_gguf) gguf_src.set_gpu_residency(host_res.data());   // (its stagers skip what the GPU computes)
-        std::fprintf(stderr, "maya generate: token graph hit path: %lld resident experts, decided on the device\n",
+        std::fprintf(stderr, "glm generate: token graph hit path: %lld resident experts, decided on the device\n",
                      (long long) resident);
     }
     if (!o.no_capture && !o.no_token_graph && layer_dump == nullptr && half_dump == nullptr &&
         (hit_fn == nullptr || thits.on()) && !native_pack) {
         if (!almond::glm::core::session_capture_token(wt, g, ss, d_parts, loop_scratch.y_miss, loop_scratch.parts_bytes,
                                                  tgraph, err, thits.on() ? &thits : nullptr)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "maya generate: token graph captured (48 layers, one launch per token)\n");
+        std::fprintf(stderr, "glm generate: token graph captured (48 layers, one launch per token)\n");
     }
 
     // ================================ WHERE THE HOST TERM GOES, PER TOKEN ================================
@@ -6623,7 +6623,7 @@ int glm_main(int argc, char** argv) {
     if (o.serve) {
         if (o.spec < 2 || o.mtp.empty() || o.prefill_chunk <= 0 ||
             (graph_hits && (thits.d_res == nullptr || host_res.empty()))) {
-            std::fprintf(stderr, "maya serve: needs --spec T, --mtp DIR and --prefill CHUNK (and a fillable "
+            std::fprintf(stderr, "glm serve: needs --spec T, --mtp DIR and --prefill CHUNK (and a fillable "
                                  "--expert-cache; the graphed hit path additionally needs --expert-profile P)\n");
             return 2;
         }
@@ -6639,9 +6639,9 @@ int glm_main(int argc, char** argv) {
             int64_t chunk = o.prefill_chunk;
             if (const int64_t k = plan_lend(chunk); k > 0) {
                 if (o.prefill_auto)
-                    std::fprintf(stderr, "maya serve: prompt chunk auto: %lld tokens\n", (long long) chunk);
+                    std::fprintf(stderr, "glm serve: prompt chunk auto: %lld tokens\n", (long long) chunk);
                 else if (chunk != o.prefill_chunk)
-                    std::fprintf(stderr, "maya serve: prompt chunk %lld -> %lld tokens so its buffers fit in the "
+                    std::fprintf(stderr, "glm serve: prompt chunk %lld -> %lld tokens so its buffers fit in the "
                                          "expert cache\n", (long long) o.prefill_chunk, (long long) chunk);
                 o.prefill_chunk = chunk;
                 lend_first = (int32_t) (xcache.slots() - k);
@@ -6657,25 +6657,25 @@ int glm_main(int argc, char** argv) {
             o.prefill_chunk = 1024;       // #85: no expert cache at all (a full 8 GB card): small buffers of its own
         }
         if (borrow != nullptr)
-            std::fprintf(stderr, "maya serve: the prompt path borrows %lld cache slots (%.2f GiB)\n",
+            std::fprintf(stderr, "glm serve: the prompt path borrows %lld cache slots (%.2f GiB)\n",
                          (long long) (xcache.slots() - lend_first), (double) borrow_bytes / 1073741824.0);
         else
-            std::fprintf(stderr, "maya serve: the prompt path allocates its own buffers (too few cache slots to borrow)\n");
+            std::fprintf(stderr, "glm serve: the prompt path allocates its own buffers (too few cache slots to borrow)\n");
         // layer split across GPUs: a prompt path per stage, each handing its chunk's rows to the next
         for (size_t i = 0; i < stages.size(); ++i) {
             GpuStage& st = *stages[i];
             st.sp.set_stage(st.lb, i + 1 < stages.size() ? st.le : -1, i + 1 < stages.size() ? &stages[i + 1]->sp : nullptr);
             const almond::glm::core::OnDevice on(st.dev);
             if (!st.sp.init(st.wt, g, st.ss, srcp, &st.cache, host_res.data(), o.prefill_chunk, (void*) st.stream, err)) {
-                std::fprintf(stderr, "maya serve: layer split, CUDA%d prompt path: %s\n", st.dev, err.c_str());
+                std::fprintf(stderr, "glm serve: layer split, CUDA%d prompt path: %s\n", st.dev, err.c_str());
                 return 1;
             }
         }
         if (multi_gpu) sp.set_stage(0, split_at[0], &stages[0]->sp);
         if (!sp.init(wt, g, ss, srcp, &xcache, host_res.data(), o.prefill_chunk, main_cs, err, borrow, borrow_bytes)) {
-            std::fprintf(stderr, "maya serve: %s\n", err.c_str());
+            std::fprintf(stderr, "glm serve: %s\n", err.c_str());
             if (err.find("fit") != std::string::npos)   // #85: say what frees VRAM
-                std::fprintf(stderr, "maya serve: the GPU has too little free VRAM for the prompt path: turn images "
+                std::fprintf(stderr, "glm serve: the GPU has too little free VRAM for the prompt path: turn images "
                                      "off (setup: --vision no), close other programs using the GPU, use a shorter "
                                      "context, or read prompts in smaller chunks (--prefill 512)\n");
             return 1;
@@ -6691,7 +6691,7 @@ int glm_main(int argc, char** argv) {
         std::vector<int32_t> hist_stage(kHistSlots, -1);
         const int hist_dev = last_st ? last_st->dev : -1;   // with the head: the last stage's device
         if (const almond::glm::core::OnDevice on_h(hist_dev); cudaMalloc(&d_hist, kHistSlots * sizeof(int32_t)) != cudaSuccess) {
-            std::fprintf(stderr, "maya serve: the penalty-history allocation failed\n");
+            std::fprintf(stderr, "glm serve: the penalty-history allocation failed\n");
             return 1;
         }
         almond::glm::core::Verifier ver;
@@ -6719,7 +6719,7 @@ int glm_main(int argc, char** argv) {
                 float* hh = nullptr;
                 if (cudaHostAlloc((void**) &hh, hb, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
                     cudaHostGetDevicePointer((void**) &h, hh, 0) != cudaSuccess) {
-                    std::fprintf(stderr, "maya serve: the layer-split hand-off allocation failed\n");
+                    std::fprintf(stderr, "glm serve: the layer-split hand-off allocation failed\n");
                     return 1;
                 }
                 std::memset(hh, 0, hb);
@@ -6753,7 +6753,7 @@ int glm_main(int argc, char** argv) {
                     split_drive.pcie_num[st] = pcie_num_of(gs.pcie_frac);
                 }
                 if (!ok_s) {
-                    std::fprintf(stderr, "maya serve: layer split, stage %d: %s\n", st + 1, err.c_str());
+                    std::fprintf(stderr, "glm serve: layer split, stage %d: %s\n", st + 1, err.c_str());
                     return 1;
                 }
             }
@@ -6762,11 +6762,11 @@ int glm_main(int argc, char** argv) {
             for (int st = 1; st < n_stages; ++st)
                 plan_s += ", " + std::to_string(split_at[(size_t) st - 1]) + "-" + std::to_string(split_drive.end[st] - 1) +
                           " (CUDA" + std::to_string(split_same ? 0 : stages[(size_t) st - 1]->dev) + ")";
-            std::fprintf(stderr, "maya serve: layer split: layers %s, one hand-off per window\n", plan_s.c_str());
+            std::fprintf(stderr, "glm serve: layer split: layers %s, one hand-off per window\n", plan_s.c_str());
         }
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err) ||
             !mtp.bind(last_st ? last_st->wt : wt, last_st ? &last_st->head : &native_head, ver.final_R_all(), err)) {
-            std::fprintf(stderr, "maya serve: %s\n", err.c_str());
+            std::fprintf(stderr, "glm serve: %s\n", err.c_str());
             return 1;
         }
         for (int st = 0; st < n_stages && n_stages > 1; ++st) {
@@ -6909,7 +6909,7 @@ int glm_main(int argc, char** argv) {
         if (o.adapt_every > 0 && o.adapt_swaps > 0) drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
         cudaStream_t adapt_stream = nullptr;
         if (cudaStreamCreateWithFlags(&adapt_stream, cudaStreamNonBlocking) != cudaSuccess) {
-            std::fprintf(stderr, "maya serve: cannot create the refill stream\n");
+            std::fprintf(stderr, "glm serve: cannot create the refill stream\n");
             return 1;
         }
         // plan v0.3 P6: swaps in flight - (residency index, slot) admitted when adapt_ev has completed
@@ -7063,7 +7063,7 @@ int glm_main(int argc, char** argv) {
         const bool trace = std::getenv("ALMOND_TRACE") != nullptr;
         auto tr = [&](const char* what, long long a = -1, long long b = -1) {
             if (!trace) return;
-            std::fprintf(stderr, "maya trace: %s %lld %lld\n", what, a, b);
+            std::fprintf(stderr, "glm trace: %s %lld %lld\n", what, a, b);
             std::fflush(stderr);
         };
         {
@@ -7075,9 +7075,9 @@ int glm_main(int argc, char** argv) {
             // the driver page GPU memory, and a verify graph spinning on a host flag then never finishes
             const int64_t free_mib = (int64_t) (free_b >> 20);
             if (free_mib >= 256) {
-                std::fprintf(stderr, "maya serve: %lld MiB of VRAM free with everything loaded\n", (long long) free_mib);
+                std::fprintf(stderr, "glm serve: %lld MiB of VRAM free with everything loaded\n", (long long) free_mib);
             } else {
-                std::fprintf(stderr, "maya serve: %lld MiB of VRAM free with everything loaded - LOW: requests may stall;"
+                std::fprintf(stderr, "glm serve: %lld MiB of VRAM free with everything loaded - LOW: requests may stall;"
                                      " add --vram-reserve-mib %lld to the config's args (or lower --max-context)\n",
                              (long long) free_mib, (long long) (o.vram_reserve_mib + 512 - free_mib));
             }
@@ -7379,7 +7379,7 @@ int glm_main(int argc, char** argv) {
                         cudaStreamSynchronize(st->stream);
                     }
                     reread_to = resume;
-                    std::fprintf(stderr, "maya serve: ALMOND_CKPT_REREAD: reading %lld tokens again instead of "
+                    std::fprintf(stderr, "glm serve: ALMOND_CKPT_REREAD: reading %lld tokens again instead of "
                                          "restoring\n", (long long) resume);
                 } else if (c == nullptr || !checkpoint_restore(*c, ss, g) || c->stage_parts.size() != stages.size() ||
                            [&] {
@@ -7522,7 +7522,7 @@ int glm_main(int argc, char** argv) {
                         return false;
                     }
                     first = std::max<int32_t>(lend_first, (int32_t) (xcache.slots() - slots));
-                    std::fprintf(stderr, "maya serve: the prompt path's buffers do not fit (%s): the chunk is %lld "
+                    std::fprintf(stderr, "glm serve: the prompt path's buffers do not fit (%s): the chunk is %lld "
                                          "tokens now\n", rerr.c_str(), (long long) want);
                 }
                 for (size_t i = 0; i < host_res.size(); ++i)
@@ -7600,7 +7600,7 @@ int glm_main(int argc, char** argv) {
                     if (cuda_context_broken(err)) return 1;
                     if (almond::glm::prefill::is_allocation_failure(err)) {
                         chunk_cap = std::max<int64_t>(kMinPromptChunk, chunk_cap / 2);
-                        std::fprintf(stderr, "maya serve: the prompt path's buffers did not fit: the chunk is %lld "
+                        std::fprintf(stderr, "glm serve: the prompt path's buffers did not fit: the chunk is %lld "
                                              "tokens for the requests that follow\n", (long long) chunk_cap);
                     }
                     read_failed = true;
@@ -7612,14 +7612,14 @@ int glm_main(int argc, char** argv) {
                 const bool sp_ok = win ? read_windows(at, to, err)
                                       : guarded([&] { return sp.run(ids.data() + at, to - at, at, err); }, err);
                 if (trace) {
-                    std::fprintf(stderr, "maya trace: read %lld tokens (%s) in %.1f ms\n", (long long) (to - at),
+                    std::fprintf(stderr, "glm trace: read %lld tokens (%s) in %.1f ms\n", (long long) (to - at),
                                  win ? "windows" : "batched",
                                  std::chrono::duration<double, std::milli>(Clock::now() - tsp).count());
                     std::fflush(stderr);
                 }
                 if (!sp_ok) {
                     if (!stop_req.load()) {
-                        std::fprintf(stderr, "maya serve: %s\n", err.c_str());
+                        std::fprintf(stderr, "glm serve: %s\n", err.c_str());
                         std::printf("ERR %s\n", err.c_str());
                         std::fflush(stdout);
                         if (cuda_context_broken(err)) return 1;
@@ -7640,10 +7640,10 @@ int glm_main(int argc, char** argv) {
                 // The expert cache is whole again (the lent slots hold their experts), and the next request reads
                 // its prompt with a smaller chunk: the memory this request wanted is not there.
                 std::string rerr;
-                if (!refill(rerr)) std::fprintf(stderr, "maya serve: the lent slots could not be refilled: %s\n", rerr.c_str());
+                if (!refill(rerr)) std::fprintf(stderr, "glm serve: the lent slots could not be refilled: %s\n", rerr.c_str());
                 if (almond::glm::prefill::is_allocation_failure(err)) {
                     chunk_cap = std::max<int64_t>(kMinPromptChunk, chunk_cap / 2);
-                    std::fprintf(stderr, "maya serve: the prompt path ran out of memory: the chunk is %lld tokens for "
+                    std::fprintf(stderr, "glm serve: the prompt path ran out of memory: the chunk is %lld tokens for "
                                          "the requests that follow\n", (long long) chunk_cap);
                 }
                 continue;   // the engine lives: the next request runs
@@ -7848,7 +7848,7 @@ int glm_main(int argc, char** argv) {
             if (dec_timing && dec_windows > 0) {
                 const DecSnap d1 = dec_snap();
                 const double w = (double) dec_windows, L = (double) g.n_layers;
-                std::fprintf(stderr, "maya decode timing: %lld windows, avg T %.2f, %.2f tokens/window, %.2f ms/window = "
+                std::fprintf(stderr, "glm decode timing: %lld windows, avg T %.2f, %.2f tokens/window, %.2f ms/window = "
                                      "verify %.2f (GPU-reach wait %.2f + per-layer host %.2f [plan %.2f actq %.2f jobs %.2f "
                                      "CPU %.2f] + stage %.2f) + commit/emit %.2f + draft %.2f; per layer-window: CPU experts "
                                      "%.2f (%.2f entries), VRAM hits %.2f, PCIe %.2f\n",
@@ -7858,7 +7858,7 @@ int glm_main(int argc, char** argv) {
                              (d1.host - ds0.host) / w, dt_commit / w, dt_draft / w, (d1.misses - ds0.misses) / (w * L),
                              (d1.entries - ds0.entries) / (w * L), (d1.hits - ds0.hits) / (w * L), (d1.pcie - ds0.pcie) / (w * L));
                 const std::string pr = ver.profile_report();
-                if (!pr.empty()) std::fprintf(stderr, "maya decode GPU stages (ms/window):%s\n", pr.c_str());
+                if (!pr.empty()) std::fprintf(stderr, "glm decode GPU stages (ms/window):%s\n", pr.c_str());
             }
             if (!cancelled) {
                 // a prompt stopped halfway leaves the session somewhere between two chunks: nothing to continue from
@@ -7905,7 +7905,7 @@ int glm_main(int argc, char** argv) {
                         std::snprintf(b, sizeof(b), "%04llx ", (unsigned long long) (hash_dev((const uint8_t*) ss.gdn_state + i * per, per, 1469598103934665603ull) & 0xffff));
                         s += b;
                     }
-                    std::fprintf(stderr, "maya serve: STATE_HASH_GDN %s\n", s.c_str());
+                    std::fprintf(stderr, "glm serve: STATE_HASH_GDN %s\n", s.c_str());
                 }
                 uint64_t h_ple = hash_dev(ss.ple_hist, z.ple, 1469598103934665603ull);
                 uint64_t h_tail = 1469598103934665603ull, h_pool = h_tail, h_kv = h_tail, h_stale = h_tail;
@@ -7944,7 +7944,7 @@ int glm_main(int argc, char** argv) {
                 const int64_t mL = std::min<int64_t>(L, ms.max_cells);
                 for (const auto& [pool, w] : kv_arrays(ms))
                     if (pool != nullptr) h_mtp = hash_cells(pool, w, 0, mL, h_mtp);
-                std::fprintf(stderr, "maya serve: STATE_HASH L=%lld gdn=%016llx ple=%016llx tail=%016llx pooled=%016llx "
+                std::fprintf(stderr, "glm serve: STATE_HASH L=%lld gdn=%016llx ple=%016llx tail=%016llx pooled=%016llx "
                                      "kv=%016llx mtp=%016llx stale=%016llx ple_prev=%d,%d\n", (long long) L,
                              (unsigned long long) h_gdn, (unsigned long long) h_ple, (unsigned long long) h_tail,
                              (unsigned long long) h_pool, (unsigned long long) h_kv, (unsigned long long) h_mtp,
@@ -7959,7 +7959,7 @@ int glm_main(int argc, char** argv) {
             std::fflush(stdout);
             if (drive.routing != nullptr) std::fflush(drive.routing);   // the routing trace survives a crash and is watchable mid-session
             const int64_t fresh = n - resume;
-            std::fprintf(stderr, "maya serve: prompt %lld tokens = %lld reused + %lld read in %.0f ms (%.1f tok/s), "
+            std::fprintf(stderr, "glm serve: prompt %lld tokens = %lld reused + %lld read in %.0f ms (%.1f tok/s), "
                                  "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld, %zu checkpoints%s\n",
                          (long long) n, (long long) resume, (long long) fresh, prompt_ms,
                          prompt_ms > 0 ? 1000.0 * fresh / prompt_ms : 0.0, (long long) produced_n, decode_ms,
@@ -7968,7 +7968,7 @@ int glm_main(int argc, char** argv) {
             // the VRAM share of the experts the pool looked up while decoding; experts it sent over PCIe for the GPU
             // to read (--pcie-frac) are in neither count
             if (req_look > 0) {
-                std::fprintf(stderr, "maya serve: decode expert cache hit rate: %.1f%% (%lld hits / %lld lookups)\n",
+                std::fprintf(stderr, "glm serve: decode expert cache hit rate: %.1f%% (%lld hits / %lld lookups)\n",
                              100.0 * (double) req_hits / (double) req_look,
                              (long long) req_hits, (long long) req_look);
             }
@@ -7978,7 +7978,7 @@ int glm_main(int argc, char** argv) {
                 for (int st = 0; st < n_stages; ++st) {
                     const almond::glm::core::Verifier& v = stage_ver(st);
                     const double w = v.windows > 0 ? (double) v.windows : 1.0;
-                    std::fprintf(stderr, "maya serve: stage %d: %lld windows; per window: wait for the GPU %.3f ms, "
+                    std::fprintf(stderr, "glm serve: stage %d: %lld windows; per window: wait for the GPU %.3f ms, "
                                          "pool + plan %.3f ms, host staging %.3f ms, commit %.3f ms\n", st,
                                  (long long) v.windows, v.ms_wait / w, v.ms_pool / w, v.ms_host / w, v.ms_commit / w);
                 }
@@ -7990,16 +7990,16 @@ int glm_main(int argc, char** argv) {
                     const almond::glm::kernels::KvStreamCounters c = almond::glm::kernels::kv_stream_counters(ss.qsa_states[i].map);
                     miss += c.misses; look += c.lookups; over = over || c.overflow;
                 }
-                std::fprintf(stderr, "maya serve: KV streaming: %.2f%% of %llu block reads hit VRAM, %.1f MiB read "
+                std::fprintf(stderr, "glm serve: KV streaming: %.2f%% of %llu block reads hit VRAM, %.1f MiB read "
                                      "from RAM%s\n", look ? 100.0 * (double) (look - miss) / (double) look : 100.0,
                              (unsigned long long) look, (double) miss * 4224.0 / 1048576.0,
                              over ? " - OVERFLOW (too few resident cells)" : "");
             }
             if (sfx_windows > 0)
-                std::fprintf(stderr, "maya serve: suffix drafts: %lld windows, %lld of %lld drafts accepted\n",
+                std::fprintf(stderr, "glm serve: suffix drafts: %lld windows, %lld of %lld drafts accepted\n",
                              (long long) sfx_windows, (long long) sfx_ok, (long long) sfx_drafts);
             for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
-                std::fprintf(stderr, "maya serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
+                std::fprintf(stderr, "glm serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
                                      "(%.1f MiB with full rows) in this request; host %.0f ms staging+launching, %.0f ms "
                                      "waiting for it (since start)\n", r + 1,
                              (long long) (remote_experts[(size_t) r].computed() - remote_before[(size_t) r]),
@@ -8036,7 +8036,7 @@ int glm_main(int argc, char** argv) {
             }
             if (o.prefill_auto) {
                 o.prefill_chunk = k > 0 ? chunk : request_chunk(n_batched, 1024);
-                std::fprintf(stderr, "maya generate: prompt chunk auto: %lld tokens\n", (long long) o.prefill_chunk);
+                std::fprintf(stderr, "glm generate: prompt chunk auto: %lld tokens\n", (long long) o.prefill_chunk);
             } else if (chunk != o.prefill_chunk) {
                 k = 0;                                 // a fixed chunk that does not fit: its own buffers, as before
             }
@@ -8052,21 +8052,21 @@ int glm_main(int argc, char** argv) {
                 borrow = xcache.device_slot(first);
                 borrow_bytes = xcache.slot_offsets() ? (uint64_t) (xcache.bytes() - (int64_t) xcache.slot_offsets()[first])
                                                      : (uint64_t) k * (uint64_t) blob;
-                std::fprintf(stderr, "maya generate: prompt path borrows %lld cache slots (%.2f GiB)\n", (long long) k,
+                std::fprintf(stderr, "glm generate: prompt path borrows %lld cache slots (%.2f GiB)\n", (long long) k,
                              (double) borrow_bytes / 1073741824.0);
             }
         }
         if (borrow == nullptr)
-            std::fprintf(stderr, "maya generate: prompt path allocates its own buffers (no cache slots to borrow)\n");
+            std::fprintf(stderr, "glm generate: prompt path allocates its own buffers (no cache slots to borrow)\n");
         if (!prefill.init(wt, g, ss, srcp, o.expert_cache > 0 ? &xcache : nullptr,
                           host_res.empty() ? nullptr : host_res.data(), o.prefill_chunk, main_cs, err, borrow,
                           borrow_bytes)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         if (!o.mtp.empty()) {
             if (!mtp.bind(wt, &native_head, nullptr, err)) {
-                std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: %s\n", err.c_str());
                 return 1;
             }
             prefill.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
@@ -8079,7 +8079,7 @@ int glm_main(int argc, char** argv) {
         }
         const Clock::time_point tp0 = Clock::now();
         if (!prefill.run(o.tokens.data(), n_batched, 0, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         // refill the lent slots from the arena and give them back to the decode tier
@@ -8091,17 +8091,17 @@ int glm_main(int argc, char** argv) {
                 const bool blocking = refill_blocking() || !srcp->stable(i / g.n_expert, i % g.n_expert);
                 if (b == nullptr || !(blocking ? xcache.fill_slot_blocking(slot, b, err, nb)
                                                : xcache.fill_slot_queued(slot, b, err, nb))) {
-                    std::fprintf(stderr, "maya generate: refilling a lent slot failed: %s\n", err.c_str());
+                    std::fprintf(stderr, "glm generate: refilling a lent slot failed: %s\n", err.c_str());
                     return 1;
                 }
                 host_res[(size_t) i] = slot;
             }
             if (!xcache.sync_queued(err)) {
-                std::fprintf(stderr, "maya generate: refilling the lent slots failed: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: refilling the lent slots failed: %s\n", err.c_str());
                 return 1;
             }
             cudaMemcpy(d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
-            std::fprintf(stderr, "maya generate: %zu lent slots refilled in %.1f ms\n", lent.size(),
+            std::fprintf(stderr, "glm generate: %zu lent slots refilled in %.1f ms\n", lent.size(),
                          std::chrono::duration<double, std::milli>(Clock::now() - tr).count());
         }
         prefill_batched_ms = std::chrono::duration<double, std::milli>(Clock::now() - tp0).count();
@@ -8112,7 +8112,7 @@ int glm_main(int argc, char** argv) {
         ss.ple_prev[0] = pos_start >= 2 ? (int32_t) o.tokens[(size_t) (pos_start - 2)] : -1;
         ss.ple_prev[1] = pos_start >= 1 ? (int32_t) o.tokens[(size_t) (pos_start - 1)] : -1;
         const almond::glm::prefill::PrefillStats& ps = prefill.stats();
-        std::fprintf(stderr, "maya generate: prefill %lld tokens in %lld chunks, %.1f ms (%.1f tok/s); experts "
+        std::fprintf(stderr, "glm generate: prefill %lld tokens in %lld chunks, %.1f ms (%.1f tok/s); experts "
                              "streamed %lld (%lld by DMA, host %.1f ms), resident %lld; PLE %.1f ms\n",
                      (long long) ps.tokens, (long long) ps.chunks, ps.ms_total,
                      ps.ms_total > 0 ? 1000.0 * (double) ps.tokens / ps.ms_total : 0.0, (long long) ps.experts_streamed,
@@ -8123,7 +8123,7 @@ int glm_main(int argc, char** argv) {
         // plan v0.3 P6: a native pack's last prompt token is the first verify window (T = 1)
         if (native_pack) { spec_pos = pos; break; }
         if (pos >= o.max_context) {
-            std::fprintf(stderr, "maya generate: ran out of context at position %lld\n", (long long) pos);
+            std::fprintf(stderr, "glm generate: ran out of context at position %lld\n", (long long) pos);
             return 2;
         }
         // **THE TOKEN TIMER STARTS HERE, BEFORE ANY OF THE TOKEN'S WORK (A7).**  It used to start after
@@ -8142,7 +8142,7 @@ int glm_main(int argc, char** argv) {
         // Plan v0.3 P2: the 16 SSD reads start here and complete while the embedding is staged; `ms_ple` is
         // the issue plus the time still spent WAITING afterwards, i.e. the part the embedding did not hide.
         if (ss.ple.ready() && !almond::glm::core::ple_issue_token(ss.ple, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         {
@@ -8157,7 +8157,7 @@ int glm_main(int argc, char** argv) {
             tp = n;
         }
         if (ss.ple.ready() && !almond::glm::core::ple_finish_token(ss.ple, token_stream, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         {
@@ -8167,7 +8167,7 @@ int glm_main(int argc, char** argv) {
         }
 
         if (pos % 256 == 0 || pos + 1 >= n_prompt - 1)
-            std::fprintf(stderr, "maya generate: position %lld, token %lld%s\n", (long long) pos, (long long) tok,
+            std::fprintf(stderr, "glm generate: position %lld, token %lld%s\n", (long long) pos, (long long) tok,
                          pos < n_prompt ? " (prompt)" : "");
         // **`d.layers` IS THE BLOB'S LAYER AXIS, NOT A COUNTER.**  The adapter uses it to index
         // `experts.bin` as `layer * n_expert + expert`, so it MUST restart at 0 for every token.  Leaving it
@@ -8181,7 +8181,7 @@ int glm_main(int argc, char** argv) {
         if (o.no_capture) {
             if (!almond::glm::core::session_token(wt, g, pos, /*pos_base=*/0, ss, d_parts, main_cs,
                                              o.sync_every_layer, err)) {
-                std::fprintf(stderr, "maya generate: session_token: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: session_token: %s\n", err.c_str());
                 return 1;
             }
         } else {
@@ -8189,12 +8189,12 @@ int glm_main(int argc, char** argv) {
             if (tgraph.captured) {
                 if (!almond::glm::core::session_run_token(g, pos, /*pos_base=*/0, ss, tgraph, pool_fn, pool_user,
                                                      loop_scratch.y_miss, main_cs, err)) {
-                    std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+                    std::fprintf(stderr, "glm generate: %s\n", err.c_str());
                     return 1;
                 }
             } else if (!almond::glm::core::session_loop(g, pos, /*pos_base=*/0, ss, gr, pool_fn, hit_fn, pool_user, /*overlap=*/true, main_cs,
                                         err, layer_stage, &loop_scratch)) {
-                std::fprintf(stderr, "maya generate: session_loop: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: session_loop: %s\n", err.c_str());
                 return 1;
             }
         }
@@ -8205,7 +8205,7 @@ int glm_main(int argc, char** argv) {
             std::fwrite(final_r_host.data(), sizeof(float), final_r_host.size(), final_r);
         }
         if (drive.d.failed) {
-            std::fprintf(stderr, "maya generate: the expert pool failed at layer %lld expert %lld: %s\n",
+            std::fprintf(stderr, "glm generate: the expert pool failed at layer %lld expert %lld: %s\n",
                          (long long) drive.d.fail_layer, (long long) drive.d.fail_expert,
                          drive.d.fail ? drive.d.fail : "(no message)");
             return 1;
@@ -8222,7 +8222,7 @@ int glm_main(int argc, char** argv) {
             std::fwrite(half_stage, sizeof(float), (size_t) g.n_layers * (size_t) half_stride, half_dump);
         }
         if (!run_head(token_stream)) {
-            std::fprintf(stderr, "maya generate: lm_head: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: lm_head: %s\n", err.c_str());
             return 1;
         }
         // **A CHECKPOINT AFTER THE HEAD, BECAUSE AN ASYNC FAULT IS STICKY AND LIES ABOUT WHERE IT HAPPENED.**
@@ -8231,7 +8231,7 @@ int glm_main(int argc, char** argv) {
         // faulted had completed its own error checks successfully - because its kernels had not run yet.  A
         // sticky error surfaces at the next SYNCHRONISING call, which is whatever happens to come next.
         if (!o.stream_token && cudaDeviceSynchronize() != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: the device faulted in lm_head at position %lld: %s\n",
+            std::fprintf(stderr, "glm generate: the device faulted in lm_head at position %lld: %s\n",
                          (long long) pos, cudaGetErrorString(cudaGetLastError()));
             return 1;
         }
@@ -8246,18 +8246,18 @@ int glm_main(int argc, char** argv) {
         if (read_logits && (cudaMemcpyAsync(logits.data(), d_logits, (size_t) n_vocab * 4,
                                            cudaMemcpyDeviceToHost, (cudaStream_t) token_stream) != cudaSuccess ||
                             cudaStreamSynchronize((cudaStream_t) token_stream) != cudaSuccess)) {
-            std::fprintf(stderr, "maya generate: reading the logits back failed\n");
+            std::fprintf(stderr, "glm generate: reading the logits back failed\n");
             return 1;
         }
         int bad = 0;
         if (read_logits) for (float v : logits) if (!std::isfinite(v)) ++bad;
         if (bad != 0) {
-            std::fprintf(stderr, "maya generate: %d of %lld logits are not finite at position %lld\n", bad,
+            std::fprintf(stderr, "glm generate: %d of %lld logits are not finite at position %lld\n", bad,
                          (long long) n_vocab, (long long) pos);
             return 1;
         }
         if (emit_logits && std::fwrite(logits.data(), sizeof(float), (size_t) n_vocab, dump) != (size_t) n_vocab) {
-            std::fprintf(stderr, "maya generate: cannot write logits at position %lld\n", (long long) pos);
+            std::fprintf(stderr, "glm generate: cannot write logits at position %lld\n", (long long) pos);
             std::fclose(dump);
             return 1;
         }
@@ -8281,7 +8281,7 @@ int glm_main(int argc, char** argv) {
         if (cudaMemcpyAsync(&next, d_next, sizeof(int), cudaMemcpyDeviceToHost,
                             (cudaStream_t) token_stream) != cudaSuccess ||
             cudaStreamSynchronize((cudaStream_t) token_stream) != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: reading the sampled token back failed: %s\n",
+            std::fprintf(stderr, "glm generate: reading the sampled token back failed: %s\n",
                          cudaGetErrorString(cudaGetLastError()));
             return 1;
         }
@@ -8291,13 +8291,13 @@ int glm_main(int argc, char** argv) {
         if (o.native_flash_attn_short) for (int64_t i = 0; i < g.n_qsa_layers(); ++i) {
             const int32_t status = ss.qsa_states[i].host_step[almond::glm::kernels::kStepCount];
             if (status != 0) {
-                std::fprintf(stderr, "maya generate: native attention status %d at QSA layer %lld, position %lld\n",
+                std::fprintf(stderr, "glm generate: native attention status %d at QSA layer %lld, position %lld\n",
                              status, (long long) i, (long long) pos);
                 return 1;
             }
         }
         if (next < 0 || next >= n_vocab) {
-            std::fprintf(stderr, "maya generate: the sampler returned %d, outside 0..%lld\n", next,
+            std::fprintf(stderr, "glm generate: the sampler returned %d, outside 0..%lld\n", next,
                          (long long) (n_vocab - 1));
             return 1;
         }
@@ -8347,12 +8347,12 @@ int glm_main(int argc, char** argv) {
             std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
             std::string e;
             if (!in || !parse_i64_list(text.c_str(), oracle, e)) {
-                std::fprintf(stderr, "maya generate: cannot read --spec-oracle %s\n", o.spec_oracle.c_str());
+                std::fprintf(stderr, "glm generate: cannot read --spec-oracle %s\n", o.spec_oracle.c_str());
                 return 2;
             }
         }
         if (thits.d_res == nullptr) {
-            std::fprintf(stderr, "maya generate: --spec needs the device residency table (--expert-profile, "
+            std::fprintf(stderr, "glm generate: --spec needs the device residency table (--expert-profile, "
                                  "--expert-cache and the token graph)\n");
             return 2;
         }
@@ -8365,12 +8365,12 @@ int glm_main(int argc, char** argv) {
         vh.slot_off = xcache.slot_offsets();   // E-6: the device plan's pointers
         vh.n_slots = xcache.slots();
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         const bool use_mtp = !o.mtp.empty();
         if (use_mtp && !mtp.bind(wt, &native_head, ver.final_R_all(), err)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         mem_mark("the verifier and the drafter's binding");
@@ -8391,7 +8391,7 @@ int glm_main(int argc, char** argv) {
         double ms_adapt = 0;
         cudaStream_t adapt_stream = nullptr;
         if (!drive.d.usage.empty() && cudaStreamCreateWithFlags(&adapt_stream, cudaStreamNonBlocking) != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: cannot create the refill stream\n");
+            std::fprintf(stderr, "glm generate: cannot create the refill stream\n");
             return 1;
         }
         // plan v0.3 P6: swaps in flight - (residency index, slot) admitted when adapt_ev has completed
@@ -8445,7 +8445,7 @@ int glm_main(int argc, char** argv) {
                 if (slot < 0 || b == nullptr ||
                     cudaMemcpyAsync(xcache.device_slot(slot), b, (size_t) almond::glm::kernels::cpu::expert_layout().blob_bytes(s.layer),
                                     cudaMemcpyHostToDevice, adapt_stream) != cudaSuccess) {
-                    std::fprintf(stderr, "maya generate: an adaptive refill failed\n");
+                    std::fprintf(stderr, "glm generate: an adaptive refill failed\n");
                     return false;
                 }
                 host_res[out] = almond::glm::core::kNotResident;   // evicted now: the CPU computes it meanwhile
@@ -8467,7 +8467,7 @@ int glm_main(int argc, char** argv) {
         bool first_window = native_pack;
         if (use_mtp && !first_window &&
             !mtp.draft_first(o.spec, ss.R, x, p - 1, drafts.data(), err, dprob.data(), (float) o.spec_min_p)) {
-            std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+            std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
         std::vector<int32_t> window((size_t) o.spec), outv((size_t) o.spec);
@@ -8506,7 +8506,7 @@ int glm_main(int argc, char** argv) {
             const bool timed_round = !first_window;
             ++window_hist[(size_t) T];
             if (p + T > o.max_context) {
-                std::fprintf(stderr, "maya generate: ran out of context at position %lld\n", (long long) p);
+                std::fprintf(stderr, "glm generate: ran out of context at position %lld\n", (long long) p);
                 return 2;
             }
             window[0] = x;
@@ -8522,11 +8522,11 @@ int glm_main(int argc, char** argv) {
             drive.d.failed = false;
             apply_pending(false);
             if (!ver.run(T, window.data(), p, &drive_pool_multi, &drive, outv.data(), err)) {
-                std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: %s\n", err.c_str());
                 return 1;
             }
             if (drive.d.failed) {
-                std::fprintf(stderr, "maya generate: the expert pool failed at layer %lld expert %lld: %s\n",
+                std::fprintf(stderr, "glm generate: the expert pool failed at layer %lld expert %lld: %s\n",
                              (long long) drive.d.fail_layer, (long long) drive.d.fail_expert,
                              drive.d.fail ? drive.d.fail : "(no message)");
                 return 1;
@@ -8545,7 +8545,7 @@ int glm_main(int argc, char** argv) {
                 adapt_thr = std::thread([&] { adapt_ok = adapt(); });
             if (!ver.commit(a + 1, err)) {
                 if (adapt_thr.joinable()) adapt_thr.join();
-                std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: %s\n", err.c_str());
                 return 1;
             }
             ++rounds;
@@ -8569,7 +8569,7 @@ int glm_main(int argc, char** argv) {
             if (adapt_thr.joinable()) adapt_thr.join();
             if (!adapt_ok) return 1;
             if (!drafted) {
-                std::fprintf(stderr, "maya generate: %s\n", err.c_str());
+                std::fprintf(stderr, "glm generate: %s\n", err.c_str());
                 return 1;
             }
             x = outv[(size_t) a];
@@ -8578,7 +8578,7 @@ int glm_main(int argc, char** argv) {
             total_ms += round_ms;
             if (timed_round) policy.observe(from_sfx, T, a, sfx_match, round_ms);
             if (rounds % 64 == 0)
-                std::fprintf(stderr, "maya generate: position %lld, %lld tokens, %lld rounds\n", (long long) p,
+                std::fprintf(stderr, "glm generate: position %lld, %lld tokens, %lld rounds\n", (long long) p,
                              (long long) produced.size(), (long long) rounds);
         }
         std::printf("%-24s %lld rounds of %d, drafts accepted %lld of %lld (%.3f), %.2f tokens per round\n",
@@ -8628,7 +8628,7 @@ int glm_main(int argc, char** argv) {
     }
 
     if (dump != nullptr && std::fclose(dump) != 0) {
-        std::fprintf(stderr, "maya generate: cannot finish logits dump\n");
+        std::fprintf(stderr, "glm generate: cannot finish logits dump\n");
         return 1;
     }
     if (layer_dump != nullptr) {
@@ -8668,12 +8668,12 @@ int glm_main(int argc, char** argv) {
         std::vector<float> mx((size_t) g.n_embd);
         if (cudaMemcpy(mx.data(), ss.block.mixed, mx.size() * sizeof(float), cudaMemcpyDeviceToHost) !=
             cudaSuccess) {
-            std::fprintf(stderr, "maya generate: reading mixed back failed\n");
+            std::fprintf(stderr, "glm generate: reading mixed back failed\n");
             return 1;
         }
         std::FILE* mf = std::fopen(o.dump_mixed.c_str(), "wb");
         if (mf == nullptr) {
-            std::fprintf(stderr, "maya generate: cannot write %s\n", o.dump_mixed.c_str());
+            std::fprintf(stderr, "glm generate: cannot write %s\n", o.dump_mixed.c_str());
             return 1;
         }
         std::fwrite(mx.data(), sizeof(float), mx.size(), mf);
@@ -8688,12 +8688,12 @@ int glm_main(int argc, char** argv) {
     if (!o.dump_residual.empty()) {
         std::vector<float> R((size_t) g.hc * g.n_embd);
         if (cudaMemcpy(R.data(), ss.R, R.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
-            std::fprintf(stderr, "maya generate: reading R back failed\n");
+            std::fprintf(stderr, "glm generate: reading R back failed\n");
             return 1;
         }
         std::FILE* rf = std::fopen(o.dump_residual.c_str(), "wb");
         if (rf == nullptr) {
-            std::fprintf(stderr, "maya generate: cannot write %s\n", o.dump_residual.c_str());
+            std::fprintf(stderr, "glm generate: cannot write %s\n", o.dump_residual.c_str());
             return 1;
         }
         const int32_t hdr[2] = {(int32_t) g.hc, (int32_t) g.n_embd};

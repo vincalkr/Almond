@@ -296,7 +296,7 @@ __device__ __forceinline__ float vec_dot_iq4_nl_q8_1(const void* __restrict__ vb
 }
 
 // IQ4_XS: 256 values as 8 sub-blocks of 32 (6-bit scale each); one call covers one sub-block (iqs = 4 * sub-block),
-// and `bq8_1` is the super-block's first q8_1 block, so the call's activation is bq8_1[iqs / 4].  Strata's Qwen IQ3_S
+// and `bq8_1` is the super-block's first q8_1 block, so the call's activation is bq8_1[iqs / 4].  the Qwen IQ3_S
 // file keeps one layer's routed gate/up experts in this format.
 __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
                                                      const int& kbx, const int& iqs) {
@@ -506,7 +506,7 @@ __global__ void quantize_q8_1_kernel(const float* __restrict__ x, block_q8_1* __
         amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
         sum += __shfl_xor_sync(0xffffffffu, sum, o);
     }
-    const float d = fminf(amax / 127.0f, 65504.0f);   // finite in FP16 (Strata #1448); below that nothing changes
+    const float d = fminf(amax / 127.0f, 65504.0f);   // finite in FP16 (Almond #1448); below that nothing changes
     const int8_t q = amax == 0.0f ? 0 : fmaxf(-127.0f, fminf(127.0f, roundf(xi / d)));
     const long long ib = i / 32, iqs = i % 32;
     y[ib].qs[iqs] = q;

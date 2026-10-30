@@ -2,7 +2,7 @@
 """ds41_pack_meta.py - a metadata overlay for the GSQ-RCO IQ2_XXS GGUF pack.
 
 The ISTA-DASLab / RCO packs carry llama.cpp/HF metadata (`embedding_length`, `block_count`,
-`attention.head_count_kv`, ...), not the flat `deepseek41.*` keys ds41e reads, and their Engram arrays live as I32/I64
+`attention.head_count_kv`, ...), not the flat `deepseek41.*` keys Almond reads, and their Engram arrays live as I32/I64
 tensors instead of KV entries. This writes ONE tiny GGUF with exactly the keys and full integer arrays that
 `src/ds41/ds41_geometry.hpp` expects: geometry scalars and the config JSON come from the checkpoint's reference
 keys (`local/rco-iq2xxs-meta/geometry-keys.json`, or any GGUF of the same checkpoint that carries them), compress ratios/sources are cross-checked against which tensors the pack holds,

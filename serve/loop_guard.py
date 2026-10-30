@@ -1,6 +1,6 @@
-# Vendored from project-maya (MIT, serve/loop_guard.py at v1.1.37), unchanged.
+# Vendored from the GLM engine (MIT, serve/loop_guard.py at v1.1.37), unchanged.
 """serve/loop_guard.py - the loop guard: an answer that has fallen into a loop - the same block of tokens again and
-again until the token cap (a greedy MiniMax-M3.1 Maya-XS answer wrote one number sequence for 12K tokens) - is seen
+again until the token cap (a greedy MiniMax-M3.1 a 2-bit quant answer wrote one number sequence for 12K tokens) - is seen
 as it starts and broken.  It works on the token ids the server reads from the engine, so every engine (GLM,
 DeepSeek, MiniMax) gets it alike, in the thinking and in the answer.
 
@@ -35,7 +35,7 @@ import re
 from typing import Callable, NamedTuple
 
 P_MIN = 8               # the shortest block: shorter loops (one token, "0, 0, 0") repeat a multiple of it in 8..15
-P_MAX = 2048            # the longest: a loop of whole paragraphs or a plan written again (Maya-S thought a ~1,170-
+P_MAX = 2048            # the longest: a loop of whole paragraphs or a plan written again (an IQ2_XXS quant thought a ~1,170-
                         # token plan four times); answers without a loop hold back and cost the same as with 400
 SHORT_BELOW = 32        # blocks under this many tokens must repeat REPS_SHORT times, longer ones REPS_LONG times
 REPS_SHORT = 4

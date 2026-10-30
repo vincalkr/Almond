@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Almond is a multi-model MoE engine, born from ds41e (../ds41e). Today it runs DeepSeek-V4.1-Flash-1017 (the published GSQ-RCO IQ2_XXS pack) on an AMD RX 7900 XTX (ROCm/HIP), a second
+Almond is a multi-model MoE engine. Today it runs DeepSeek-V4.1-Flash-1017 (the published GSQ-RCO IQ2_XXS pack) on an AMD RX 7900 XTX (ROCm/HIP), a second
 24 GB card as an expert tier, system RAM and NVMe: a C++/HIP engine (`src/ds41`, with the few libraries
 it links in `src/` and `include/`), an OpenAI- and Anthropic-compatible server with a web app (`serve/`, started
 through `tools/v41/serve/serve_ds41.py` by `./run.sh`), and the configurations, tools and measurements in `local/`,
@@ -23,9 +23,9 @@ through `tools/v41/serve/serve_ds41.py` by `./run.sh`), and the configurations, 
   table (`DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`, 110.6 GB, 144 bytes a row), which `local/fetch-rco-1017.sh`
   downloads and which the engine falls back to when a configuration names tables the machine does not have (it
   prints that it does).
-- `models/` is a symlink to `../ds41e/models` (the same 319 GB, not copied); new models go in `models/` too.
-- Never name this folder `Strata*`: a sibling Strata install's setup moves the `models/` of every sibling folder named
-  `Strata*` into its `Strata-data`.
+- `models/` is a symlink to `../Almond/models` (the same 319 GB, not copied); new models go in `models/` too.
+- Never name this folder `Almond*`: a sibling Almond install's setup moves the `models/` of every sibling folder named
+  `Almond*` into its `Almond-data`.
 - The plan for the multi-model engine and the Go server: `docs/ALMOND_PLAN.md`.
 
 ## Working on the code

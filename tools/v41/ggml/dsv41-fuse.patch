@@ -12,7 +12,7 @@
              struct ggml_tensor  * a,
              int                   mode);
  
-+    // Strata-DS4: the HC pre/post mixes of one model.py Block.hc_mixes in ONE op - the same values as the stock-op
++    // Almond: the HC pre/post mixes of one model.py Block.hc_mixes in ONE op - the same values as the stock-op
 +    // composite src/ds41/ds41_dense.cpp hc_mixes builds (mul, add, sigmoid, ggml_scale / ggml_scale_bias), bit for
 +    // bit on CUDA and CPU.  Replaces 4 nodes per mix with 1: 16 of every layer's ~82 tiny kernels.
 +    //   mixes: F32 [2*hc, n_tokens] contiguous   scale: F32 [2]   base: F32 [2*hc]   result: F32 [hc, 2*n_tokens]
@@ -110,7 +110,7 @@
      }
  }
 +
-+// ggml_compute_forward_dsv41_hc_mixes (Strata-DS4): the two HC mixes of one model.py Block.hc_mixes.  The same steps,
++// ggml_compute_forward_dsv41_hc_mixes (Almond): the two HC mixes of one model.py Block.hc_mixes.  The same steps,
 +// in the same order, as the engine's stock-op composite (ggml_compute_forward_mul -> ggml_vec_mul_f32,
 +// ggml_compute_forward_add -> ggml_vec_add_f32, ggml_compute_forward_sigmoid -> ggml_vec_sigmoid_f32,
 +// ggml_compute_forward_scale -> ggml_vec_scale_f32 / ggml_vec_mad1_f32): one plain product, one plain sum (volatile:
@@ -210,7 +210,7 @@
  }
 +
 +
-+// ---- Strata-DS4: GGML_OP_DSV41_HC_MIXES - the two HC mixes of one model.py Block.hc_mixes in one kernel.
++// ---- Almond: GGML_OP_DSV41_HC_MIXES - the two HC mixes of one model.py Block.hc_mixes in one kernel.
 +// src/ds41/ds41_dense.cpp hc_mixes builds them from mul + add + sigmoid + ggml_scale(_bias); this repeats that
 +// composite step for step under the same -use_fast_math flags, so the values are bit-identical:
 +// a stock binary op is one plain op (__fmul_rn / __fadd_rn: .rn.ftz, never contracted, = binbcast's a op b), ggml_scale

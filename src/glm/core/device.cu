@@ -52,7 +52,7 @@ std::string arch_problem(const cudaDeviceProp& p, int ordinal) {
     const std::string arch = base_arch(p.gcnArchName);
     const std::string card = "GPU " + std::to_string(ordinal) + " (" + p.name + ", " + arch + ")";
     if (!compiled_for(arch)) {
-        return card + " is not an architecture this Maya engine was compiled for (" + ALMOND_HIP_ARCHS +
+        return card + " is not an architecture this the GLM engine engine was compiled for (" + ALMOND_HIP_ARCHS +
                "); compile it for this card (./maya.sh --backend hip, or -DCMAKE_HIP_ARCHITECTURES=" + arch +
                ", docs/AMD_MAYA.md) or choose another GPU with HIP_VISIBLE_DEVICES";
     }
@@ -60,7 +60,7 @@ std::string arch_problem(const cudaDeviceProp& p, int ordinal) {
         // The wave64 compat path (gfx908): the hip_compat layer maps a CUDA warp onto a logical 32-lane half of
         // the 64-lane wavefront, so a wave64 card is fine when the engine was compiled for its exact arch.
         if (p.warpSize != 64) {
-            return card + " runs wave" + std::to_string(p.warpSize) + "; Maya's HIP kernels need wave32 (or wave64 via the compat layer)";
+            return card + " runs wave" + std::to_string(p.warpSize) + "; the GLM engine's HIP kernels need wave32 (or wave64 via the compat layer)";
         }
     }
     return "";

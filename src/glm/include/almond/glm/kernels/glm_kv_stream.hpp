@@ -29,7 +29,7 @@
 
 namespace almond::glm::kernels::glmf {
 
-/// The fewest positions a streamed layer keeps in VRAM: Strata's qsa_kv_resident_min, ten of the indexer's 2,048-cell
+/// The fewest positions a streamed layer keeps in VRAM: the qsa_kv_resident_min, ten of the indexer's 2,048-cell
 /// selections (and at least kKvResolveBlock slots: one clock sweep step must not see a slot twice).
 inline constexpr int64_t kKvResidentMin = 20480;
 inline constexpr int kKvResolveBlock = 1024;

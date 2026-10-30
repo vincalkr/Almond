@@ -12,7 +12,7 @@
              struct ggml_tensor  * post,
              struct ggml_tensor  * comb);
  
-+    // Strata-DS4: DeepSeek-V4.1's activation quantize-dequantize (model.py act_quant / fp4_act_quant) in one op, the
++    // Almond: DeepSeek-V4.1's activation quantize-dequantize (model.py act_quant / fp4_act_quant) in one op, the
 +    // same values as the stock-op composite src/ds41/ds41_ops.hpp ds41_fake_quant builds (bit for bit on CUDA):
 +    //   mode 0: FP8 E4M3, blocks of 32, power-of-two scale     mode 1: FP4 E2M1, blocks of 16, E4M3 scale
 +    //   mode 2: FP4 E2M1, blocks of 32, power-of-two scale
@@ -99,7 +99,7 @@
      }
  }
 +
-+// ggml_compute_forward_dsv41_fake_quant (Strata-DS4): DeepSeek-V4.1's activation quantize-dequantize, the same steps as
++// ggml_compute_forward_dsv41_fake_quant (Almond): DeepSeek-V4.1's activation quantize-dequantize, the same steps as
 +// src/ds41/ds41_ops.hpp (exact float tricks: Veltkamp power-of-two split, round-half-even by 1.5 * 2^23)
 +
 +static inline float dsv41_pow2_ceil(float a) {
@@ -190,7 +190,7 @@
  }
 +
 +
-+// ---- Strata-DS4: GGML_OP_DSV41_FAKE_QUANT - DeepSeek-V4.1's activation quantize-dequantize in one kernel.
++// ---- Almond: GGML_OP_DSV41_FAKE_QUANT - DeepSeek-V4.1's activation quantize-dequantize in one kernel.
 +// src/ds41/ds41_ops.hpp builds it from ~45 stock ops per call (abs, pool max, clamp, div, scale, step, ...);
 +// this repeats that composite step for step under the same -use_fast_math flags, so the values are bit-identical:
 +// a stock binary op is one plain op (__fadd_rn / __fsub_rn / __fmul_rn: .rn.ftz, never contracted, = binbcast's

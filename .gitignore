@@ -120,3 +120,4 @@ core.[0-9]*
 build-vision/
 local/glm-slots/
 local/vision-memory.json
+local/.run-ctx-*

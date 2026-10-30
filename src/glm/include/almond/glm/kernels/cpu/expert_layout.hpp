@@ -1,6 +1,6 @@
 // include/almond/glm/kernels/cpu/expert_layout.hpp - plan v0.3 P6: where each routed expert lives in experts.bin.
 //
-// A Q2_0 pack (tools/glm_pack.py) has one blob size for every layer, `BLOB`, in the Strata expert form.  A
+// A Q2_0 pack (tools/glm_pack.py) has one blob size for every layer, `BLOB`, in the Almond expert form.  A
 // native pack (tools/iq_pack.py, the IQ2_XS / IQ3_XXS files) keeps each expert's raw GGUF slices, so the blob
 // size and the formats change from layer to layer; `native_experts.txt` says how.  Everything that touches an
 // expert blob - the arena, the VRAM tier, the prompt path, the CPU pool, the GPU window - asks this table.

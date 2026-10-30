@@ -1,4 +1,4 @@
-// src/spec/draft_cost_test.cpp - DraftPolicy's cost-aware window (maya-ds4's DS4_DRAFT_COST=1) on the CPU, with
+// src/spec/draft_cost_test.cpp - DraftPolicy's cost-aware window (the DeepSeek path's DS4_DRAFT_COST=1) on the CPU, with
 // synthetic round times and draft acceptance:
 //   1. rows that cost little: the whole block is verified;
 //   2. rows that cost a lot: fewer drafts - the size that commits the most tokens a millisecond, checked against every

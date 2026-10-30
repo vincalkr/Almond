@@ -863,16 +863,16 @@ class AlmondEngine:
         for line in reversed(tail.splitlines()):
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
-                        "line: " + line.strip() + " - please report it at github.com/Niko1221/Strata/issues.")
+                        "line: " + line.strip() + " - please report it at github.com/Niko1221/Almond/issues.")
         proc = self.proc                                 # None while a restart has not started the next one yet
         rc = proc.poll() if proc is not None else None
         if rc is not None and rc >= 0 and self.last_err:  # its own last words on stdout: they say why
             return (f"The engine exited (code {rc}) after it reported: {self.last_err} - please report it at "
-                    "github.com/Niko1221/Strata/issues with the log.")
+                    "github.com/Niko1221/Almond/issues with the log.")
         last = next((x.strip() for x in reversed(tail.splitlines()) if x.strip().startswith(("almond", "ERR"))), "")
         if rc is not None and rc >= 0 and last:          # it ended by itself: its own last words say why (#215)
             return (f"The engine exited (code {rc}). Its last log line: {last} - if that does not explain it, please "
-                    "report it at github.com/Niko1221/Strata/issues with the log.")
+                    "report it at github.com/Niko1221/Almond/issues with the log.")
         return ("The usual cause is running out of RAM: Linux then ends the biggest program (check: sudo dmesg | "
                 "grep -i -E 'killed process|out of memory'); Windows slows down instead. Close other programs or use a "
                 "smaller model (Q2_0 / IQ2_XS).")
@@ -1729,7 +1729,7 @@ class AlmondEngine:
         sends), so the next request starts it again: killed now, its GPU and RAM go back with the process."""
         self.silent_note = ("The engine and the server lost step (issue #481; a very slow PC can raise "
                             "\"engine_silence_s\" in the config, 0 = wait forever). If it happens again, please add "
-                            "the end of the engine log to github.com/Niko1221/Strata/issues/481.")
+                            "the end of the engine log to github.com/Niko1221/Almond/issues/481.")
         self.ended = True                               # not alive from now: the next request restarts it
         proc = self.proc
         try:
@@ -1984,7 +1984,7 @@ class Vision:
         self.stopped = True
         self.lock = threading.Lock()
         self.cache: dict[str, tuple[Path, int]] = {}
-        # on demand (project-maya's way, "on_demand": true in the config's "vision"): no process until a picture needs
+        # on demand (the way, "on_demand": true in the config's "vision"): no process until a picture needs
         # encoding; the engine first empties the tail of its expert pool on the first GPU and frees it (VLEND), the
         # encoder starts in that memory, and once the request's pictures are encoded (active()) it ends and the engine
         # takes the memory back (VRECLAIM): between pictures the decode keeps its whole expert pool
@@ -2251,7 +2251,7 @@ class Vision:
 
 
 def vision_footprint(vcfg: dict, env: dict, cache_file: Path) -> tuple[int, int] | None:
-    """(image token cap, bytes) for the on-demand vision encoder on the first GPU (project-maya's): measured once by
+    """(image token cap, bytes) for the on-demand vision encoder on the first GPU (its shipped): measured once by
     `almond-vision --measure` before the model loads, cached per encoder file and cap in `cache_file`.  A cap the
     config does not set is the largest of 4096 / 2048 / 1024 image tokens within 15% of the card.  None: no measurement."""
     try:
@@ -2864,14 +2864,14 @@ class Service:
         self.before_load = None
         self.vram_reserve = None                         # #533: the last POST /v1/vram reserve (None: the start's)
         self.reasoning_loop_recovery = False
-        self.loop_guard = False                          # project-maya's loop guard (serve/loop_guard.py): opt-in
+        self.loop_guard = False                          # the loop guard (serve/loop_guard.py): opt-in
         self.loop_guard_counts = {"detected": 0, "penalised": 0, "thinking_closed": 0, "stopped": 0}
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
         self.reasoning_budget_by_effort = {}             # {"low": N, "high": N, "max": N}: per level (0: none)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
         self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
-        # The ids that end an answer (project-maya's rule): only strings that are ONE special token in this
+        # The ids that end an answer (the rule): only strings that are ONE special token in this
         # vocabulary - GLM-5.3 has no <|im_end|>, and its text pieces occur inside ordinary answers.  GLM ends a turn
         # with the next role's token (<|user|> / <|observation|>).
         def _special_ids(s: str) -> list[int]:
@@ -3766,7 +3766,7 @@ class Service:
         looped, next_loop_check = False, LOOP_CHECK_EVERY       # #728: reasoning that repeats whole passages
         loop_closed = False                                     # ... closed by "close" (the wrap-up's message)
         raw_ids = []                                    # every generated id (ALMOND_DEBUG: dump raw model text)
-        # project-maya's loop guard (serve/loop_guard.py, "loop_guard": true): a block of tokens repeated back to back
+        # the loop guard (serve/loop_guard.py, "loop_guard": true): a block of tokens repeated back to back
         # gets a short repetition penalty (the first loop in the answer, the first two in the thinking), the third in
         # the thinking closes it (the budget's wrap-up), a loop that comes back in the answer ends it.  What was sent
         # stays sent: nothing is held back.  Tool calls are left alone.
@@ -6198,7 +6198,7 @@ def main() -> int:
         raise SystemExit("[almond] config \"reasoning_loop_recovery\" must be false, \"stop\", \"recover\" or \"close\", "
                          f"not {recovery!r}")
     svc.reasoning_loop_recovery = recovery
-    lg = os.environ.get("ALMOND_LOOP_GUARD")             # project-maya's loop guard: the config's "loop_guard",
+    lg = os.environ.get("ALMOND_LOOP_GUARD")             # the loop guard: the config's "loop_guard",
     svc.loop_guard = (lg.strip().lower() not in ("0", "off", "false", "no")) if lg is not None \
         else cfg.get("loop_guard") is True              # ALMOND_LOOP_GUARD=1/0 wins
     if svc.loop_guard:

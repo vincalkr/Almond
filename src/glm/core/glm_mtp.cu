@@ -104,7 +104,7 @@ bool Glm5Model::mtp_ready() const { return fast_ != nullptr && mtp_dec_ && mtp_i
 // Which tokens.  GLM's byte-level BPE lays its vocabulary out by script: ids [0, 98304) the Latin / code block (English,
 // code, markup, the Latin-script languages), then the Han block (the most frequent first) with the multi-digit numbers
 // in it, then Cyrillic, Arabic, Kana ..., the control tokens from 154820.  English or code output stays in the first
-// block but for its numbers.  Maya-S's greedy answers to the bench's prompts (2304 tokens: Python, Rust, HTML/JS,
+// block but for its numbers.  an IQ2_XXS quant's greedy answers to the bench's prompts (2304 tokens: Python, Rust, HTML/JS,
 // TCP/UDP, photosynthesis, the history of computing) had 2 tokens outside the vocabulary below (98,304 + 437 rows, 64%
 // of the head).  A miss costs the round its later drafts, ~0.9% of the tokens a round for each 1% missed, against the
 // ~2% of a round the smaller head saves.  So the vocabulary is read from the GGUF's tokens:
@@ -455,7 +455,7 @@ bool Glm5Model::mtp_fill_prev(int32_t token, int64_t p, std::string& err) {
 // of rounds that reached draft i (all before it accepted) and accepted it.  ALMOND_GLM_MTP_ADAPT=0: always n_cap.
 //
 // The search starts at ALMOND_GLM_MTP_START (2) and climbs: the start runs a stint of measured rounds, then each
-// neighbour of the best a short probe, until the best's neighbours are both measured and lose (Maya-S on the Radeon
+// neighbour of the best a short probe, until the best's neighbours are both measured and lose (an IQ2_XXS quant on the Radeon
 // 8065S: trying every length first cost a machine's first answer 12.7 tok/s, against 21-27 after; length 2 wins
 // there).  The token path (length 0) is only tried where length 1 is the best.  Then one neighbour of the best gets a
 // probe now and then, the gap doubling while the best stays.
@@ -573,7 +573,7 @@ bool Glm5Model::decode_mtp(almond::glm::kernels::SamplerParams& sp, int64_t max_
     constexpr double kOutMax = 0.02;
     // the acceptance a length's choice weighs is the recent text's: each draft position's counts decay over its last
     // ALMOND_GLM_MTP_ACC_WINDOW (64) comparisons (0: every comparison since the load).  A whole-session count let a
-    // request's easy start speak for its hard part (Maya-S on the Radeon 8065S kept 2 drafts through a 1536-token essay,
+    // request's easy start speak for its hard part (an IQ2_XXS quant on the Radeon 8065S kept 2 drafts through a 1536-token essay,
     // 57% of the drafts accepted, 21.3 tok/s, where 1 gives ~22.5).
     static const double acc_keep = [] {
         const char* e = getenv("ALMOND_GLM_MTP_ACC_WINDOW");

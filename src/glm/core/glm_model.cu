@@ -531,7 +531,7 @@ bool Glm5Geometry::from_gguf(const almond::glm::GgufFile& g, Glm5Geometry& out, 
     bool ok = true;
     out.n_embd = (int) num("embedding_length", out.n_embd, ok);
     const int block_count = (int) num("block_count", out.n_layers, ok);
-    // the trunk vs the NextN/MTP block: some converters (antirez's) emit an explicit
+    // the trunk vs the NextN/MTP block: some converters (upstream's) emit an explicit
     // trunk_block_count; others (llama.cpp's, unsloth's) count the MTP layer INSIDE block_count
     // (46 with nextn_predict_layers 1).  Prefer the explicit key, derive otherwise.
     const int trunk_explicit = (int) num("trunk_block_count", 0, ok);
@@ -1332,8 +1332,8 @@ bool Glm5Model::load_pack_split(const std::string& pack_dir, int64_t max_ctx, co
         }
     }
     }
-    // the chunks are the smallest part's (as Strata's split): the others keep their pinned staging to that, and a
-    // later card that holds the first one's chunk down is named (Strata #448: a small card in a split caps every
+    // the chunks are the smallest part's (as the split): the others keep their pinned staging to that, and a
+    // later card that holds the first one's chunk down is named (Almond #448: a small card in a split caps every
     // stage's chunk - prompts read slower than on the first card alone)
     int tmin = 0;
     for (Glm5Model* p = this; p != nullptr; p = p->split_next_.get())
@@ -1456,27 +1456,27 @@ static double host_read_bps() {
     return sink.load() == 1 ? best + 1.0 : best;   // (the sum keeps the reads)
 }
 
-// ---------------------------------------------------------------- --layer-split auto: Strata's split search
+// ---------------------------------------------------------------- --layer-split auto: the split search
 // Every placement of the layers on the GPUs is priced by the decode time it predicts, and the cheapest one that can
-// start is taken - Strata's `--layer-split auto` (src/program/generate.cpp), with this engine's own measured terms
-// where Strata's are fits to its model:
+// start is taken - the `--layer-split auto` (src/program/generate.cpp), with this engine's own measured terms
+// where the are fits to its model:
 //   - a part's room for experts: its free VRAM less its layers' dense weights and state at the context (index.txt and
 //     the GGUF directory, as load_pack sizes them), the head and the draft block on the last part, its scratch, and
 //     the reserve fast_setup keeps (pool_budget: --vram-reserve-mib, or --expert-cache N on the first GPU); the pool
 //     gives every layer the same number of slots;
 //   - the experts those slots hold: each layer's most routed, their share of its routes read off the usage file's
-//     counts (ALMOND_GLM_USAGE, opt-in; the pack's expert_counts.txt without it; Strata's coverage curve 1 - (1 - f)^3,
-//     an EXL3 pack's ^1.4, ALMOND_SPLIT_COVER_B, without either - that is what Strata has to assume, its profile
+//     counts (ALMOND_GLM_USAGE, opt-in; the pack's expert_counts.txt without it; the coverage curve 1 - (1 - f)^3,
+//     an EXL3 pack's ^1.4, ALMOND_SPLIT_COVER_B, without either - that is what Almond has to assume, its profile
 //     carries only a ranking);
 //   - a layer's time on its card: the bytes it reads (its dense weights and its VRAM experts' share of the routed
-//     ones) over the card's memory bandwidth - Strata scales a fitted per-layer time by SMs x clock; and each miss:
+//     ones) over the card's memory bandwidth - Almond scales a fitted per-layer time by SMs x clock; and each miss:
 //     the expert's bytes over the parts' share of the host's RAM read speed, measured here - the CPU lane computes
-//     the experts VRAM does not hold (Strata prices a fitted miss over the PCIe link);
-//   - a token: the parts' times added (Strata), the slowest part breaking a tie - except the pipelined decode of a
+//     the experts VRAM does not hold (Almond prices a fitted miss over the PCIe link);
+//   - a token: the parts' times added (Almond), the slowest part breaking a tie - except the pipelined decode of a
 //     two-part split with the draft block, where the GPUs work on consecutive tokens: there a token costs the slower
 //     part (the draft on the last one), and the sum breaks the tie;
-//   - the startability gate (Strata #1094): every part keeps its pool's floor and can lend a 512-token prompt chunk.
-// Two to four GPUs try every placement (memoised per part and range, as Strata's four-way search); more keep the
+//   - the startability gate (Almond #1094): every part keeps its pool's floor and can lend a 512-token prompt chunk.
+// Two to four GPUs try every placement (memoised per part and range, as the four-way search); more keep the
 // proportional split (glm_auto_bounds) - except a DFlash drafter's pipelined window, whose slowest part paces every
 // draft: there a DP over the layers for each cap on the slowest part.  ALMOND_GLM_SPLIT_LOG=1 prints every
 // placement's prediction.
@@ -1630,7 +1630,7 @@ static std::vector<int> glm_search_bounds(const std::string& pack_dir, int64_t m
     const bool df_pipe = dflash > 0 && dflash_pipelined(n);
     constexpr double kDfKept = 1.5;
     // ... and there each layer also costs a fixed time a token beyond its reads (launches, the CPU lane's answer, the
-    // hops): Maya-L over 9 GPUs measured ~0.78 ms a layer on a 5060 Ti and ~0.59 on the 3090 (2.1x its bandwidth),
+    // hops): an IQ3_S quant over 9 GPUs measured ~0.78 ms a layer on a 5060 Ti and ~0.59 on the 3090 (2.1x its bandwidth),
     // ~0.4 ms of it fixed - priced by reads alone the 3090 took 10 layers and paced every draft (5.9 ms a kept draft;
     // 8 layers: 4.9 ms, 57.1 / 58.9 -> 61.6 / 63.1 tok/s).  ALMOND_GLM_SPLIT_LAYER_MS overrides it
     const double layer_fixed = !df_pipe ? 0.0
@@ -1720,7 +1720,7 @@ static std::vector<int> glm_search_bounds(const std::string& pack_dir, int64_t m
         if (c.bw <= 0) c.bw = 1e11;   // (no reading: every card the same, and the misses decide)
     const double host_bps = host_read_bps();
     // each part's lane, all at once - except under a DFlash pipelined window (3+ GPUs): there ONE pool serves every
-    // part's misses as they come (fast_setup), at about half the host's all-core read speed (Maya-L over 9 GPUs: 0.14-
+    // part's misses as they come (fast_setup), at about half the host's all-core read speed (an IQ3_S quant over 9 GPUs: 0.14-
     // 0.27 ms an 8.7 MB expert, 32-62 GB/s of 77; the host's / 9 priced a miss at ~1 ms and kept the 5060 Tis to the
     // layers their pools held whole, the 3090 to 9-10)
     const double miss_bps =
@@ -2006,7 +2006,7 @@ bool Glm5Model::load_pack_place(const std::string& pack_dir, int64_t max_ctx, st
         if (devs.size() < 2) return load_pack(pack_dir, max_ctx, err, devs.empty() ? 0 : devs[0]);
         if (devs.size() == 2 && getenv("ALMOND_GLM_DEVS") == nullptr)
             if (const char* d1 = getenv("ALMOND_GLM_DEV1")) devs[1] = std::atoi(d1);
-        // --layer-split auto: Strata's split search over two to four GPUs (and over more for a DFlash drafter's
+        // --layer-split auto: the split search over two to four GPUs (and over more for a DFlash drafter's
         // pipelined window); more (or a pack it cannot read) share the layers by free VRAM - two GPUs at the midpoint, plus two layers for the head half when the tail also runs
         // the NextN draft block (2x V100, split 22 / 23 / 24 / 25 / 26 -> 36.3 / 36.7 / 40.0 / 37.3 / 39.4 tok/s)
         const char* dfl = getenv("ALMOND_GLM_DFLASH");
@@ -2802,7 +2802,7 @@ static bool pack_shard_mmap(const std::string& path, almond::glm::core::Glm5Mode
 
 // Windows: while a file has a mapped view, every unbuffered read of it takes NTFS's cache-coherency path - the
 // decode's expert reads ran 3x as long (an expert in 24 parallel reads: 5.4 ms with the shards mapped, 1.8 ms
-// without; RTX 5090 Laptop, Intel RST RAID 0 of two NVMe drives, Maya-S24).  Once the load is done the fast path
+// without; RTX 5090 Laptop, Intel RST RAID 0 of two NVMe drives, an IQ2_XXS quant).  Once the load is done the fast path
 // reads the shards through h_direct only, and token_embd through pack_emb_src_: the table moves to the heap
 // (~0.7 GB for GLM-5.3-Flash's Q8_0 rows) and the views go.  Kept when a shard has no unbuffered handle (its reads
 // fall back to the view) or with ALMOND_GLM_KEEP_MAP=1.

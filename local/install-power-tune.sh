@@ -5,14 +5,14 @@
 #   sudo local/install-power-tune.sh             install (or update after local/power-tune.sh changed)
 #   sudo local/install-power-tune.sh uninstall
 #
-# It copies local/power-tune.sh to /usr/local/sbin/ds41e-power-tune (owned by root, not writable by the user: the
+# It copies local/power-tune.sh to /usr/local/sbin/almond-power-tune (owned by root, not writable by the user: the
 # rule below runs it as root, so a copy the user could edit would hand out root) and writes
-# /etc/sudoers.d/ds41e-power-tune, which lets the user who ran sudo run exactly that file with "on", "off" or
+# /etc/sudoers.d/almond-power-tune, which lets the user who ran sudo run exactly that file with "on", "off" or
 # "show" and nothing else.  The sudoers file is checked with visudo before it is put in place.
 set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo "run it with sudo: sudo $0 ${1:-}" >&2; exit 1; }
-BIN=/usr/local/sbin/ds41e-power-tune
-RULE=/etc/sudoers.d/ds41e-power-tune
+BIN=/usr/local/sbin/almond-power-tune
+RULE=/etc/sudoers.d/almond-power-tune
 if [ "${1:-}" = uninstall ]; then
     rm -f "$BIN" "$RULE"
     echo "removed $BIN and $RULE"

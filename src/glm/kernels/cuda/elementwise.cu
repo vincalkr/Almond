@@ -204,7 +204,7 @@ void silu_inplace(float* x, int64_t n, void* stream) {
 __global__ void doorbell_ring_kernel(uint32_t* seq) {
     __threadfence_system();
     *(volatile uint32_t*) seq = *(volatile uint32_t*) seq + 1u;
-#if defined(__HIPCC__)  // Strata #697: publish the signal itself out of AMD's GPU cache.
+#if defined(__HIPCC__)  // Almond #697: publish the signal itself out of AMD's GPU cache.
     __threadfence_system();
 #endif
 }

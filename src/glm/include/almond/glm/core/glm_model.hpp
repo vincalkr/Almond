@@ -197,7 +197,7 @@ public:
     // written after each request.  Without it nothing is kept between sessions but --expert-profile-save's profile.
     bool save_usage();
     std::string usage_path() const;
-    /// The expert profile (Strata's `profile.bin`, tools/make_profile.py --glm; setup passes the shipped
+    /// The expert profile (the `profile.bin`, tools/make_profile.py --glm; setup passes the shipped
     /// data/expert-profile-glm.bin): its ranking of every (layer, expert) pair decides how many VRAM slots each layer
     /// gets and which experts the warm-up puts in them, in place of the pack's expert_counts.txt / expert_prior.txt.
     /// Set before load_pack*: every half reads it.  Its layer axis is profile_layers(): the decoder layers, then the
@@ -207,7 +207,7 @@ public:
     /// --expert-profile-save: what the tiers learned, as a profile --expert-profile reads (rank_learned_profile over
     /// every half: the experts in VRAM now, then the routing counted, then the profile this run started from).
     bool save_expert_profile(const std::string& path, std::string& err);
-    /// --dump-routing: every route (the decode's and the prompt's) appended to `path` as Strata's trace records -
+    /// --dump-routing: every route (the decode's and the prompt's) appended to `path` as the trace records -
     /// int32 layer, int32 k, then k int32 expert ids and k float weights - tools/make_profile.py's input.
     static bool set_routing_dump(const std::string& path, std::string& err);
     bool snapshot_restore();
@@ -964,7 +964,7 @@ public:
     void dflash_capture(int il, const float* R, int n, int64_t p0, float* scratch, int rows, cudaStream_t s);
     bool dflash_ready() const;
     void dflash_reset();
-    /// The DFlash decode (Strata's serial speculative loop with a block drafter): each round the drafter's block for
+    /// The DFlash decode (the serial speculative loop with a block drafter): each round the drafter's block for
     /// the last token (up to n_max drafts, fewer where the selector's confidence is below p_min; n_max < 0: the
     /// drafter's block, p_min < 0: 0.5 on a split, 0.9 on one GPU) is checked by one verify window - pipelined on a split (window_pipe's steps, stopped at
     /// the first wrong draft), batched on one GPU - the same tokens as token-at-a-time decode for the same samples.
@@ -1021,7 +1021,7 @@ public:
     PoolBudget pool_b_;                                    // the budget the pool was carved from
     static size_t mmq_scratch_reserve();      // ... of which the prompt path's MMQ scratch pool needs this much
     // the slots a layer must keep while the pool lends the prompt path: one route's experts, the device's spares, +2
-    // (Strata's floor); ALMOND_GLM_PREFILL_KEEP lowers it, never below route + spares
+    // (the floor); ALMOND_GLM_PREFILL_KEEP lowers it, never below route + spares
     static int pool_keep(int n_exp_used);
     bool lend_tail(size_t limit, uint64_t& moved, uint64_t& dropped, std::string& err);
     bool vis_lend_ok_ = false;                             // this half's tail can go to the vision encoder

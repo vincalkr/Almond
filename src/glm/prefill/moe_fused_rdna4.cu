@@ -1,6 +1,6 @@
-// HIP-only GLM prompt experts, adapted from Niko1221/Strata (MIT), fb58e0d
-// and PR #1570 e667a774. Copyright (c) 2026 Niko1221 and the Strata contributors;
-// see LICENSE. Maya keeps its sorted rows, resident/prestaged/ring slots and output windows.
+// HIP-only GLM prompt experts, adapted from Niko1221/Almond (MIT), fb58e0d
+// and PR #1570 e667a774. Copyright (c) 2026 Niko1221 and the Almond contributors;
+// see LICENSE. the GLM engine keeps its sorted rows, resident/prestaged/ring slots and output windows.
 //
 // Activations have signed int8 codes and FP32 scales per 32 values (80 bytes per
 // 64 values, natural order). IQ weight blocks are decoded with GGML's codebooks
@@ -10,7 +10,7 @@
 //
 // Unlike the reference's 2560/640 experts, GLM uses E=4096, FF=2048. IQ2_S and
 // IQ3_XXS down matrices also use the 256-value block addressing of the GU decoder.
-// Only populated 64-row tiles are enumerated from Maya's existing expert bounds.
+// Only populated 64-row tiles are enumerated from the GLM engine's existing expert bounds.
 #include "almond/glm/prefill/moe_fused_rdna4.hpp"
 
 #include "common.cuh"
@@ -380,8 +380,8 @@ template <int T> __device__ __forceinline__ const void* grid_src() {
 // 8 hi .. 8 hi + 7 of them, so a 16-value k-step is still one WMMA (the K16 scales stay per WMMA).  NW_DROW is the
 // D row of a lane's element i; on gfx12 a lane's 8 rows are consecutive, so a feature's gate (even local row) and up
 // (odd) sit in one lane (elements 2j, 2j + 1) and the SwiGLU needs no cross-lane exchange.
-// gfx11 device code follows Strata's moe_fused_iq.cu (the same v_wmma_i32_16x16x16_iu8 layout;
-// gfx1151 is RDNA3.5); gfx12 keeps the RDNA4 layout below. Maya builds one arch at a time.
+// gfx11 device code follows the moe_fused_iq.cu (the same v_wmma_i32_16x16x16_iu8 layout;
+// gfx1151 is RDNA3.5); gfx12 keeps the RDNA4 layout below. the GLM engine builds one arch at a time.
 #if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1150__) || defined(__gfx1151__)
 #define ALMOND_NAT_W11 1
 #else

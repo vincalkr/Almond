@@ -1,5 +1,5 @@
 // src/kernels/cuda/fork/fork_prom.cuh - prompt-batch ("PROM") grouped-expert kernels for the PTQ1_0 (143) and Q2_0
-// (42) expert tiers (Strata-DS4 fork; docs/UPSTREAM_SYNC.md).  Fork code kept out of upstream's iq_kernels.cu (two
+// (42) expert tiers (Almond fork; docs/UPSTREAM_SYNC.md).  Fork code kept out of upstream's iq_kernels.cu (two
 // added lines there: the #include and the hook in native_expert_grouped); included at a fixed point of that
 // translation unit and uses its helpers (not a standalone header).
 //

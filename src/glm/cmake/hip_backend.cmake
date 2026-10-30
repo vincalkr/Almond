@@ -1,10 +1,10 @@
-# Opt-in HIP configuration. Strata's CUDA-shaped kernels target wave32 RDNA2 / RDNA3 / RDNA4 (64 KiB LDS per
+# Opt-in HIP configuration. the CUDA-shaped kernels target wave32 RDNA2 / RDNA3 / RDNA4 (64 KiB LDS per
 # workgroup, a signed dot4 instruction). CMake/compiler discovery stays machine-independent; pass CMAKE_HIP_COMPILER when it
 # is not on PATH.
 if(NOT DEFINED CMAKE_HIP_ARCHITECTURES OR CMAKE_HIP_ARCHITECTURES STREQUAL "")
-  set(CMAKE_HIP_ARCHITECTURES gfx1100 CACHE STRING "Maya HIP target architecture(s), e.g. gfx1100 or gfx1100;gfx1201")
+  set(CMAKE_HIP_ARCHITECTURES gfx1100 CACHE STRING "the GLM engine HIP target architecture(s), e.g. gfx1100 or gfx1100;gfx1201")
 endif()
-# The following architecture classifications describe upstream Strata, not Maya model validation.
+# The following architecture classifications describe upstream Almond, not the GLM engine model validation.
 # Validated on real cards: gfx1100 (RX 7900 XT / XTX) and gfx1201 (RX 9070 / 9070 XT, Radeon AI PRO R9700) by the
 # maintainers; gfx1101 (RX 7800 XT, #254) and gfx1200 (RX 9060 XT, #256) by their owners. gfx1102 (RX 7600) has the
 # same LDS limit and dot4 instruction and passed ctest (#192), but no model run has been reported yet. RDNA2 gfx1030 (RX 6800 / 6900) has the
@@ -30,14 +30,14 @@ foreach(_arch IN LISTS _glm_hip_norm)
   string(REGEX REPLACE ":.*$" "" _base "${_arch}")      # gfx1100:xnack- -> gfx1100
   if(_base IN_LIST _glm_hip_validated)
   elseif(_base IN_LIST _glm_hip_community)
-    message(STATUS "Maya HIP: ${_base} was validated by community reports (docs/AMD_MAYA.md)")
+    message(STATUS "the GLM engine HIP: ${_base} was validated by community reports (docs/AMD_MAYA.md)")
   elseif(_base IN_LIST _glm_hip_unvalidated)
-    message(WARNING "Maya HIP: ${_base} builds, but it is not validated on a real card yet; please report results")
+    message(WARNING "the GLM engine HIP: ${_base} builds, but it is not validated on a real card yet; please report results")
   elseif(_base IN_LIST _glm_hip_wave64)
-    message(STATUS "Maya HIP: ${_base} is a wave64 CDNA card running through the half-wavefront compat layer (experimental)")
+    message(STATUS "the GLM engine HIP: ${_base} is a wave64 CDNA card running through the half-wavefront compat layer (experimental)")
   else()
     message(FATAL_ERROR
-      "Maya's HIP build supports wave32 gfx1100, gfx1101, gfx1151, gfx1200 and gfx1201 (unvalidated: ${_glm_hip_unvalidated}; "
+      "the GLM engine's HIP build supports wave32 gfx1100, gfx1101, gfx1151, gfx1200 and gfx1201 (unvalidated: ${_glm_hip_unvalidated}; "
       "wave64: ${_glm_hip_wave64}); "
       "CMAKE_HIP_ARCHITECTURES is '${CMAKE_HIP_ARCHITECTURES}'")
   endif()
@@ -53,10 +53,10 @@ foreach(_a IN LISTS ALMOND_HIP_ARCH_LIST)
   endif()
 endforeach()
 if(NOT ALMOND_HIP_ARCH_LIST)
-  message(FATAL_ERROR "Maya HIP: CMAKE_HIP_ARCHITECTURES is empty")
+  message(FATAL_ERROR "the GLM engine HIP: CMAKE_HIP_ARCHITECTURES is empty")
 endif()
 # Normalize the actual compiler list as well as the validation list.
-set(CMAKE_HIP_ARCHITECTURES "${_glm_hip_norm}" CACHE STRING "Maya HIP target architecture(s)" FORCE)
+set(CMAKE_HIP_ARCHITECTURES "${_glm_hip_norm}" CACHE STRING "the GLM engine HIP target architecture(s)" FORCE)
 # The compiled architectures reach the runtime device check (src/core/device.cu) as "gfx1100,gfx1201": a binary
 # carried to a card it has no code for stops at startup with a clear message instead of "invalid device function".
 string(REPLACE ";" "," ALMOND_HIP_ARCHS "${ALMOND_HIP_ARCH_LIST}")
@@ -82,7 +82,7 @@ enable_language(HIP)
 string(STRIP "${CMAKE_HIP_FLAGS_RELEASE}" _glm_hip_rel)
 if(_glm_hip_rel STREQUAL "")
   set(CMAKE_HIP_FLAGS_RELEASE "-O3 -DNDEBUG")
-  message(STATUS "Maya: CMAKE_HIP_FLAGS_RELEASE was empty; using -O3 -DNDEBUG")
+  message(STATUS "the GLM engine: CMAKE_HIP_FLAGS_RELEASE was empty; using -O3 -DNDEBUG")
 endif()
 find_package(hip CONFIG REQUIRED)
 find_package(hipblas CONFIG REQUIRED)
@@ -98,10 +98,10 @@ if(TARGET roc::hipblaslt)
   set(ALMOND_HIPBLASLT_AVAILABLE ON)
 else()
   set(ALMOND_HIPBLASLT_AVAILABLE OFF)
-  message(STATUS "Maya: hipBLASLt not found; solution-table dispatch is unavailable")
+  message(STATUS "the GLM engine: hipBLASLt not found; solution-table dispatch is unavailable")
 endif()
 
-# HIP's link step produces a PIE; make Strata and ggml objects PIC for the ROCm linker.
+# HIP's link step produces a PIE; make Almond and ggml objects PIC for the ROCm linker.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(ALMOND_HIP_COMPAT_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include/almond/glm/hip_compat")
@@ -117,7 +117,7 @@ foreach(_language IN ITEMS CXX HIP)
     "$<$<COMPILE_LANGUAGE:${_language}>:${ALMOND_HIP_COMPAT_INCLUDE_DIR}/cuda_runtime.h>")
 endforeach()
 
-# CMake does not infer HIP from Strata's existing CUDA-shaped .cu suffixes.
+# CMake does not infer HIP from the existing CUDA-shaped .cu suffixes.
 file(GLOB_RECURSE _glm_hip_sources CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cu")   # (Almond: src/glm holds the sources directly)
 if(_glm_hip_sources)
@@ -130,4 +130,4 @@ foreach(_source IN ITEMS tests/hip/intrinsics.cpp tests/hip/native_qsa_score.cpp
   endif()
 endforeach()
 
-message(STATUS "Strata: HIP enabled, arch ${ALMOND_HIP_ARCHS}")
+message(STATUS "Almond: HIP enabled, arch ${ALMOND_HIP_ARCHS}")

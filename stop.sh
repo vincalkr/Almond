@@ -38,7 +38,7 @@ if [ "$FORCE" = 1 ]; then
     for p in $left; do kill -KILL "$p" 2>/dev/null; done
     echo "stop.sh: still running after ${TIMEOUT} s: killed $(echo $left | tr ' ' ',')"
     # run.sh may have been killed with them: switch power-tune off here if it is installed
-    [ -x /usr/local/sbin/ds41e-power-tune ] && sudo -n /usr/local/sbin/ds41e-power-tune off >/dev/null 2>&1 &&
+    [ -x /usr/local/sbin/almond-power-tune ] && sudo -n /usr/local/sbin/almond-power-tune off >/dev/null 2>&1 &&
         echo "stop.sh: power-tune off"
     exit 0
 fi
