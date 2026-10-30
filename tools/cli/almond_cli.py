@@ -429,15 +429,28 @@ class Agent:
         q = subprocess.Popen(["bash", "-c", command], cwd=self.root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, env=env, start_new_session=True)
         try:
-            out, _ = q.communicate(timeout=min(900.0, float(timeout or 120)))
+            out, _ = q.communicate(timeout=seconds(timeout))
         except (subprocess.TimeoutExpired, KeyboardInterrupt) as e:
             os.killpg(q.pid, signal.SIGKILL)    # the command and whatever it started
             out, _ = q.communicate()
             if isinstance(e, KeyboardInterrupt):
                 raise
-            return (out.decode(errors="replace").rstrip() + f"\n[timed out after {timeout} s: stopped, its output "
+            return (out.decode(errors="replace").rstrip() + f"\n[timed out after {seconds(timeout):.0f} s: stopped, its output "
                     "lost; run it again with a longer timeout]")
         return out.decode(errors="replace").rstrip() + f"\n[exit code {q.returncode}]"
+
+
+def seconds(timeout) -> float:
+    """A tool's timeout as the model writes it -> 10..900 s: "1,800" and "1.800" are 1800 (a thousands separator, as
+    GLM wrote it in Italian), anything unreadable is the default 120."""
+    t = str(timeout if timeout not in (None, "") else 120).strip().replace(" ", "").replace("_", "")
+    if re.fullmatch(r"\d{1,3}([.,]\d{3})+", t):
+        t = re.sub(r"[.,]", "", t)
+    try:
+        v = float(t.replace(",", "."))
+    except ValueError:
+        v = 120.0
+    return min(900.0, max(10.0, v))
 
 
 def near_lines(text: str, old: str) -> str:
