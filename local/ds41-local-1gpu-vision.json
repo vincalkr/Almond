@@ -68,7 +68,7 @@
   },
   "cwd": ".",
   "tokenizer": "models/rco-iq2xxs/tokenizer",
-  "model_name": "deepseek-v4.1-flash-1017-rco-iq2xxs",
+  "model_name": "deepseek-v4.1-flash-1017",
   "log": "local/serve-engine.log",
   "port": 8150,
   "backend": "hip",
