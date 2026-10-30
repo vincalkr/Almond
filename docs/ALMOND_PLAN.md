@@ -1,8 +1,8 @@
-# Almond: the plan
+# Almond: the first multi-model work
 
-Almond is a multi-model engine. Today it runs DeepSeek-V4.1-Flash, with its names (`strata` -> `almond` in the code,
-`STRATA_*` -> `ALMOND_*` in the environment, `include/almond/`); it builds with `./build.sh` and the server tests pass.
-`models/` is a symlink to `../Almond/models`. Nothing below is built yet; nothing below has a measured number yet.
+Kept for its measurements: how GLM-5.3-Flash first ran inside DeepSeek's engine (a GLM trunk in `src/ds41`, since
+removed: GLM runs on its own path, `src/glm`, 32 tok/s against that trunk's 20.7). The state today:
+[ENGINE_PLAN.md](ENGINE_PLAN.md), [MODELS.md](MODELS.md).
 
 ## Rules that stay
 

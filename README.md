@@ -1,17 +1,23 @@
 <h1 align="center">Almond - MoE models on RX 7900 XTX</h1>
 
-<p align="center"><b>DeepSeek-V4.1-Flash-1017 (the published GSQ-RCO IQ2_XXS pack) with exact routing on one or two RX 7900 XTX, its experts across VRAM, pinned RAM and NVMe</b><br>
+<p align="center"><b>DeepSeek-V4.1-Flash-1017 and GLM-5.3-Flash on one or two RX 7900 XTX, their experts across VRAM, pinned RAM and NVMe</b><br>
 Linux - ROCm/HIP - MIT</p>
 
-A C++/HIP inference engine for large MoE models, born from Almond (today DeepSeek-V4.1-Flash; GLM-5.3-Flash and Qwen next: docs/ALMOND_PLAN.md), and an OpenAI- and Anthropic-compatible server with a web chat
-and monitor. The model is DeepSeek-V4.1-Flash-1017 as the [ISTA-DASLab GSQ-RCO pack](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)
-(IQ2_XXS/IQ2_XS/IQ1_M experts, four shards, 138.2 GB), read through the geometry overlay `DS41_META` because its GGUF
-carries llama.cpp metadata instead of this engine's `deepseek41.*` keys; every expert the model routes to is computed (no route bias),
-wherever it is: card 0's VRAM, the second card, an 80 GiB pinned RAM arena, or read from the NVMe.
+A C++/HIP inference engine for large MoE models (one executable, `build-hip-fused/almond-engine`), an OpenAI- and
+Anthropic-compatible server, a router that serves every model at one address, and a terminal chat with an agent mode.
+
+- **DeepSeek-V4.1-Flash-1017** as the [ISTA-DASLab GSQ-RCO pack](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)
+  (IQ2_XXS/IQ2_XS/IQ1_M experts, four shards, 138.2 GB), read through the geometry overlay `DS41_META` because its
+  GGUF carries llama.cpp metadata instead of this engine's `deepseek41.*` keys. Every expert the model routes to is
+  computed (no route bias), wherever it is: card 0's VRAM, the second card, an 80 GiB pinned RAM arena, or the NVMe.
+- **GLM-5.3-Flash** as the GSQ-RCO 3.0bit pack (117 GB) with its MTP draft block (`src/glm`).
+
+How each model is set up and measured: [docs/MODELS.md](docs/MODELS.md); the one-engine work:
+[docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md).
 
 ## Performance
 
-Two RX 7900 XTX, Ryzen 9 9900X, 122 GiB RAM, PCIe 5.0 NVMe, ROCm 7.14, the default configuration's flags with
+DeepSeek-V4.1-Flash, two RX 7900 XTX, Ryzen 9 9900X, 122 GiB RAM, PCIe 5.0 NVMe, ROCm 7.14, the default configuration's flags with
 power-tune on, the GSQ-RCO pack (2026-10-26, one-shot runs, 3 each):
 
 | | |
@@ -27,6 +33,9 @@ Quality on Lucebox's held-out set (8 x 1024 tokens, exact routing): ppl 10.37 wi
 10.33 with the pack's own iq4_nl table (KL 0.026 between the two); the FP8 1017 checkpoint itself reads 8.56. Every
 number and how it was measured: [docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md).
 
+GLM-5.3-Flash, the same machine, through the server (thinking low, 600 tokens, three prompts, two rounds): 31.8 tok/s
+decode; PPL 10.36-10.43 on `local/glm-ref/doc512.i32` (docs/ENGINE_PLAN.md).
+
 ## Requirements
 
 | | |
@@ -35,22 +44,28 @@ number and how it was measured: [docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_
 | GPU | RX 7900 XT / XTX (`gfx1100`); a second 24 GB card is used as an expert tier when present |
 | RAM | 128 GB class (the engine holds ~94 GB with the 80 GiB arena) |
 | CPU | x86-64 with AVX2 (AVX-512 used when present) |
-| disk | ~350 GB on an NVMe for `models/` (138 GB pack in four shards + 111 GB Engram GGUF + 0.9 GiB image encoder, used only by requests with images); the checkpoint's own FP8 Engram rows instead of that GGUF are 203 GB |
+| disk | on an NVMe for `models/`: DeepSeek ~250 GB (138 GB pack in four shards + 111 GB Engram GGUF + 0.9 GiB image encoder; the checkpoint's own FP8 Engram rows instead of that GGUF are 203 GB), GLM ~122 GB (pack, MTP block, image encoder) |
 | tools | `cmake` >= 3.24, gcc, Python 3, curl, `aria2c` (faster downloads) |
 
 ## Quick start
 
 ```sh
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # the server's Python packages
-local/fetch-rco-1017.sh                                               # everything the engine needs (~249 GB, resumable)
-./build.sh                                                            # ggml and the engine (tens of minutes the first time)
-./run.sh                                                              # the server on 127.0.0.1:8150
+./setup.sh                                   # tools, .venv, the models to download, the build, power-tune, each model's context
+./almond                                     # the chat (it starts the router on 127.0.0.1:8150)
 ```
 
-- `./setup.sh` checks a new installation step by step (tools, `.venv`, models, build, power-tune, each model's
-  context); `./setup.sh --check` only says what is there. `local/fetch.sh` lists the models with their state in
-  `models/` and asks which to download (DeepSeek's pack and FP8 Engram rows through their own scripts, GLM, its MTP
-  block, both image encoders).
+or by hand:
+
+```sh
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # the server's Python packages
+local/fetch.sh                                                        # the models: what is in models/, which to download
+./build.sh                                                            # ggml, the engine, GLM's image encoder (tens of minutes the first time)
+./run.sh                                                              # DeepSeek's server on 127.0.0.1:8150 (--model glm: GLM's)
+```
+
+- `./setup.sh --check` only says what is there. `local/fetch.sh` lists the models with their state in `models/` and
+  asks which to download (DeepSeek's pack and FP8 Engram rows through their own scripts, GLM, its MTP block, both
+  image encoders); `local/fetch.sh --list` only lists.
 - `local/fetch-rco-1017.sh` downloads the four shards and the pack's Engram IQ4_NL GGUF with `aria2c` (4 connections,
   `CONN`), checks each sha256, and writes the geometry overlay `local/rco-iq2xxs-meta/meta.gguf` with
   `tools/v41/ds41_pack_meta.py` (its reference geometry is `local/rco-iq2xxs-meta/geometry-keys.json`, 8 KB, in the
@@ -61,8 +76,9 @@ local/fetch-rco-1017.sh                                               # everythi
   `local/fetch-model.sh` extracts them (it downloads a 366 GB source pack, which can be deleted afterwards). The
   default configuration names the FP8 rows; where they are missing the engine uses the iq4_nl table beside the pack
   and prints that it does.
-- `./build.sh` builds the vendored ggml (`third_party/llama.cpp/ggml`) into `third_party/llama.cpp/build-hip`, then the
-  engine into `build-hip-fused`; `ROCM`, `GFX`, `JOBS`, `REBUILD_GGML=1` from the environment.
+- `./build.sh` builds the vendored ggml (`third_party/llama.cpp/ggml`) into `third_party/llama.cpp/build-hip`, the
+  engine into `build-hip-fused`, and GLM's image encoder into `build-vision`; `ROCM`, `GFX`, `JOBS`, `REBUILD_GGML=1`
+  from the environment.
 - `./run.sh` uses cards 0 and 1; `./run.sh --gpu 0` (or `--gpu 1`) one card, `--gpu 0,1` both. The number of cards
   picks the configuration: `local/ds41-local.json` (two cards) or `local/ds41-local-1gpu.json` (one);
   `--config FILE` uses that file. Other arguments go to the server (`./run.sh --port 8151`). `./stop.sh` stops a
@@ -72,16 +88,16 @@ local/fetch-rco-1017.sh                                               # everythi
 
 ## Models, the router and the chat
 
-Almond serves DeepSeek-V4.1-Flash (`./run.sh`, the default) and GLM-5.3-Flash (`./run.sh --model glm`, on
-its own engine in `src/glm` (MIT: src/glm/LICENSE; `build-hip-fused/almond-glm`); `local/glm-pack.sh` and `local/glm-mtp-extract.py` prepare its files, see
-docs/ALMOND_PLAN.md). `./run.sh --router` puts every model of `local/router.json` behind one address, as llama-server's
+Almond serves DeepSeek-V4.1-Flash (`./run.sh`, the default) and GLM-5.3-Flash (`./run.sh --model glm`, its path of
+the same executable in `src/glm`, MIT: `src/glm/LICENSE`; `local/fetch.sh` downloads and prepares its files).
+`./run.sh --router` puts every model of `local/router.json` behind one address, as llama-server's
 router mode does: `GET /v1/models` lists them with their status (loaded / loading / unloaded), context and thinking
 levels (`reasoning_levels`, `reasoning_default`); `POST /models/load` / `/models/unload {"model": NAME}`; a request that
 names another model loads it, stopping the one running once its requests are done (the cards hold one at a time:
 GLM loaded in 32 s, DeepSeek in 38 s from the file cache). The others go to the loaded model; `--no-autoload` refuses
 instead.
 
-`./almond` is the chat in the terminal, in the manner of a terminal chat (it starts the router when nothing answers):
+`./almond` is the chat in the terminal (it starts the router when nothing answers, and stops it on leaving):
 
 ```sh
 ./almond                                   # a conversation; /help lists the commands
@@ -91,8 +107,8 @@ instead.
 ```
 
 - thinking: each model's own levels, from the client's words. GLM-5.3-Flash: low / high / max (its default; an
-  Anthropic budget under 2K low, under 8K high, else max). DeepSeek-V4.1: none / low (50) /
-  high (75, default) / max (100) or a number. `--nothink`, `--think`, `--think-max`, `--think-level L`; `/think L`,
+  Anthropic budget under 2K low, under 8K high, else max). DeepSeek-V4.1: off / low (50) /
+  high (75, default) / max (100) or a number 1-100 (`none` is taken as off). `--nothink`, `--think`, `--think-max`, `--think-level L`; `/think L`,
   `/nothink` in the chat. `/health` and `/v1/models` say which levels a model has.
 - DeepSeek's sampling follows its cloud API (deepseek-flash): with thinking the temperature has no effect (1.0) and
   top_p is 0.95-1.0 (default 1.0); without thinking temperature 0-2 (default 1.0) and top_p 1.0; no top_k, min_p or
@@ -125,14 +141,24 @@ instead.
   `/` alone lists the commands, Tab completes them (with what each does) and their arguments; a line ending in `\`
   goes on, `"""` opens a block; Ctrl+C stops an answer.
 
-For DeepSeek, reasoning effort follows its encoder: `low` (50), `high` (75, default), `max` (100), a number 1-100, or `none`;
-as `reasoning_effort`, `reasoning.effort` (OpenAI) or `output_config.effort` / `thinking` (Anthropic).
-The level goes into the model's prompt (`Reasoning Effort: N`); no cap on the thinking, as DeepSeek's API (a request's
-`reasoning_budget_tokens` sets one).
+Through the API the level is `reasoning_effort`, `reasoning.effort` (OpenAI) or `output_config.effort` / `thinking`
+(Anthropic). DeepSeek's goes into its prompt (`Reasoning Effort: N`), with no cap on the thinking, as DeepSeek's API
+(a request's `reasoning_budget_tokens` sets one). Thinking that loops is caught (`serve/loop_guard.py`) and closed so
+the model answers (docs/MODELS.md, "Loops in the thinking").
+
+The API for another program (an agent harness, an IDE): `./run.sh --router` (or `./almond --keep`) and point it at
+`http://127.0.0.1:8150/v1`; `GET /v1/models` lists `deepseek-v4.1-flash-1017` and `glm-5.3-flash`. `--session-log DIR`
+(or `ALMOND_SESSION_LOG`) writes every request and its answer to `DIR/<date>.jsonl`, for debugging.
 
 ## Images
 
-Images need the model's image routing bias, `blk.N.exp_probs_b_vl.bias`, which the GSQ-RCO pack does not carry. It is
+Both models read images; each one's encoder is in VRAM only for a request with images.
+
+**GLM-5.3-Flash:** with its encoder in `models/glm53-vision`, `./run.sh --model glm` picks
+`local/glm-local-vision.json`; the encoder (`build-vision/build/bin/almond-vision`) runs in 2.7 GB of VRAM the engine
+lends it for the request and takes back after (docs/MODELS.md, "Images").
+
+**DeepSeek-V4.1-Flash:** images need the model's image routing bias, `blk.N.exp_probs_b_vl.bias`, which the GSQ-RCO pack does not carry. It is
 in the repository as `local/rco-iq2xxs-meta/vl-bias.gguf` (61 KB): the checkpoint's `ffn.gate.bias_vl`, as
 ISTA-DASLab publish it (`exp_probs_b_vl.f32`), written by `tools/v41/ds41_vl_bias.py`; the configurations add it with
 `DS41_VL_BIAS`. The pack's text bias is bit-identical to the checkpoint's in all 40 layers, so the pack's routing was
@@ -140,18 +166,22 @@ not recalibrated and the image bias fits it. With the image encoder in `models/v
 builds it from the checkpoint), `./run.sh` picks `local/ds41-local-vision.json` (`-1gpu-vision` for one card).
 
 The encoder (0.9 GiB) is loaded on card 0 only for a request with images, in the VRAM the expert cache gives up for
-the prompt, and freed before the cache re-opens: text requests never load it, and the expert cache opens with the same
-17.49 GiB as without images. A 22x70-patch image is loaded in 0.6 s and encoded in 0.2 s; encoded images are kept
-(8 by default, `ALMOND_VISION_CACHE`), so a conversation re-sends them free.
+the prompt, and freed before the cache re-opens; text requests never load it. A 22x70-patch image is loaded in 0.6 s
+and encoded in 0.2 s; encoded images are kept (8 by default, `ALMOND_VISION_CACHE`), so a conversation re-sends them
+free. After any batch prompt (an image's, or text over ~128 new tokens) the next request opens the expert cache again
+once into the VRAM ggml gave back meanwhile: free VRAM 0.59-0.60 GiB after it as before, decode 20.7-21.9 tok/s
+(docs/ENGINE_REVIEW.md; `ALMOND_VRAM_REGROW=0` turns it off).
 
 ## Conversations
 
-The engine keeps every conversation a request does not continue in a 4 GiB pool of pinned RAM
+DeepSeek's engine keeps every conversation a request does not continue in a 4 GiB pool of pinned RAM
 (`--conversation-cache-mib`, ~340 MB for a 190K-token session) and resumes the one a request continues, exactly (a
-re-rendered tail a few tokens back included). They are also saved in
-`local/conv-cache-rco` (`--conversation-disk`, up to 32 GiB), so a restarted server resumes a session instead of reading it
-again. The Monitor shows the folder and its size, and a button clears them all
-([docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md), "The conversation pool", "Conversations on disk").
+re-rendered tail a few tokens back included). They are also saved in `local/conv-cache-rco` (`--conversation-disk`,
+up to 32 GiB), so a restarted server resumes a session instead of reading it again
+([docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md), "The conversation pool", "Conversations on disk"). GLM's
+keeps its conversations in `local/glm-slots` (`ALMOND_GLM_SLOT_KEEP`, docs/MODELS.md, "Sessions on disk").
+`./almond --sessions` shows both folders and their size, `./almond --clear-sessions` moves them to the trash (with no
+engine running), and `--monitor` shows them too.
 
 ## Power-tune (optional, root)
 
@@ -168,7 +198,7 @@ sudo local/install-power-tune.sh             # a root-owned copy and a sudo rule
 `DS41_POWER_TUNE=0 ./run.sh` leaves the settings alone; `sudo local/install-power-tune.sh uninstall` removes it;
 `sudo local/power-tune.sh on|off|show` by hand.
 
-## Expert rank
+## Expert rank (DeepSeek)
 
 Which experts live in VRAM and in the RAM arena follows a rank of the most used ones (`local/rank.bin`). The server
 counts what the router picks (`local/routes-rco`); `local/update-rank.sh` builds a new rank from those counts (experts
@@ -176,7 +206,7 @@ ranked per byte with the pack's formats, `local/rco-iq2xxs-map.json`), measures 
 review and a documentation prompt (`local/prompts/dev-code`, `dev-docs`; ~30 minutes, the server stopped meanwhile)
 and applies it only if it is faster.
 
-## Another machine
+## Another machine (DeepSeek's configuration)
 
 `local/cfg.py` edits `local/ds41-local.json` (`python3 local/cfg.py show` prints it):
 
@@ -195,5 +225,8 @@ card. With one card use `./run.sh --gpu 0` (the two-card default stops at startu
 - Measurement scripts: `local/bench-v41/` (one-shot sweeps, profiles, the server benchmark `serve-bench.py`);
   quality: `local/eval-lucebox/`; `local/ram-bench.sh TAG [--decode]` compares RAM bandwidth and decode across BIOS
   settings (no arguments: the results so far).
-- [docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md) - the configuration and every measurement behind it;
-  [docs/ds4/AMD_HIP_NOTES.md](docs/ds4/AMD_HIP_NOTES.md) - the HIP port; [HANDOVER.md](HANDOVER.md) - the history.
+- [docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md) - DeepSeek's configuration and every measurement behind
+  it; [docs/ds4/AMD_HIP_NOTES.md](docs/ds4/AMD_HIP_NOTES.md) - the HIP port; [docs/MODELS.md](docs/MODELS.md) - each
+  model; [docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md) - one engine for every model; [docs/ENGINE_REVIEW.md](docs/ENGINE_REVIEW.md)
+  - the engine's review; [HANDOVER.md](HANDOVER.md) - the state and what is open; [docs/ALMOND_PLAN.md](docs/ALMOND_PLAN.md)
+  - the first multi-model work, kept for its measurements.

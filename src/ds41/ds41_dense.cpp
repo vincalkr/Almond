@@ -3,7 +3,6 @@
 
 #include "ds41_engram.hpp"
 #include "ds41_ops.hpp"
-#include "glm_trunk.hpp"
 
 #include "ggml-alloc.h"
 #include "ggml-cpu.h"
@@ -1068,8 +1067,8 @@ const TrunkInfo & Ds41Dense::info() const {
 }
 
 std::unique_ptr<MoeTrunk> make_trunk(const std::string & gguf, std::string & err) {
-    // The architecture from the file: llama.cpp's GLM-5.3 GGUFs say "glm5-next", the GLM packs' own writer "glm5next".  DeepSeek's
-    // GSQ-RCO pack carries llama.cpp's own name and is read through the DS41_META overlay: anything else is DeepSeek.
+    // The architecture from the file.  DeepSeek's GSQ-RCO pack carries llama.cpp's own name and is read through the
+    // DS41_META overlay: anything but GLM is DeepSeek.  GLM-5.3 runs on its own path (src/glm, --glm-pack).
     // ALMOND_ARCH overrides.
     std::string arch;
     if (const char * a = std::getenv("ALMOND_ARCH"); a && *a) arch = a;
@@ -1079,7 +1078,10 @@ std::unique_ptr<MoeTrunk> make_trunk(const std::string & gguf, std::string & err
             if (const MetaValue * v = f.get("general.architecture")) arch = v->s;
         } catch (const std::exception & e) { err = e.what(); return nullptr; }
     }
-    if (arch == "glm5-next" || arch == "glm5next" || arch == "glm53") return std::make_unique<GlmTrunk>();
+    if (arch == "glm5-next" || arch == "glm5next" || arch == "glm53") {
+        err = "a GLM-5.3 file: almond-engine runs it with --glm-pack (./run.sh --model glm)";
+        return nullptr;
+    }
     return std::make_unique<Ds41Dense>();
 }
 ggml_backend_t Ds41Dense::backend() const { return p_->backend; }

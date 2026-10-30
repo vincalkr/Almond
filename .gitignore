@@ -123,3 +123,14 @@ local/vision-memory.json
 local/.run-ctx-*
 local/session-log/
 local/chats/
+# measurement outputs and their inputs, made by the tools (the documents they come from are tracked)
+local/glm-ref/*.log
+local/glm-ref/*.f32
+local/glm-ref/*.kld
+local/glm-ref/*.i32
+local/glm-ref/routes*/
+local/glm-ref/c1.txt
+local/glm-ref/huge17k.txt
+local/glm-ref/long-it.txt
+local/glm-ref/short.txt
+tools/__pycache__/
