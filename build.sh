@@ -23,7 +23,7 @@ COMMON=(-DCMAKE_PREFIX_PATH="$ROCM" -DCMAKE_BUILD_TYPE=Release -DCMAKE_HIP_ARCHI
 B=third_party/llama.cpp/build-hip
 if [ -f "$B/CMakeCache.txt" ] && ! grep -q "^CMAKE_HOME_DIRECTORY:INTERNAL=$PWD/third_party/ggml-build$" "$B/CMakeCache.txt"; then
     echo "build.sh: $B was configured from another source tree; moving it to $B.old and building ggml again"
-    rm -rf "$B.old"; mv "$B" "$B.old"
+    [ -e "$B.old" ] && gio trash "$B.old"; mv "$B" "$B.old"
 fi
 if [ ! -f "$B/ggml/src/libggml-base.a" ] || [ -n "${REBUILD_GGML:-}" ]; then
     echo "=== ggml (third_party/llama.cpp/ggml -> third_party/llama.cpp/build-hip)"

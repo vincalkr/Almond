@@ -1,6 +1,6 @@
 # Almond - a multi-model MoE engine (today DeepSeek-V4.1-Flash, src/ds41) and the few libraries it links.
 #
-# Of the Almond libraries this tree started from, exactly the objects ds41_generate links remain (traced with -Wl,--trace on
+# Of the libraries this tree started from, exactly the objects ds41_generate links remain (traced with -Wl,--trace on
 # 2026-10-18): the VRAM expert cache and VMM, pinned host memory, the CPU expert kernels, the HIP MMVQ / IQ kernels and
 # ggml's MMQ instances for the prompt path.  The flags below are the ones those files were built with in the full
 # tree, so the engine binary is the same.
@@ -9,7 +9,7 @@
 #   cmake -S . -B build-hip-fused -DCMAKE_BUILD_TYPE=Release -DALMOND_ENABLE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx1100 \
 #     -DALMOND_GGML_DIR=$PWD/third_party/llama.cpp -DALMOND_GGML_PREBUILT=$PWD/third_party/llama.cpp/build-hip \
 #     -DALMOND_DSV41_HC_MIX=ON -DALMOND_DSV41_FQ_OP=ON
-#   cmake --build build-hip-fused --target ds41_generate -j
+#   cmake --build build-hip-fused --target ds41_generate -j   (the executable: almond-engine)
 cmake_minimum_required(VERSION 3.24)
 project(almond VERSION 0.1.41 LANGUAGES CXX)
 add_compile_definitions(ALMOND_VERSION="${PROJECT_VERSION}")
@@ -28,7 +28,7 @@ option(ALMOND_WERROR "Treat compiler warnings as errors" OFF)
 set(ALMOND_GGML_DIR "" CACHE PATH "the llama.cpp checkout ggml comes from (third_party/llama.cpp, with tools/v41/ggml patches)")
 set(ALMOND_GGML_PREBUILT "" CACHE PATH "an existing ggml build directory of ALMOND_GGML_DIR: link its ggml")
 if(NOT ALMOND_ENABLE_HIP)
-  message(FATAL_ERROR "Almond builds the HIP engine only (the CUDA and CPU-only paths left with the Almond tree)")
+  message(FATAL_ERROR "Almond builds the HIP engine only (no CUDA or CPU-only path)")
 endif()
 if(NOT ALMOND_GGML_DIR OR NOT ALMOND_GGML_PREBUILT)
   message(FATAL_ERROR "set ALMOND_GGML_DIR and ALMOND_GGML_PREBUILT (third_party/llama.cpp and its build-hip)")

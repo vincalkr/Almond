@@ -30,7 +30,7 @@ foreach(_arch IN LISTS _glm_hip_norm)
   string(REGEX REPLACE ":.*$" "" _base "${_arch}")      # gfx1100:xnack- -> gfx1100
   if(_base IN_LIST _glm_hip_validated)
   elseif(_base IN_LIST _glm_hip_community)
-    message(STATUS "the GLM engine HIP: ${_base} was validated by community reports (docs/AMD_MAYA.md)")
+    message(STATUS "the GLM engine HIP: ${_base} was validated by community reports")
   elseif(_base IN_LIST _glm_hip_unvalidated)
     message(WARNING "the GLM engine HIP: ${_base} builds, but it is not validated on a real card yet; please report results")
   elseif(_base IN_LIST _glm_hip_wave64)

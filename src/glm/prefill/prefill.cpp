@@ -53,7 +53,7 @@ Context::Context() {}
 Context::~Context() {}
 void Context::run(const Product&, void*) {}
 void gather_native(const void*, const void*, size_t, const void*, size_t, void*, void*, void*) {}
-void gather_strata_q2(const uint8_t*, void*, void*, void*) {}
+void gather_glm_q2(const uint8_t*, void*, void*, void*) {}
 void swiglu(const float*, float*, int64_t, int64_t, bool, void*) {}
 void iota(int32_t*, int64_t, void*) {}
 }  // namespace almond::glm::prefill::mmq
@@ -1723,7 +1723,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                 mmq::gather_native(blob_dev, blob_dev + f.up_off, mmq_gub / 2, blob_dev + f.down_off,
                                                    mmq_db, m.grp_gu + q * mmq_gub, m.grp_d + q * mmq_db, m.cs);
                             } else {
-                                mmq::gather_strata_q2(blob_dev, m.grp_gu + q * mmq_gub, m.grp_d + q * mmq_db, m.cs);
+                                mmq::gather_glm_q2(blob_dev, m.grp_gu + q * mmq_gub, m.grp_d + q * mmq_db, m.cs);
                             }
                             if (slot >= 0) cudaEventRecord(m.used[slot], m.cs);
                             if (q + 1 < MMQ_GROUP && j + 1 < order.size()) return true;

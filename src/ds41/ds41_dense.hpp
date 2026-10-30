@@ -85,6 +85,7 @@ public:
     bool finish_span(int il, int col0, int n) override;
     /// ALMOND_DENSE_PROF=1: print + reset the batch dense split (build / alloc / compute / Engram / readback) - diagnostic
     void prof_report(const char * tag) override;
+    bool reset_columns() override;   // set_columns' full rebuild at the same width: after a prompt with images
     /// Give the prompt passes' compute buffer back to the device (rebuilt by the next multi-token pass): the deferred
     /// VRAM expert cache opens into it after the prompt.
     void release_pass() override;

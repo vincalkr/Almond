@@ -53,8 +53,8 @@ std::string arch_problem(const cudaDeviceProp& p, int ordinal) {
     const std::string card = "GPU " + std::to_string(ordinal) + " (" + p.name + ", " + arch + ")";
     if (!compiled_for(arch)) {
         return card + " is not an architecture this the GLM engine engine was compiled for (" + ALMOND_HIP_ARCHS +
-               "); compile it for this card (./maya.sh --backend hip, or -DCMAKE_HIP_ARCHITECTURES=" + arch +
-               ", docs/AMD_MAYA.md) or choose another GPU with HIP_VISIBLE_DEVICES";
+               "); compile it for this card (./build.sh, or -DCMAKE_HIP_ARCHITECTURES=" + arch +
+               ") or choose another GPU with HIP_VISIBLE_DEVICES";
     }
     if (p.warpSize != 32) {
         // The wave64 compat path (gfx908): the hip_compat layer maps a CUDA warp onto a logical 32-lane half of

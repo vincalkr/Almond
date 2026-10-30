@@ -204,17 +204,32 @@ class Bar:
             out.flush()
 
     # ---- while a request runs
-    def run(self, model: str):
+    def run(self, model: str, base: int = 0):
+        """base: the tokens the server likely reuses (the conversation so far), where the prompt's estimate starts."""
         if not self.on:
             return
         self.busy, self.phase, t0 = threading.Event(), "thinking", time.time()
 
         def poll(busy):
+            seen, at = None, t0                 # the engine's last progress (it comes once a chunk) and when
             while not busy.is_set():
                 try:
                     live = self.api.get("/metrics", timeout=2).get("live") or {}
                 except (OSError, RuntimeError, ValueError, http.client.HTTPException):
                     live = {}
+                if live.get("state") == "reading":
+                    read = live.get("prompt_read")
+                    if read is not None and read != seen:
+                        seen, at = read, time.time()
+                    total = live.get("prompt_total") or live.get("prompt_tokens") or 0
+                    if live.get("prefill_tok_s_mean"):   # (the server knows it only after a chunk: the last one kept)
+                        self.rate = live["prefill_tok_s_mean"]
+                    rate = getattr(self, "rate", 0)
+                    if total and rate:          # between the chunks: the server's mean prompt speed, marked ~
+                        start = seen if seen is not None else min(base, total)
+                        est = min(total - 1, int(start + rate * (time.time() - at)))
+                        if est > (seen or 0):
+                            live = dict(live, prompt_read=est, prompt_total=total, estimate=True)
                 if not busy.is_set():
                     self.draw(live_text(live, model, self.phase, time.time() - t0, self.rows()[1]))
                 busy.wait(0.25)
@@ -246,7 +261,7 @@ def live_text(live: dict, model: str, phase: str, secs: float, width: int) -> st
     state = live.get("state")
     if state == "reading":
         read, total = live.get("prompt_read") or 0, live.get("prompt_total") or 0
-        tail = (f" {_f(read)} / {_f(total)} tokens  {_f(live.get('prefill_tok_s_mean'), 0)} tok/s  {secs:.0f} s")
+        tail = (f" {'~' if live.get('estimate') else ''}{_f(read)} / {_f(total)} tokens  {_f(live.get('prefill_tok_s_mean'), 0)} tok/s  {secs:.0f} s")
         head = f"{model}  reading the prompt "
         n = max(10, min(40, width - len(head) - len(tail) - 3))
         k = int(n * read / total) if total else 0
@@ -538,7 +553,8 @@ class Chat:
             if not calls or self.stopped:
                 return True
             try:
-                for c in calls:
+                for c in calls:                 # the bar says what runs, not the answer that asked for it
+                    self.bar.draw(f"{self.model['id']}  tool {c['name']}: running (or waiting for your y / n / a)")
                     self.messages.append({"role": "tool", "tool_call_id": c["id"], "content": self.agent.run(c)})
             except KeyboardInterrupt:
                 say(f"{RESET}\n{DIM}[stopped]{RESET}")
@@ -565,7 +581,7 @@ class Chat:
         t0 = time.time()
         first = None
         bar = self.bar
-        bar.run(self.model["id"])
+        bar.run(self.model["id"], self.ctx_used)
         try:
             for kind, v in self.api.stream(body):
                 if kind in ("reasoning", "content") and first is None:

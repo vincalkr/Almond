@@ -1068,7 +1068,7 @@ const TrunkInfo & Ds41Dense::info() const {
 }
 
 std::unique_ptr<MoeTrunk> make_trunk(const std::string & gguf, std::string & err) {
-    // The architecture from the file: llama.cpp's GLM-5.3 GGUFs say "glm5-next", project-maya's "glm5next".  DeepSeek's
+    // The architecture from the file: llama.cpp's GLM-5.3 GGUFs say "glm5-next", the GLM packs' own writer "glm5next".  DeepSeek's
     // GSQ-RCO pack carries llama.cpp's own name and is read through the DS41_META overlay: anything else is DeepSeek.
     // ALMOND_ARCH overrides.
     std::string arch;
@@ -1134,9 +1134,21 @@ static bool alloc_cols(Ds41Dense::Impl & im, int64_t NC, std::string & err) {
                      (double) ggml_nbytes(im.i_widx) / 1048576.0);
     }
     im.nbuf = ggml_backend_alloc_ctx_tensors(c, im.backend);
-    if (!im.nbuf) { err = "cannot allocate " + std::to_string(NC) + " state columns"; return false; }
+    if (!im.nbuf) {   // NC -1: the next set_columns builds them again, never "already this width" on empty tensors
+        im.NC = -1;
+        err = "cannot allocate " + std::to_string(NC) + " state columns";
+        return false;
+    }
     ggml_backend_buffer_clear(im.nbuf, 0);
     return true;
+}
+
+bool Ds41Dense::reset_columns() {   // set_columns' full rebuild at the same width (after a prompt with images)
+    Impl & im = *p_;
+    const int64_t nc = im.NC;
+    im.NC = -1;
+    if (set_columns((int) nc)) return true;
+    return nc > im.S && set_columns(0);   // the fewest columns, which decode needs, rather than none
 }
 
 bool Ds41Dense::set_columns(int nc) {

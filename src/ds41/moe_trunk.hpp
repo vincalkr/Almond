@@ -95,6 +95,7 @@ public:
     virtual bool set_columns(int nc) = 0;
     virtual int columns() const = 0;
     virtual void release_pass() = 0;
+    virtual bool reset_columns() { return true; }   // (Ds41Dense: the column state and graphs rebuilt, after images)
     virtual void set_oom_hook(std::function<bool()> hook) = 0;
     virtual void prof_report(const char * tag) { (void) tag; }
 

@@ -1,8 +1,7 @@
-# engines/glm
+# src/glm
 
-the GLM-5.3-Flash engine (MIT: `LICENSE`), as
-Almond's GLM-5.3-Flash engine: `CMakeLists.txt`, `cmake/`, `include/`, `src/`, `tests/`, `tools/hip/`, the pack builder
-(`tools/iq_pack.py` and what it imports), `serve/glm5_chat_template.jinja` and its pinned ggml
-(`third_party/llama.cpp/{ggml,gguf-py}`, llama.cpp 3cf03257, as the GLM engine builds it). Unchanged: Almond builds
-only the `glm` target (`./build.sh` -> `build-maya-hip/glm`) and runs it behind its own server
-(`tools/glm/serve/serve_glm.py`, `./run.sh --model glm`). Why and the measurements: docs/ALMOND_PLAN.md, phase 3.
+GLM-5.3-Flash's path of `almond-engine` (MIT: `LICENSE`): the model, its expert pools and RAM tier, the prompt path,
+MTP drafting and the conversation slots, in namespace `almond::glm`. `CMakeLists.txt` builds its `glm_*` libraries on
+the top level's prebuilt ggml (`third_party/llama.cpp`); the top `CMakeLists.txt` links them into `almond-engine`,
+which runs this path when its arguments name `--glm-pack` (`src/engine_main.cpp`). The server: `tools/glm/serve/serve_glm.py`,
+`./run.sh --model glm`. How it came here and the measurements: docs/ENGINE_PLAN.md.

@@ -241,10 +241,10 @@ void gather_native(const void* gate, const void* up, size_t gu_half_bytes, const
     ck(cudaGetLastError(), "gather_native");
 }
 
-void gather_strata_q2(const uint8_t* blob, void* gu_dst, void* d_dst, void* stream) {
+void gather_glm_q2(const uint8_t* blob, void* gu_dst, void* d_dst, void* stream) {
     glm_q2_kernel<<<blocks(1280LL * 40 + 2560LL * 10), 256, 0, (cudaStream_t) stream>>>(blob, (uint16_t*) gu_dst,
                                                                                          (uint16_t*) d_dst);
-    ck(cudaGetLastError(), "gather_strata_q2");
+    ck(cudaGetLastError(), "gather_glm_q2");
 }
 
 void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interleaved, void* stream) {

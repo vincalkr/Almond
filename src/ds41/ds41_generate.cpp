@@ -11,7 +11,7 @@
 // --enc-skip (layer-major batches only; DEFAULT for one-shot runs, --no-enc-skip = full path): prompt tokens before the last --enc-replay (default 2560 = 128 * 20) stop
 // after layer 20's persistent-KV writes; only the last 2560 tokens run layers 21-39.  Same last-token logits / decode.
 //
-// --serve speaks Almond's engine line protocol (~/AI/Strata/serve/server.py AlmondEngine, as glm_generate):
+// --serve speaks Almond's engine line protocol (serve/server.py AlmondEngine, as the GLM path):
 //   in:  GEN <max_new> [temperature=.. top_p=.. top_k=.. min_p=.. seed=..] <ids csv> | STOP | QUIT
 //        GENI <max_new> [k=v ..] <image file> <ids csv>   (--vision: a prompt with images, see VisionInput below)
 //   out: READY <ctx> stop, RESUME <reused>, PP <read> <total> <ms> <tok/s>, T <id>, DONE ..., ERR <text>
@@ -1176,8 +1176,29 @@ int ds41_main(int argc, char ** argv) {
                     (long long) (tier.vram_bytes() >> 20));
         std::fflush(stdout);
     };
+    bool img_prompt = false;   // this prompt fed image rows (a batch within the columns kept ~1.9 GiB on card 0)
+    static const bool vram_trace = std::getenv("ALMOND_VRAM_TRACE") != nullptr;
+    auto trace_free = [&](const char * where) {
+        if (!vram_trace) return;
+        size_t f0 = 0, t0 = 0;
+        ggml_backend_dev_memory(ggml_backend_get_device(be), &f0, &t0);
+        std::fprintf(stderr, "vram trace: %s free %.2f GiB\n", where, f0 / 1073741824.0);
+    };
+    // after a prompt with images: the columns rebuilt, which gives their ~1.9 GiB back (the routed tensor moves with
+    // them: its address read again, as after set_columns)
+    auto release_img_cols = [&]() -> bool {
+        if (!img_prompt) return true;
+        img_prompt = false;
+        if (!dense.reset_columns()) { err = dense.last_error(); return false; }
+        if (rdev1) rdev1 = dense.routed_dev();
+        trace_free("after the image prompt's columns");
+        return true;
+    };
     auto open_cache = [&]() -> bool {
+        if (!release_img_cols()) return false;
+        trace_free("open_cache start");
         dense.release_pass();
+        trace_free("after release_pass");
 #if defined(DS41_HAVE_DSPARK)
         if (dsp_path && !dsp) {
             Ds41DSparkConfig sc;
@@ -1256,7 +1277,6 @@ int ds41_main(int argc, char ** argv) {
     // sets it; a one-shot run keeps PB)
     int pb_cap = PB;
     // ALMOND_VRAM_TRACE=1: every allocation-relevant step prints the free VRAM (debugging a shared card)
-    const bool vram_trace = std::getenv("ALMOND_VRAM_TRACE") != nullptr;
     auto vram_log = [&](const char * where, int a) {
         if (!vram_trace) return;
         size_t tf = 0, tt = 0;
@@ -1898,6 +1918,12 @@ int ds41_main(int argc, char ** argv) {
                 bias_now = a.bias_prompt > 0;
                 apply_bias();
             }
+            // an image prompt whose columns no open_cache rebuilt (no deferred cache, or the cache already open): now
+            if (!release_img_cols()) {
+                std::printf("ERR %s\n", err.c_str());
+                std::fflush(stdout);
+                continue;
+            }
             // the fed images' span rows (cache or encoder) -> the dense half, by absolute position
             std::vector<float> vrows;
             std::vector<int64_t> vpos;
@@ -1923,6 +1949,7 @@ int ds41_main(int argc, char ** argv) {
                     continue;
                 }
                 dense.set_vision(vrows.data(), vpos.data(), (int) vpos.size());
+                img_prompt = true;   // (open_cache rebuilds the columns: the image prompt's ~1.9 GiB go back)
                 std::fprintf(stderr, "vision: %zu image rows ready in %.2f s\n", vpos.size(), (now_ms() - tv0) / 1000.0);
             }
             tier.rebalance_begin_prompt();

@@ -25,7 +25,7 @@ namespace {
 
 constexpr float NEG_INF = -INFINITY;
 
-// the KV-key prefix: llama.cpp writes "glm5-next", project-maya's packs "glm5next"; tensor names are the same
+// the KV-key prefix: llama.cpp writes "glm5-next", the packs "glm5next"; tensor names are the same
 const MetaValue * key(const GgufFile & f, const std::string & arch, const char * k) {
     return f.get(arch + "." + k);
 }

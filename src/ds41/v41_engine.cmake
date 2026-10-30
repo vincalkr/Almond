@@ -1,4 +1,4 @@
-# src/ds41/v41_engine.cmake - the DeepSeek-V4.1 engine (Strata-DS4 fork; included from tools/ds4/cmake/fork.cmake).
+# src/ds41/v41_engine.cmake - the DeepSeek-V4.1 engine (included from the top CMakeLists.txt).
 set(_v41_dir ${CMAKE_CURRENT_SOURCE_DIR}/src/ds41)
 add_executable(test_ds41_geometry ${_v41_dir}/test_ds41_geometry.cpp)
 target_include_directories(test_ds41_geometry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_v41_dir})

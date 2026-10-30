@@ -883,7 +883,14 @@ class AlmondEngine:
 
     def command(self, line: str, expect: str, timeout: float = 60.0) -> str:
         """One control line between requests (the GLM engine's VLEND / VRECLAIM) -> its answer line; ValueError on
-        the engine's ERR or no answer.  The caller holds the service's FIFO, so no request is reading the lines."""
+        the engine's ERR or no answer.  The caller holds the service's FIFO, so no request is reading the lines: any
+        line already waiting is an earlier one's (a stopped request's ERR, a late answer) and goes first."""
+        while True:
+            try:
+                if self.lines.get_nowait() is None:
+                    raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
+            except queue.Empty:
+                break
         try:
             self.proc.stdin.write(line + "\n")
             self.proc.stdin.flush()
@@ -894,6 +901,12 @@ class AlmondEngine:
             try:
                 got = self.lines.get(timeout=max(0.1, end - time.time()))
             except queue.Empty:
+                if line.startswith("VLEND"):            # a late lend the server would not know of: taken back
+                    try:
+                        self.proc.stdin.write("VRECLAIM\n")
+                        self.proc.stdin.flush()
+                    except OSError:
+                        pass
                 raise ValueError(f"the engine did not answer {line.split()[0]}") from None
             if got is None:
                 raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
@@ -6071,6 +6084,9 @@ def main() -> int:
                         if k in ("exe", "mmproj", "model") and isinstance(v, str) and not os.path.isabs(v) else v)
                     for k, v in cfg["vision"].items()}
             on_demand = vcfg.get("on_demand") is True
+            if on_demand and "--glm-pack" not in (cfg.get("args") or []):   # VLEND / VRECLAIM: GLM's path only
+                raise SystemExit("[almond] images: \"on_demand\" needs the GLM engine (VLEND / VRECLAIM); "
+                                 "DeepSeek's engine loads its encoder itself (--vision)")
             if on_demand:                               # the GLM engine lends the encoder its expert pool's tail
                 fp = vision_footprint(vcfg, vision_env(cfg, env),
                                       Path(a.config).resolve().with_name("vision-memory.json"))

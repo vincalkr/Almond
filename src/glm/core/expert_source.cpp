@@ -339,7 +339,7 @@ bool FileExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64
     // 64 GB of DDR5 and `L9` measured the CPU path at 44.14 GB/s from DRAM.  `FILE_FLAG_RANDOM_ACCESS` tells
     // the cache manager the opposite: it disables read-ahead AND it lets the manager drop the pages again
     // quickly, on the assumption that a large randomly-accessed file will not be re-read.  Measured, on
-    // `strata generate --max-new 24`: **1.93 GB/s** - disk speed, 344 ms/token, and it never warmed up over 25
+    // `--max-new 24`: **1.93 GB/s** - disk speed, 344 ms/token, and it never warmed up over 25
     // tokens, because the pages were being evicted as fast as they were faulted in.
     //
     // The correct flag is NO flag.  The access pattern IS random (10 of 512 experts per layer, a different 10

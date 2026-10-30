@@ -176,7 +176,7 @@ __device__ __forceinline__ uint4 sign_entry(int i, bool parity) {
 #endif
 // 8 nibbles of q4 through a 16-entry int8 table (4 words): the low nibbles' values in .x, the high ones' in .y
 // W (X5): direct-selector form on gfx: p = low 3 bits of each nibble picks within the table half, bit 3 picks the half;
-// exhaustively bit-exact over all 2^32 inputs (X5). Disable with -DSTRATA_W_NO_T16.
+// exhaustively bit-exact over all 2^32 inputs (X5). Disable with -DALMOND_W_NO_T16.
 #if defined(__HIPCC__) && !defined(ALMOND_W_NO_T16)
 __device__ __forceinline__ uint32_t table16_one(uint32_t x, const uint32_t (&t)[4]) {
     const uint32_t p = x & 0x07070707u;
@@ -399,7 +399,7 @@ template <int T> __device__ __forceinline__ const void* grid_src() {
 #define NW_DROW(i, hi) (2 * (i) + (hi))
 #endif
 // The VGPR cap of the occupancy variant (amdgpu_waves_per_eu).  8 was measured against ROCm 7's clang; clang 22 (ROCm 7.10)
-// computes wrong results with it (#1180: gfx1100, every run), so there the cap is off.  -DSTRATA_W_LB=N sets it.
+// computes wrong results with it (#1180: gfx1100, every run), so there the cap is off.  -DALMOND_W_LB=N sets it.
 #if defined(ALMOND_W_LB)
 constexpr int NW_LB = ALMOND_W_LB;
 #elif defined(__clang_major__) && __clang_major__ >= 22
@@ -435,7 +435,7 @@ __device__ __forceinline__ nw_i8 nw_wmma(nw_ab a, nw_ab b, nw_i8 c) {
 }
 
 // W (X1): ALIAS = the H tile lives on the weight buffers (one extra barrier); LB > 0 = amdgpu_waves_per_eu(LB) (VGPR cap).
-// Disable both with -DSTRATA_W_NO_OCC (the launch sites then use <WT, GU, false, 0> and grid factor wgp_blocks).
+// Disable both with -DALMOND_W_NO_OCC (the launch sites then use <WT, GU, false, 0> and grid factor wgp_blocks).
 template <int WT, bool GU, bool ALIAS = false, int LB = 0, int E = 4096, int FF = 2048>
 __global__ void __launch_bounds__(NW_THREADS) __attribute__((amdgpu_waves_per_eu(LB > 0 ? LB : 1)))
 native_kernel(const uint8_t* wbase, size_t stride, int ntiles, const int2* tiles, const int* bounds,

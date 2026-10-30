@@ -1,4 +1,4 @@
-// src/program/generate.cpp - P2.S6: `strata generate`.
+// src/glm/program/generate.cpp - GLM-5.3-Flash's path of almond-engine (glm_main: its command line and --serve).
 //
 // THE DRIVER, and the first program in this project that answers a question.  Everything below it is a
 // component; this is the thing that composes them into a token:
@@ -737,7 +737,7 @@ void stall_report(std::FILE* f, uint64_t layers_during) {
         using Fn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, int, void*, void*, void*);
         if (auto write = (Fn) GetProcAddress(dbg, "MiniDumpWriteDump")) {
             char path[64];
-            std::snprintf(path, sizeof path, "maya-stall-%lu.dmp", (unsigned long) GetCurrentProcessId());
+            std::snprintf(path, sizeof path, "almond-stall-%lu.dmp", (unsigned long) GetCurrentProcessId());
             HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (h != INVALID_HANDLE_VALUE) {
                 const int kThreadInfo = 0x1000;   // MiniDumpWithThreadInfo; MiniDumpNormal = 0
@@ -1084,7 +1084,7 @@ static int glm_pack_generate(const Options& o) {
     // the driver samples on the device (sample_token), so the fast path never downloads the logits
     model.set_host_logits(false);
     if (model.fast()) {
-        // INFO facts for the server's Monitor tab (strata app): the expert tiers this engine runs with
+        // INFO facts for the server's Monitor: the expert tiers this engine runs with
         const auto st = model.fast_stats();
         // (+ the CPU lane setup's calibration reads: its threads and its PCIe share, as the engine started, and the most
         // threads a request's cpu_threads gets - its pool's size)
@@ -3763,7 +3763,7 @@ static int glm_pack_generate(const Options& o) {
         // before: mean NLL, perplexity, top-1 hits.  ALMOND_GLM_SCORE_DUMP=<file> writes each scored position's
         // log-softmax (n_vocab floats); ALMOND_GLM_SCORE_REF=<file> reads such a dump and reports KL(ref || this) and
         // how often both pick the same top token - the quality yardstick for engine changes and for quants.
-        // ALMOND_GLM_SCORE_TOPK=<file> is the compact reference (the FP8 model's, tools/maya_quant): an int32 k, then
+        // ALMOND_GLM_SCORE_TOPK=<file> is the compact reference (the FP8 model's): an int32 k, then
         // per scored position k int32 token ids (best first) and their k float log-probs.  KL over those k tokens plus
         // one bucket for the rest of the vocabulary.
         if (const char* sc = getenv("ALMOND_GLM_SCORE")) {
@@ -4003,7 +4003,7 @@ static int glm_pack_generate(const Options& o) {
         } busy_scope;
         // LOGP <n_ctx> <id,id,...>: the summed log-probability of the tokens from n_ctx on given those before
         // ("LP <sum> <n> <1 if every one was the most likely>") - the multiple-choice scoring of the zero-shot suite
-        // (tools/maya_quant/zs_tasks.py).  A context identical to the previous request's is restored, not read again
+        // .  A context identical to the previous request's is restored, not read again
         // (the choices of one question share it).
         // VLEND / VRECLAIM (between requests): the on-demand vision encoder is about to start on the first GPU - the
         // expert pool's tail is emptied and freed for it ("VLENT <bytes>") - and has ended ("VRECLAIMED"; an ERR while
