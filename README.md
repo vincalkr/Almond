@@ -106,6 +106,10 @@ instead.
 - `/stats` (or `--monitor`): `GET /metrics` as text - state, speed, context, experts in VRAM, each GPU's load, VRAM,
   temperature and power, PCIe, CPU, RAM, disk, the conversation cache, the last requests and the totals.
   `/forget` clears the conversation cache.
+- on a terminal the last line is a status bar, as in ds4's CLI (a scroll region the chat scrolls above): reading the
+  prompt a bar with tokens read / total and tok/s, writing the tokens, tok/s, the time and thinking or answer, idle the
+  last request's prompt / reused / output and tok/s, the context in use, the thinking level and the model (from
+  `/metrics`); `-p` and piped output have none.
 - `/models`, `/model NAME` (switches through the router), `/clear`, `/read FILE`, `/system TEXT`, `/ctx`, `/hide`,
   `/show`; a line ending in `\` goes on, `"""` opens a block; Ctrl+C stops an answer.
 

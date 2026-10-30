@@ -15,6 +15,8 @@ Thinking: --nothink, --think (the model's default), --think-max, --think-level L
   /forget            clear the conversation cache the engine keeps
   /hide /show        the thinking
 
+On a terminal the last line is a status bar: the prompt's reading, the answer's speed, idle the last request's numbers.
+
   ./almond --monitor   the same as /stats, refreshed every second (Ctrl+C leaves)
 
 A line ending in \\ goes on to the next; \"\"\" starts and ends a block of several lines.  Ctrl+C stops the answer and
@@ -28,6 +30,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -112,6 +115,119 @@ class Api:
                     yield "end", {"finish": ch["finish_reason"], "usage": ev.get("usage"), "timings": ev.get("timings")}
 
 
+class Bar:
+    """The status line at the bottom of the terminal, as ds4's CLI keeps one: a scroll region (DECSTBM) over every
+    row but the last, so the conversation scrolls above it.  While a request runs a thread reads /metrics' live state
+    four times a second (the prompt's reading: a bar, read / total, tok/s; the answer: tokens, tok/s, the time,
+    thinking or answer); idle, the last request's numbers, the model, the thinking level and the context.  Only on a
+    terminal: -p into a pipe never sees it."""
+
+    def __init__(self, api: Api):
+        self.api, self.on, self.text = api, False, ""
+        self.lock = threading.RLock()
+        self.busy = None                        # threading.Event while a request runs
+        self.phase = "thinking"                 # what the stream shows: thinking / answer
+
+    def rows(self):
+        s = os.get_terminal_size(sys.stdout.fileno())
+        return s.lines, s.columns
+
+    def start(self):
+        if not TTY:
+            return
+        self.on = True
+        sys.stdout.write("\n\x1b[A")        # a free row under the cursor, so the last row is not the one it is on
+        signal.signal(signal.SIGWINCH, lambda *_: self.region())
+        self.region()
+
+    def region(self):
+        """The scroll region over rows 1 .. H-1 (again after a resize), then the line."""
+        with self.lock:
+            h, _ = self.rows()
+            sys.stdout.write(f"\x1b7\x1b[1;{max(1, h - 1)}r\x1b8")
+            self.draw()
+
+    def stop(self):
+        if not self.on:
+            return
+        with self.lock:
+            self.on = False
+            h, _ = self.rows()
+            sys.stdout.write(f"\x1b7\x1b[r\x1b[{h};1H\x1b[2K\x1b8")
+            sys.stdout.flush()
+        signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+
+    def draw(self, text: str | None = None):
+        if not self.on:
+            return
+        with self.lock:
+            if text is not None:
+                self.text = text
+            h, w = self.rows()
+            line = self.text[:w - 1]
+            sys.stdout.write(f"\x1b7\x1b[{h};1H\x1b[2K{DIM}{line}{RESET}\x1b8")
+            sys.stdout.flush()
+
+    def write(self, out, text: str):
+        """The stream's text, under the same lock as the line, so neither cuts into the other."""
+        with self.lock:
+            out.write(text)
+            out.flush()
+
+    # ---- while a request runs
+    def run(self, model: str):
+        if not self.on:
+            return
+        self.busy, self.phase, t0 = threading.Event(), "thinking", time.time()
+
+        def poll(busy):
+            while not busy.is_set():
+                try:
+                    live = self.api.get("/metrics", timeout=2).get("live") or {}
+                except (OSError, RuntimeError, ValueError, http.client.HTTPException):
+                    live = {}
+                if not busy.is_set():
+                    self.draw(live_text(live, model, self.phase, time.time() - t0, self.rows()[1]))
+                busy.wait(0.25)
+        threading.Thread(target=poll, args=(self.busy,), daemon=True).start()
+
+    def done(self):
+        if self.busy is not None:
+            self.busy.set()
+            self.busy = None
+
+    def idle(self, chat):
+        """The last request's numbers (/metrics' requests[0]), the model, the thinking level, the context."""
+        if not self.on:
+            return
+        try:
+            last = (self.api.get("/metrics", timeout=2).get("requests") or [None])[0]
+        except (OSError, RuntimeError, ValueError, http.client.HTTPException):
+            last = None
+        parts = [f"context {_f(chat.ctx_used)} / {_f(chat.model.get('max_context'))}", f"thinking {chat.level_text()}",
+                 chat.model["id"]]
+        if last and chat.messages:
+            parts.insert(0, f"last: prompt {_f(last.get('prompt_tokens'))}, reused {_f(last.get('reused'))}, "
+                         f"output {_f(last.get('output_tokens'))} at {_f(last.get('decode_tok_s'), 1)} tok/s")
+        self.draw("  ".join(parts))
+
+
+def live_text(live: dict, model: str, phase: str, secs: float, width: int) -> str:
+    """The bottom line while a request runs, from /metrics' live state."""
+    state = live.get("state")
+    if state == "reading":
+        read, total = live.get("prompt_read") or 0, live.get("prompt_total") or 0
+        tail = (f" {_f(read)} / {_f(total)} tokens  {_f(live.get('prefill_tok_s_mean'), 0)} tok/s  {secs:.0f} s")
+        head = f"{model}  reading the prompt "
+        n = max(10, min(40, width - len(head) - len(tail) - 3))
+        k = int(n * read / total) if total else 0
+        return head + "[" + "#" * k + "." * (n - k) + "]" + tail
+    if state == "generating":
+        return (f"{model}  {phase}: {_f(live.get('generated'))} tokens  {_f(live.get('tok_s'), 1)} tok/s  "
+                f"{secs:.1f} s" + (f"  ({live['queued']} queued)" if live.get("queued") else ""))
+    return f"{model}  waiting for the engine  {secs:.0f} s" + (f"  ({live['queued']} queued)" if live.get("queued") else "")
+
+
 class Chat:
     def __init__(self, api: Api, a):
         self.api, self.a = api, a
@@ -125,6 +241,7 @@ class Chat:
         self.model = None                       # the listing entry in use
         self.level = None                       # None: the model's default
         self.ctx_used = 0
+        self.bar = Bar(api)
 
     # ---- models and levels
     def refresh(self):
@@ -205,6 +322,8 @@ class Chat:
         think = sys.stdout if TTY else sys.stderr
         t0 = time.time()
         first = None
+        bar = self.bar
+        bar.run(self.model["id"])
         try:
             for kind, v in self.api.stream(body):
                 if kind in ("reasoning", "content") and first is None:
@@ -212,25 +331,22 @@ class Chat:
                 if kind == "reasoning":
                     reasoning.append(v)
                     if self.show:
-                        if state != "reasoning":
-                            think.write(f"{DIM}")
-                        think.write(v)
-                        think.flush()
+                        bar.write(think, (DIM if state != "reasoning" else "") + v)
                     state = "reasoning"
                 elif kind == "content":
                     if state == "reasoning" and self.show:
-                        think.write(f"{RESET}\n\n" if TTY else "\n")
-                        think.flush()
+                        bar.write(think, f"{RESET}\n\n" if TTY else "\n")
                     state = "content"
+                    bar.phase = "answer"
                     content.append(v)
-                    out.write(v)
-                    out.flush()
+                    bar.write(out, v)
                 elif kind == "tool":
                     fn = v.get("function") or {}
-                    out.write(f"{CYAN}[tool call {fn.get('name', '')} {fn.get('arguments', '')}]{RESET}")
+                    bar.write(out, f"{CYAN}[tool call {fn.get('name', '')} {fn.get('arguments', '')}]{RESET}")
                 elif kind == "end":
                     end = v
         except KeyboardInterrupt:
+            bar.done()
             try:
                 self.api.live.close()           # the server sees the client go and stops the answer
             except Exception:
@@ -239,9 +355,11 @@ class Chat:
                 out.write(f"{RESET}\n{DIM}[stopped]{RESET}\n")
             end = {"finish": "stopped"}
         except (RuntimeError, OSError, http.client.HTTPException) as e:
+            bar.done()
             self.messages.pop()
             say(f"{RESET}{RED}error: {e}{RESET}")
             return False
+        bar.done()
         if state == "reasoning" and self.show:
             think.write(RESET if TTY else "\n")
         out.write("\n")
@@ -399,7 +517,20 @@ class Chat:
             readline = None
         self.pending = ""
         self.banner()
+        self.bar.start()
+        try:
+            self.talk()
+        finally:
+            self.bar.stop()
+        if readline:
+            try:
+                readline.write_history_file(HISTORY)
+            except OSError:
+                pass
+
+    def talk(self):
         while True:
+            self.bar.idle(self)
             try:
                 line = read_input(f"{BOLD}>{RESET} " if TTY else "> ")
             except EOFError:
@@ -416,11 +547,6 @@ class Chat:
                 continue
             text, self.pending = self.pending + line, ""
             self.ask(text)
-        if readline:
-            try:
-                readline.write_history_file(HISTORY)
-            except OSError:
-                pass
 
 
 def _f(x, nd=0):
