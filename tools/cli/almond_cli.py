@@ -656,7 +656,10 @@ class Chat:
 
     def wire(self) -> list:
         sys_msg = [{"role": "system", "content": self.system}] if self.system else []
-        return sys_msg + [{k: v for k, v in m.items() if k != "reasoning_content"} for m in self.messages]
+        # the reasoning goes back too: the model's template keeps it for the turn in progress (an agent's chain of tool
+        # calls, where it is the plan) and drops earlier turns' (GLM's clear_thinking, DeepSeek's encoder); without it
+        # every step started without knowing why the last one ran
+        return sys_msg + [dict(m) for m in self.messages]
 
     # ---- sampling
     KEYS = {"temp": "temperature", "temperature": "temperature", "top_p": "top_p", "top-p": "top_p", "top_k": "top_k",
