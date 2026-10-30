@@ -14,8 +14,8 @@ P.mkdir(exist_ok=True)
 rd = lambda f: (ROOT / f).read_text()
 texts = {
     "dev-code": "You are working on a C++/HIP inference engine. Here are two source files.\n\n"
-                "=== tools/v41/engine/ds41_conv_disk.hpp ===\n" + rd("tools/v41/engine/ds41_conv_disk.hpp") +
-                "\n=== tools/v41/engine/ds41_conv_pool.cpp ===\n" + rd("tools/v41/engine/ds41_conv_pool.cpp") +
+                "=== src/ds41/ds41_conv_disk.hpp ===\n" + rd("src/ds41/ds41_conv_disk.hpp") +
+                "\n=== src/ds41/ds41_conv_pool.cpp ===\n" + rd("src/ds41/ds41_conv_pool.cpp") +
                 "\n\nReview this code: list the concrete bugs or risks you find (file, function, why), then write a patch in "
                 "unified diff format that fixes the most important one, with a short explanation.",
     "dev-docs": "Here is the README of a project and its notes on the AMD HIP port.\n\n=== README.md ===\n" + rd("README.md") +

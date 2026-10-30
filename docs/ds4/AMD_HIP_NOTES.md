@@ -1,6 +1,6 @@
 # DeepSeek-V4.1-Flash on AMD (gfx1100, HIP) - how this checkout runs it
 
-The engine (`tools/v41/engine/`) was written for CUDA; on this box - two Radeon RX 7900 XTX (gfx1100, wave32), Ryzen 9
+The engine (`src/ds41/`) was written for CUDA; on this box - two Radeon RX 7900 XTX (gfx1100, wave32), Ryzen 9
 9900X, 122 GiB RAM, ROCm 7.14 - the whole expert path runs on HIP. Speed, quality and the configuration are in
 [V41_EXACT_FAST.md](V41_EXACT_FAST.md).
 
@@ -23,7 +23,7 @@ MMQ prompt path (`-DALMOND_PREFILL_MMQ=ON`). `ROCM`, `GFX`, `JOBS`, `REBUILD_GGM
 The port changes in this tree:
 
 1. `CMakeLists.txt`: with `ALMOND_ENABLE_HIP` the `BUILD_SHARED_LIBS OFF` / `GGML_STATIC ON` FORCEs are skipped.
-2. `tools/v41/engine/v41_engine.cmake`: `ds41_dense` links `ggml-hip` and keeps the `DS41_HAVE_CUDA` compile path
+2. `src/ds41/v41_engine.cmake`: `ds41_dense` links `ggml-hip` and keeps the `DS41_HAVE_CUDA` compile path
    (ggml's HIP backend is the CUDA backend's sources compiled as HIP, so it exports `ggml_backend_cuda_*`); the expert
    tier gets a `ds41_moe_hip` flavour - the same `DS4_MOE_CUDA` source, `almond_hip_runtime` force-including the compat
    header - and `ds41_generate` prefers it.

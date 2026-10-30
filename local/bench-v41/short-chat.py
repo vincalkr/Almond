@@ -24,7 +24,7 @@ CHAT = ["Explain in a few paragraphs how a hash map handles collisions, with a s
         "Now compare open addressing and chaining: when is each one faster?",
         "Scrivi la stessa spiegazione in italiano, in modo semplice, per uno studente."]
 LONG = ("Summarize this source file and point out anything that looks wrong:\n\n" +
-        (ROOT / "tools/v41/engine/ds41_conv_pool.cpp").read_text()[:4500])
+        (ROOT / "src/ds41/ds41_conv_pool.cpp").read_text()[:4500])
 
 
 def config():

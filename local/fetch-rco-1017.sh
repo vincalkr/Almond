@@ -102,7 +102,7 @@ if [ "$DRY_RUN" != 1 ]; then
     ENGRAMARG=(); [ -s "$DEST/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf" ] && ENGRAMARG=(--engram "$DEST/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf")
     python3 "$HERE/tools/v41/ds41_pack_meta.py" --pack "$DEST"/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf \
         --ref-keys "$HERE/$META/geometry-keys.json" "${ENGRAMARG[@]}" --out "$HERE/$META/meta.gguf"
-    python3 "$HERE/tools/v41/engine/v41_pack_map.py" \
+    python3 "$HERE/tools/v41/v41_pack_map.py" \
         "$DEST"/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf > "$HERE/local/rco-iq2xxs-map.json"
     echo "fetch-rco: pack + tokenizer in $DEST, overlay in $HERE/$META/meta.gguf (the configurations set DS41_META to it)"
     if [ "${VISION:-1}" != 0 ]; then

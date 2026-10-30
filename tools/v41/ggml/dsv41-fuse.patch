@@ -13,7 +13,7 @@
              int                   mode);
  
 +    // Strata-DS4: the HC pre/post mixes of one model.py Block.hc_mixes in ONE op - the same values as the stock-op
-+    // composite tools/v41/engine/ds41_dense.cpp hc_mixes builds (mul, add, sigmoid, ggml_scale / ggml_scale_bias), bit for
++    // composite src/ds41/ds41_dense.cpp hc_mixes builds (mul, add, sigmoid, ggml_scale / ggml_scale_bias), bit for
 +    // bit on CUDA and CPU.  Replaces 4 nodes per mix with 1: 16 of every layer's ~82 tiny kernels.
 +    //   mixes: F32 [2*hc, n_tokens] contiguous   scale: F32 [2]   base: F32 [2*hc]   result: F32 [hc, 2*n_tokens]
 +    //   result[h, t]        = sigmoid(mixes[h,      t]*scale[0] + base[h])      * 1 + eps   (the pre mix)
@@ -211,7 +211,7 @@
 +
 +
 +// ---- Strata-DS4: GGML_OP_DSV41_HC_MIXES - the two HC mixes of one model.py Block.hc_mixes in one kernel.
-+// tools/v41/engine/ds41_dense.cpp hc_mixes builds them from mul + add + sigmoid + ggml_scale(_bias); this repeats that
++// src/ds41/ds41_dense.cpp hc_mixes builds them from mul + add + sigmoid + ggml_scale(_bias); this repeats that
 +// composite step for step under the same -use_fast_math flags, so the values are bit-identical:
 +// a stock binary op is one plain op (__fmul_rn / __fadd_rn: .rn.ftz, never contracted, = binbcast's a op b), ggml_scale
 +// is scale_f32's `scale * x + bias` = one FMA (__fmaf_rn), sigmoid is unary_op_kernel's op_sigmoid.

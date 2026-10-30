@@ -291,7 +291,7 @@ The Engram rows come as the pack's own iq4_nl GGUF (`DeepSeek-V4.1-Flash-Engram-
 layer, 144 bytes a row read in one pread) or as the checkpoint's FP8 rows (two safetensors a layer, F8_E4M3 weights
 and F8_E8M0 scales, 256 + 8 bytes a row in two preads; 203 GB in `models/engram-1017`). `--engram` takes either.
 iq4_nl is not linear: `ds41_dequant_iq4_nl_row` is ggml's `block_iq4_nl` arithmetic, gated by
-`tools/v41/engine/test_ds41_engram.cpp` (1,028,096 of 1,028,096 values bit-identical to ggml's `to_float`).
+`src/ds41/test_ds41_engram.cpp` (1,028,096 of 1,028,096 values bit-identical to ggml's `to_float`).
 
 Rows per second of the batched reader (`build-hip-fused/bench_ds41_engram`, 4096-token sequence, 16 threads, internal
 NVMe; cold = `drop_cache` between reps):
@@ -332,7 +332,7 @@ saved in the background after each answer); a request resumes the longest saved 
 a resume a few tokens before a saved end (a client that re-renders the tail of the last turn) re-feeds from the even
 position `ps = lcp & ~1` after `restore()`, only when `P - ps <= 16` (the window ring's reach), for the live and for a
 parked conversation, and the Engram history of the first new positions is rewritten.
-`tools/v41/engine/check_conv_reuse.py --scenario single` (a re-render 12 tokens back, resumed at 298 of 310) is
+`tools/v41/check_conv_reuse.py --scenario single` (a re-render 12 tokens back, resumed at 298 of 310) is
 bit-exact against a fresh prefill on the CPU backend. A client that cuts the middle of a conversation is read again
 from the cut: there is no state to resume from there. `ALMOND_SERVE_LIVE_PARTIAL=0` turns the live-conversation
 partial resume off.

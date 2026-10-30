@@ -6,7 +6,7 @@
 #   ./run.sh --router        every model in local/router.json behind one address (tools/router/almond_router.py): the
 #                            request's "model" loads it (stopping the other); /v1/models lists them with their
 #                            thinking levels.  The chat: ./almond (starts the router itself when nothing answers)
-#   ./run.sh --model glm     GLM-5.3-Flash (GSQ-RCO 3.0bit) on project-maya's engine (engines/maya, build-maya-hip/maya),
+#   ./run.sh --model glm     GLM-5.3-Flash (GSQ-RCO 3.0bit) on Almond's engine (src/glm, build-hip-fused/almond-glm),
 #                            the layers split over both cards: local/glm-local.json, tools/glm/serve/serve_glm.py
 # --gpu picks the configuration: local/ds41-local-vision.json for two cards, local/ds41-local-1gpu-vision.json for
 # one; without the vision encoder in models/vision-1017 (or the image routing bias local/rco-iq2xxs-meta/vl-bias.gguf)
@@ -75,10 +75,10 @@ case $MODEL in
             [ -s "$R/models/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf" ] && [ -x "$R/build-maya-vision/build/bin/maya-vision" ] &&
                 CFG="$R/local/glm-local-vision.json"
         fi
-        [ -x "$R/build-maya-hip/maya" ] || { echo "run.sh: build-maya-hip/maya is not built (./build.sh builds it)" >&2; exit 1; }
+        [ -x "$R/build-hip-fused/almond-glm" ] || { echo "run.sh: build-hip-fused/almond-glm is not built (./build.sh builds it)" >&2; exit 1; }
         # the expert profile the engine starts its VRAM pools from and saves what it learns into: project-maya's
         # until this machine has its own
-        [ -s "$R/local/glm-expert-profile.bin" ] || cp "$R/engines/maya/data/expert-profile-glm.bin" "$R/local/glm-expert-profile.bin" ;;
+        [ -s "$R/local/glm-expert-profile.bin" ] || cp "$R/tools/glm/data/expert-profile-glm.bin" "$R/local/glm-expert-profile.bin" ;;
     *) echo "run.sh: --model takes ds41 or glm (got '$MODEL')" >&2; exit 1 ;;
 esac
 cards=$(echo "${GPU:-0,1}" | tr ',' '\n' | wc -l)

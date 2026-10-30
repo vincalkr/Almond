@@ -4,7 +4,7 @@
 of the 1017 checkpoint at exact routing: `corpus.i32` (8,154 tokens of mixed text: docs, C++ source, README, Italian
 prose, chat log) plus a 64-token continuation, and `local/prompts/circles.i32` with the 60-token answer in
 `circles-answer.ids` replayed through `ALMOND_FORCE_IDS`. `local/rebuild-rank.sh` adds the chat's own counts
-(`local/routes-rco`) to these and ranks the experts per byte (`tools/v41/engine/v41_rank.py`).
+(`local/routes-rco`) to these and ranks the experts per byte (`tools/v41/v41_rank.py`).
 
 To collect counts again on the pack in use:
 

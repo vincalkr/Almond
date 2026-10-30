@@ -1,5 +1,5 @@
 {
-  "exe": "build-maya-hip/maya",
+  "exe": "build-hip-fused/almond-glm",
   "args": [
     "--glm-pack",
     "models/glm53-gsq-rco/pack",

@@ -25,11 +25,11 @@ URL = "http://127.0.0.1:8150"
 
 rd = lambda f: (ROOT / f).read_text()
 PROMPT = ("You are working on a C++/HIP inference engine. Here are two source files.\n\n"
-          "=== tools/v41/engine/ds41_conv_disk.hpp ===\n" + rd("tools/v41/engine/ds41_conv_disk.hpp") +
-          "\n=== tools/v41/engine/ds41_conv_pool.cpp ===\n" + rd("tools/v41/engine/ds41_conv_pool.cpp") +
+          "=== src/ds41/ds41_conv_disk.hpp ===\n" + rd("src/ds41/ds41_conv_disk.hpp") +
+          "\n=== src/ds41/ds41_conv_pool.cpp ===\n" + rd("src/ds41/ds41_conv_pool.cpp") +
           "\n\nReview this code: list the concrete bugs or risks you find (file, function, why), then write a patch in "
           "unified diff format that fixes the most important one, with a short explanation.")
-pool = rd("tools/v41/engine/ds41_conv_pool.cpp")
+pool = rd("src/ds41/ds41_conv_pool.cpp")
 FOLLOW = [
     "Now look at this part again and tell me whether the locking is correct:\n\n" + pool[2000:2800],
     "Rewrite this function so that it handles a short write and returns an error, keep the style:\n\n" + pool[4000:4800],

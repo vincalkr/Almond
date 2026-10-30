@@ -7,5 +7,4 @@ R=$(cd "$(dirname "$0")/.." && pwd)
 PY=${ALMOND_PY:-$R/.venv/bin/python}
 G=$R/models/glm53-gsq-rco/GLM-5.3-Flash-GSQ-RCO-3.0bit.gguf
 [ -s "$G" ] || { echo "glm-pack.sh: $G is missing" >&2; exit 1; }
-STRATA_GGUF_PY="$R/third_party/llama.cpp/gguf-py" \
-    "$PY" "$R/engines/maya/tools/iq_pack.py" --gguf "$G" --out "$R/models/glm53-gsq-rco/pack" --compat-bf16
+"$PY" "$R/tools/glm/iq_pack.py" --gguf "$G" --out "$R/models/glm53-gsq-rco/pack" --compat-bf16

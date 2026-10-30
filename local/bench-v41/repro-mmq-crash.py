@@ -5,7 +5,7 @@ import json, sys
 from pathlib import Path
 import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tools/v41/engine"))
+sys.path.insert(0, str(ROOT / "src/ds41"))
 import check_conv_reuse as C  # noqa: E402
 out = ROOT / "local/sweep-crash"
 out.mkdir(parents=True, exist_ok=True)

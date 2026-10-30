@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build.sh - builds ggml (third_party/llama.cpp/build-hip), the DeepSeek engine (build-hip-fused/ds41_generate) and the
-# GLM engine (build-maya-hip/maya, from engines/maya), HIP only.
+# GLM engine (build-hip-fused/almond-glm, src/glm), HIP only.
 # The same commands as the README's "2. Build".  ggml is built once (tens of minutes: many HIP kernels); a second run
 # only rebuilds what changed.  Environment:
 #   ROCM=/opt/rocm      the ROCm install
@@ -37,12 +37,7 @@ cmake -S . -B build-hip-fused "${COMMON[@]}" \
     -DALMOND_GGML_DIR="$PWD/third_party/llama.cpp" -DALMOND_GGML_PREBUILT="$PWD/third_party/llama.cpp/build-hip" \
     -DALMOND_DSV41_HC_MIX=ON -DALMOND_DSV41_FQ_OP=ON
 cmake --build build-hip-fused -j "$JOBS"
-echo "=== GLM engine (engines/maya, project-maya's, -> build-maya-hip/maya)"
-cmake -S engines/maya -B build-maya-hip "${COMMON[@]}" \
-    -DALMOND_ENABLE_HIP=ON -DALMOND_ENABLE_CUDA=OFF -DALMOND_PREFILL_MMQ=ON -DALMOND_NATIVE_EXPERTS=ON \
-    -DALMOND_BUILD_TESTS=OFF -DALMOND_GGML_DIR="$PWD/third_party/llama.cpp"
-cmake --build build-maya-hip --target maya -j "$JOBS"
-echo "=== GLM image encoder (engines/maya/tools/vision: llama.cpp's mtmd at the engine's pinned commit + GLM-5.3's tower)"
+echo "=== GLM image encoder (tools/glm/vision: llama.cpp's mtmd at the engine's pinned commit + GLM-5.3's tower)"
 # the pinned llama.cpp the GLM engine's build fetched, copied and patched (tools/vision/glm5next_patch.py, idempotent)
 VL=build-maya-vision/llama.cpp
 # (llama.cpp's mtmd at the commit GLM's encoder was written against: a shallow fetch, once)
@@ -50,8 +45,8 @@ if [ ! -d "$VL" ]; then
     mkdir -p "$VL" && git -C "$VL" init -q && git -C "$VL" remote add origin https://github.com/ggml-org/llama.cpp &&
         git -C "$VL" fetch -q --depth 1 origin 3cf03257f219afbe7334045ff7c6a06ac68c627d && git -C "$VL" checkout -q FETCH_HEAD
 fi
-python3 engines/maya/tools/vision/glm5next_patch.py "$VL"
-cmake -S engines/maya/tools/vision -B build-maya-vision/build "${COMMON[@]}" -DLLAMA_DIR="$PWD/$VL" \
+python3 tools/glm/vision/glm5next_patch.py "$VL"
+cmake -S tools/glm/vision -B build-maya-vision/build "${COMMON[@]}" -DLLAMA_DIR="$PWD/$VL" \
     -DALMOND_VISION_HIP=ON -DGGML_HIP_NO_VMM=ON
 cmake --build build-maya-vision/build --target maya-vision -j "$JOBS"
-echo "=== done: build-hip-fused/ds41_generate, build-maya-hip/maya, build-maya-vision/build/bin/maya-vision"
+echo "=== done: build-hip-fused/ds41_generate, build-hip-fused/almond-glm, build-maya-vision/build/bin/maya-vision"

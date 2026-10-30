@@ -1,4 +1,4 @@
-# Almond - a multi-model MoE engine (today DeepSeek-V4.1-Flash, tools/v41/engine) and the few libraries it links.
+# Almond - a multi-model MoE engine (today DeepSeek-V4.1-Flash, src/ds41) and the few libraries it links.
 #
 # Of the Strata libraries this tree started from, exactly the objects ds41_generate links remain (traced with -Wl,--trace on
 # 2026-10-18): the VRAM expert cache and VMM, pinned host memory, the CPU expert kernels, the HIP MMVQ / IQ kernels and
@@ -132,4 +132,7 @@ if(ALMOND_PREFILL_MMQ)
 endif()
 
 # ---- the DeepSeek-V4.1 engine ----
-include(${CMAKE_CURRENT_SOURCE_DIR}/tools/v41/engine/v41_engine.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/src/ds41/v41_engine.cmake)
+
+# GLM-5.3-Flash (src/glm, from project-maya: docs/ENGINE_PLAN.md) -> almond-glm
+add_subdirectory(src/glm)

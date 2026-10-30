@@ -1,6 +1,6 @@
 # One engine
 
-Today Almond runs two engines: `ds41_generate` (DeepSeek-V4.1-Flash, `tools/v41/engine` + `src/`, from ds41e) and
+Today Almond runs two engines: `ds41_generate` (DeepSeek-V4.1-Flash, `src/ds41` + `src/`, from ds41e) and
 project-maya's engine for GLM-5.3-Flash (`engines/maya`, vendored, ~160K lines with DeepSeek and MiniMax paths Almond
 does not use, its own pinned ggml). The goal: one engine of Almond's own, no vendored part, one ggml, one build, one
 executable that runs every model, and the parts both need written once.
@@ -17,7 +17,7 @@ measures worse is not merged.
    `engines/maya/third_party/llama.cpp` goes.
 2. **The code in `src/`.** GLM's model, its expert pools and RAM tier, its prompt path, MTP drafting and the
    conversation slots move from `engines/maya/src` into `src/` beside DeepSeek's; DeepSeek's engine moves from
-   `tools/v41/engine` into `src/` too. What only project-maya's DeepSeek (`src/ds4`) and MiniMax (`src/mm3`) paths
+   `src/ds41` into `src/` too. What only project-maya's DeepSeek (`src/ds4`) and MiniMax (`src/mm3`) paths
    use is left out. One CMake project (`build.sh` builds one tree).
 3. **One executable** (`almond-engine`): the model's GGUF / pack says which path runs; the server protocol (GEN,
    GENI, STOP, LOGP, VLEND ...) is one.
@@ -45,3 +45,11 @@ bit-reproducible run to run):
 Server, thinking low, temperature 0, 600 tokens, three prompts (code, Italian, English), two rounds alternated, tok/s:
 0.24 32.2 31.0 30.8 / 32.1 32.7 30.7 (mean 31.6); 0.26 32.4 32.4 30.6 / 31.8 32.0 30.5 (mean 31.6).
 `engines/maya/third_party/llama.cpp` is gone; gguf-py moved to `third_party/llama.cpp/gguf-py`.
+
+**Step 2, the code in `src/` (2026-10-30).** GLM's model, kernels, prompt path, MTP and slots: `src/glm/` (with
+project-maya's LICENSE), its own CMakeLists.txt added by the top one, on the top level's prebuilt ggml; the executable
+is `build-hip-fused/almond-glm`. project-maya's DeepSeek (`src/ds4`) and MiniMax (`src/mm3`) paths, its tests and
+benches went to the trash. Its Python tools (the pack builder, the hipBLASLt tuner, the image encoder's sources):
+`tools/glm/`. DeepSeek's engine: `tools/v41/engine` -> `src/ds41` (its Python tools in `tools/v41/`). GLM, `almond-glm`:
+PPL 10.4159, 10.4583, 10.2627 (mean 10.379); server tok/s 32.1 33.2 31.5 / 32.1 31.9 30.1 (mean 31.8). DeepSeek's code
+only moved (the binary differs in its source paths).

@@ -4,7 +4,7 @@
 The ISTA-DASLab / RCO packs carry llama.cpp/HF metadata (`embedding_length`, `block_count`,
 `attention.head_count_kv`, ...), not the flat `deepseek41.*` keys ds41e reads, and their Engram arrays live as I32/I64
 tensors instead of KV entries. This writes ONE tiny GGUF with exactly the keys and full integer arrays that
-`tools/v41/engine/ds41_geometry.hpp` expects: geometry scalars and the config JSON come from the checkpoint's reference
+`src/ds41/ds41_geometry.hpp` expects: geometry scalars and the config JSON come from the checkpoint's reference
 keys (`local/rco-iq2xxs-meta/geometry-keys.json`, or any GGUF of the same checkpoint that carries them), compress ratios/sources are cross-checked against which tensors the pack holds,
 and the Engram token map/primes/multipliers are read out of the pack's own small global tensors.  The table row counts
 come from the separate Engram IQ4_NL GGUF and must tile exactly under those primes.

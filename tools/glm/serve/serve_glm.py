@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Almond's API server (serve/server.py) in front of GLM-5.3-Flash on project-maya's engine (`build-maya-hip/maya
---serve`, vendored in engines/maya).  The server is generic and the pack's tokenizer directory carries the model's own
+--serve`, src/glm).  The server is generic and the pack's tokenizer directory carries the model's own
 Jinja chat template; this shim swaps in GLM's differences:
 
 - reasoning effort and sampling as Z.ai's API has them for GLM-5.3-Flash (docs.z.ai, chat completions): thinking is

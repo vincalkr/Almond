@@ -73,7 +73,7 @@ local/fetch-rco-1017.sh                                               # everythi
 ## Models, the router and the chat
 
 Almond serves DeepSeek-V4.1-Flash (`./run.sh`, the default) and GLM-5.3-Flash (`./run.sh --model glm`, on
-project-maya's engine in `engines/maya`; `local/glm-pack.sh` and `local/glm-mtp-extract.py` prepare its files, see
+its own engine in `src/glm` (from project-maya, MIT; `build-hip-fused/almond-glm`); `local/glm-pack.sh` and `local/glm-mtp-extract.py` prepare its files, see
 docs/ALMOND_PLAN.md). `./run.sh --router` puts every model of `local/router.json` behind one address, as llama-server's
 router mode does: `GET /v1/models` lists them with their status (loaded / loading / unloaded), context and thinking
 levels (`reasoning_levels`, `reasoning_default`); `POST /models/load` / `/models/unload {"model": NAME}`; a request that

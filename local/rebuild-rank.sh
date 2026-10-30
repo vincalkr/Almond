@@ -35,4 +35,4 @@ for l in range(L):
     json.dump({"layer": l, "top_k": 6, "experts": ex}, open(f"{out}/L{l:02d}.json", "w"))
 print(f"corpus {tot_c} selections + chat {tot_r} x {w} -> {out}")
 EOF
-python3 tools/v41/engine/v41_rank.py --stats "$STATS" ${MAP:+--map "$MAP"} --out "$OUT"
+python3 tools/v41/v41_rank.py --stats "$STATS" ${MAP:+--map "$MAP"} --out "$OUT"

@@ -11,7 +11,7 @@ TIMEOUT=${TIMEOUT:-60}
 # this folder's servers and engines only (another checkout's are left alone)
 servers() { pgrep -f "$R/tools/(v41/serve/serve_ds41|glm/serve/serve_glm|router/almond_router)[.]py" 2>/dev/null; }
 engines() {
-    for p in $(pgrep -x ds41_generate 2>/dev/null) $(pgrep -x maya 2>/dev/null); do
+    for p in $(pgrep -x ds41_generate 2>/dev/null) $(pgrep -x almond-glm 2>/dev/null); do
         [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$R" ] && echo "$p"
     done
 }

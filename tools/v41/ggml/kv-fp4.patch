@@ -5,7 +5,7 @@ diff -ru a/ggml/src/ggml-cuda/cpy-utils.cuh b/ggml/src/ggml-cuda/cpy-utils.cuh
      y->d = sumq2 > 0 ? sumqx/sumq2 : d;
  }
  
-+// ---- Strata DS4.1 FP4 KV caches (tools/v41/engine/ds41_dense.cpp --kv-fp4).  The graph's fake-quant has already put
++// ---- Strata DS4.1 FP4 KV caches (src/ds41/ds41_dense.cpp --kv-fp4).  The graph's fake-quant has already put
 +// every value on an FP4 grid - the compressed KV on e2m1 x an E4M3 scale per 16 (NVFP4), the indexer keys on
 +// e2m1 x a power-of-2 scale per 32 (MXFP4) - and these two quantizers pack such values EXACTLY: per (sub-)block they
 +// try the scales the grid admits (amax / q, q an e2m1 magnitude, snapped to the scale format) and keep the first that

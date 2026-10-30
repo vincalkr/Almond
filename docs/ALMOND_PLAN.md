@@ -38,12 +38,12 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
 ## Phases
 
 1. **Rename** (done): Strata -> Almond, builds, server tests.
-2. **A model interface in the engine.** Split `tools/v41/engine` into what every MoE model shares (the expert tiers:
+2. **A model interface in the engine.** Split `src/ds41` into what every MoE model shares (the expert tiers:
    VRAM cache, peer card, RAM arena, NVMe reads; the pool; the sampler; the serve loop) and what is DeepSeek's (MLA /
    compressed attention, HC mixes, Engram, router). A `Model` with `load`, `prefill`, `decode_step`, `route(layer)`,
    `expert_layout`; DeepSeek becomes the first implementation. Gate: the same tok/s as ds41e (3 alternated runs,
    Promessi Sposi and 17K) and the same forced-token argmax.
-   **Done (2026-10-29):** `tools/v41/engine/moe_trunk.hpp` (`MoeTrunk`, `TrunkConfig`, `TrunkInfo`, `make_trunk`);
+   **Done (2026-10-29):** `src/ds41/moe_trunk.hpp` (`MoeTrunk`, `TrunkConfig`, `TrunkInfo`, `make_trunk`);
    `Ds41Dense` implements it; the driver and the conversation stores use only the interface.  Measured with
    `local/bench-v41/ab-ds41e.sh` (ab-hip-spin.sh's chat flags, power-tune on, forced on the reference streams):
 
@@ -56,7 +56,7 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
 3. **GLM-5.3-Flash.** Port project-maya's GLM layers onto the interface, experts through Almond's tiers. Read GGUF
    (GSQ-RCO 3.0bit, 117.5 GB; Maya-M for comparison). Gate: KL / top-1 against project-maya on the same pack, then speed
    against project-maya on this box.
-   **First version done (2026-10-29), exact, not yet fast:** `tools/v41/engine/glm_trunk.cpp` (llama.cpp's glm5-next
+   **First version done (2026-10-29), exact, not yet fast:** `src/ds41/glm_trunk.cpp` (llama.cpp's glm5-next
    graph as a MoeTrunk), the experts through Ds41MoeTier (`Ds41FileBlobs` reads llama.cpp's stacked expert tensors;
    Q4_K down added to the grouped GPU kernel). Checked on GSQ-RCO 3.0bit (`pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF`,
    117.5 GB, `models/glm53-gsq-rco`) against llama.cpp (c3df4b7, HIP, `llama-perplexity -c 512 --chunks 1`) on the
@@ -84,7 +84,7 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    ~300 stock-op kernels a layer. `ALMOND_GLM_HC_COMPOSITE=1` = the stock ops. PPL 10.5520 -> 10.5312 (top-1 0.546 ->
    0.548: the fused kernels round differently). `ALMOND_GLM_PROF=1`, 130 tokens: a KDA layer's graph 1.81 -> 1.26 ms,
    an MLA layer's 2.21 -> 1.32 ms, finish 0.16 -> 0.06 ms; decode 6.45 -> 7.77 tok/s (both with the profiler on).
-   An expert rank from the 17K prompt's routes (`tools/v41/engine/glm_rank.py`, `local/glm-rank.bin`: 30 GiB cover
+   An expert rank from the 17K prompt's routes (`tools/v41/glm_rank.py`, `local/glm-rank.bin`: 30 GiB cover
    87% of the selections) measured no faster (5.62 against 6.04/5.70 tok/s without), so it is not used: GLM's routing
    follows the text. The rank's first 35 GiB cover 28.5% of the doc prompt's routes (a uniform pick: ~35%), and the
    per-expert counts of the two texts (a C++ review, 17K tokens; this markdown, 192) correlate at -0.05 to -0.22 by layer.
