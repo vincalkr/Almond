@@ -112,3 +112,22 @@ Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
 - GLM: `ALMOND_GLM_SLOT_KEEP=1`, `ALMOND_GLM_SLOT_DIR=local/glm-slots`: the conversation in the model is saved when
   the engine ends and taken back after a start. Measured: a 7,163-token prompt read in 13.6 s; after a stop and a
   start the same conversation plus a question was taken back from disk in 0.1 s and read 123 new tokens (2.3 s).
+
+## GLM-5.3-Flash against llama.cpp (2026-10-30)
+
+Is the engine computing the model right, or are GLM's mistakes in an agent session ours? The same tokens through an
+independent implementation: llama.cpp's own (ggml-org master 792fcf4, which has `glm5-next`), the same GSQ-RCO 3.0bit
+file, experts in RAM (`--cpu-moe`), `llama-perplexity -c 512 --chunks 1` on `local/glm-ref/doc.txt` (its tokens are
+`local/glm-ref/doc512.i32`'s, checked with `llama-tokenize`); Almond's engine `LOGP 257` on those tokens (the 255
+llama-perplexity scores, the second half of the chunk), three runs:
+
+| | PPL |
+| --- | ---: |
+| llama.cpp | 7.1997 |
+| Almond | 7.1433, 7.0977, 7.0221 |
+
+The same within the engine's run-to-run spread. Copying numbers (40 random sizes, five copies at temperature 1.0):
+0 wrong of 200 with MTP off, 0 of 200 with MTP on on a fresh server and 0 of 200 after replaying an agent session;
+one earlier copy on a long-running server wrote "O" for "0" six times (6 of 520 with MTP on in all). The digits GLM
+garbled in agent sessions (47G read as 447G, 185G written as 1.8 TB) are the model's, not the engine's; the agent's
+system prompt (`AGENT_PROMPT`) asks it to keep figures as the tools print them.
