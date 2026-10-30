@@ -618,6 +618,22 @@ class Chat:
         m = self.model
         say(f"{BOLD}almond{RESET} - {m['id']}, context {m.get('max_context') or '?'}, thinking {self.level_text()}"
             + (f", agent in {os.getcwd()}" if self.agent else "") + ". /help for the commands.")
+        say(f"{DIM}sampling: {self.sampling_text()}{RESET}")
+
+    def sampling_text(self) -> str:
+        """The sampling a request gets: this chat's /set values over the model's defaults."""
+        d = self.defaults()
+        names = {"repetition_penalty": "repeat_penalty"}
+        out = []
+        for k, short in (("temperature", "temp"), ("top_p", "top_p"), ("top_k", "top_k"), ("min_p", "min_p"),
+                         ("repetition_penalty", "repeat_penalty"), ("presence_penalty", "presence_penalty"),
+                         ("seed", "seed")):
+            v = self.sampling.get(k)
+            if v is None:
+                v = d.get(names.get(k, k), d.get(k))
+            if v is not None:
+                out.append(f"{short} {v}" + (" (this chat)" if k in self.sampling else ""))
+        return ", ".join(out) or "the model's defaults (not reported)"
 
     def command(self, line: str) -> bool:
         """A slash command; False to leave."""
