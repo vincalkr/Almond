@@ -273,6 +273,32 @@ def live_text(live: dict, model: str, phase: str, secs: float, width: int) -> st
 
 
 AGENT_STEPS = 50
+# --agent's system prompt (when no --system is given), in the way of the coding agents' own (Claude Code, opencode,
+# Codex): who it is, where, how to use the tools, and the mistakes the models made here (numbers converted by hand:
+# 185G written as 1.8 TB; commands run in the background and polled; errors hidden by 2>/dev/null)
+AGENT_PROMPT = """You are an agent working in a terminal on the user's machine. You can read, write and edit files and run \
+bash commands through your tools; the user approves each write, edit and command.
+
+Environment: {os}, working directory {cwd}, date {date}.
+
+How to work:
+- Act with the tools instead of guessing: look before you answer, and read a file before you edit it.
+- Run independent commands in one step; give a slow command (du or find over a large tree) a longer timeout instead \
+of running it in the background and polling it.
+- Keep stderr visible (no 2>/dev/null) unless it is noise you understand; an empty output with an error code means \
+the command failed - read why before trying again, and change the command rather than repeating it.
+- edit_file needs the exact text from read_file, without the line numbers.
+- Never run destructive commands (rm -rf, overwriting data, changing system settings) unless the user asked for \
+exactly that.
+
+Accuracy:
+- Report numbers, sizes, paths and names exactly as the tools printed them, with the units they printed. Do not \
+convert units by hand (185G stays 185G, it is not 1.8 TB); if a conversion is needed, compute it with a command.
+- Before the final answer, check every figure in it against the tool output it came from.
+- If something is uncertain or a command failed, say so instead of filling the gap.
+
+Answer in the user's language, briefly and to the point; no filler, no apologies, no restating the question.
+"""
 TOOL_OUT = 8000                                 # the most of a tool's output the model sees, in characters
 
 
@@ -438,6 +464,19 @@ class Agent:
             return (out.decode(errors="replace").rstrip() + f"\n[timed out after {seconds(timeout):.0f} s: stopped, its output "
                     "lost; run it again with a longer timeout]")
         return out.decode(errors="replace").rstrip() + f"\n[exit code {q.returncode}]"
+
+
+def agent_os() -> str:
+    """The OS for the agent's prompt: the distribution's name and the kernel."""
+    name = ""
+    try:
+        for line in open("/etc/os-release", encoding="utf-8"):
+            if line.startswith("PRETTY_NAME="):
+                name = line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    u = os.uname()
+    return f"{name or u.sysname} (Linux {u.release})" if u.sysname == "Linux" else f"{u.sysname} {u.release}"
 
 
 def seconds(timeout) -> float:
@@ -668,7 +707,9 @@ class Chat:
         return calls
 
     def wire(self) -> list:
-        sys_msg = [{"role": "system", "content": self.system}] if self.system else []
+        text = self.system or (AGENT_PROMPT.format(os=agent_os(), cwd=self.agent.root, date=time.strftime("%Y-%m-%d"))
+                               if self.agent else None)
+        sys_msg = [{"role": "system", "content": text}] if text else []
         # the reasoning goes back too: the model's template keeps it for the turn in progress (an agent's chain of tool
         # calls, where it is the plan) and drops earlier turns' (GLM's clear_thinking, DeepSeek's encoder); without it
         # every step started without knowing why the last one ran
