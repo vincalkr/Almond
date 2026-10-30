@@ -896,10 +896,14 @@ def say(text: str):
     print(text, file=sys.stderr if not TTY else sys.stdout, flush=True)
 
 
-def start_router(api: Api, port: int, ctx: int | None = None) -> subprocess.Popen:
+def start_router(api: Api, port: int, ctx: int | None = None, session_log: str | None = None) -> subprocess.Popen:
     log = ROOT / "local" / "router.log"
     say(f"{DIM}nothing answers at {api.host}:{api.port}: starting the router (./run.sh --router, log {log}) ...{RESET}")
-    env = dict(os.environ, ALMOND_CTX=str(ctx)) if ctx else None   # (run.sh: every model the router starts)
+    env = dict(os.environ)                               # (run.sh / the server: every model the router starts)
+    if ctx:
+        env["ALMOND_CTX"] = str(ctx)
+    if session_log:
+        env["ALMOND_SESSION_LOG"] = session_log
     p = subprocess.Popen([str(ROOT / "run.sh"), "--router", "--port", str(port)], cwd=ROOT, start_new_session=True,
                          stdout=open(log, "a"), stderr=subprocess.STDOUT, env=env)
     for _ in range(240):
@@ -931,6 +935,9 @@ def main() -> int:
     ap.add_argument("--presence-penalty", type=float, default=None)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--max-tokens", type=int, default=None)
+    ap.add_argument("--session-log", nargs="?", const="local/session-log", default=None, metavar="DIR",
+                    help="the servers this starts write every request and its answer to DIR/<date>.jsonl "
+                         "(default DIR: local/session-log), for debugging")
     ap.add_argument("--ctx", type=int, default=None, metavar="TOKENS",
                     help="the context window of the models this starts (default: each configuration's); a server "
                          "already running keeps its own")
@@ -962,7 +969,7 @@ def main() -> int:
     if not api.up():
         if a.no_start or api.host not in ("127.0.0.1", "localhost"):
             raise SystemExit(f"almond: nothing answers at {a.url}")
-        started = start_router(api, api.port, a.ctx)
+        started = start_router(api, api.port, a.ctx, a.session_log)
     chat = Chat(api, a)
     try:
         chat.pick(a.model)

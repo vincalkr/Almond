@@ -2841,6 +2841,7 @@ class Service:
         # #332: the API request monitor (/api/requests) keeps the last 100 requests' prompts and answers in memory,
         # so it is off unless the config's "api_monitor" (or --api-monitor) turns it on
         self.api_monitor = False
+        self.session_log = None                          # a folder: every request's record as a JSON line (opt-in)
         self.api_requests = collections.deque(maxlen=100)  # bounded I/O in memory; no headers or API keys
         self.request_trace = threading.local()
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
@@ -3303,6 +3304,22 @@ class Service:
             self.api_requests.append(record)
         self.request_trace.record = record
         return record
+
+    def log_session(self, record):
+        """--session-log / ALMOND_SESSION_LOG: one finished request (what the API monitor keeps: the request as sent,
+        the answer, the reasoning, the timings) appended to <folder>/<date>.jsonl, for debugging a conversation."""
+        if not self.session_log:
+            return
+        with self.status_lock:
+            line = {k: v for k, v in record.items() if not k.startswith("_")}
+        line["server_model"] = self.model
+        try:
+            self.session_log.mkdir(parents=True, exist_ok=True)
+            with self._session_log_lock, open(self.session_log / (time.strftime("%Y-%m-%d") + ".jsonl"), "a",
+                                              encoding="utf-8") as f:
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+        except OSError as e:
+            print(f"[almond] session log: {e}", flush=True)
 
     def request_records(self, request_id=None):
         with self.status_lock:
@@ -5082,6 +5099,7 @@ def make_handler(svc: Service):
                         record["finished_at"] = time.time()
                         record["state"] = "error" if record.get("error") else record.get("outcome", "completed")
                     svc.request_trace.record = None
+                    svc.log_session(record)
 
         def _props(self):
             model = parse_qs(urlsplit(self.path).query).get("model", [svc.model])[0]
@@ -5981,6 +5999,9 @@ def main() -> int:
                                          "{...}}); the web app's chat can use their tools (also \"mcp_servers\" in "
                                          "the config)")
     ap.add_argument("--lazy", action="store_true", help="start the API unloaded (the engine and the vision encoder start with the first request)")
+    ap.add_argument("--session-log", default=None, metavar="DIR",
+                    help="write every request and its answer (reasoning, timings) to DIR/<date>.jsonl for debugging "
+                         "(also ALMOND_SESSION_LOG, or \"session_log\" in the config; off by default)")
     ap.add_argument("--api-monitor", action="store_true",
                     help="the API request monitor at /api/requests: keeps the last 100 requests' prompts and answers in "
                          "memory (also \"api_monitor\": true in the config; off by default)")
@@ -6137,7 +6158,12 @@ def main() -> int:
     if svc.allowed_hosts:
         print("[almond] Host check off: any name reaches this server (allowed_hosts \"*\")" if "*" in svc.allowed_hosts
               else f"[almond] also answers to the host names {', '.join(svc.allowed_hosts)} (allowed_hosts)", flush=True)
-    svc.api_monitor = a.api_monitor or cfg.get("api_monitor") is True
+    log_dir = a.session_log or os.environ.get("ALMOND_SESSION_LOG") or cfg.get("session_log")
+    if log_dir:                                         # the session log: the API monitor's records, kept on disk
+        svc.session_log = Path(log_dir if os.path.isabs(log_dir) else os.path.join(str(ROOT), log_dir))
+        svc._session_log_lock = threading.Lock()
+        print(f"[almond] session log on: every request and its answer go to {svc.session_log}/<date>.jsonl", flush=True)
+    svc.api_monitor = a.api_monitor or cfg.get("api_monitor") is True or bool(log_dir)
     if svc.api_monitor:
         print("[almond] API request monitor on (/api/requests): the last 100 requests' prompts and answers are kept in "
               "memory" + ("" if svc.api_key else "; anyone who can reach this server can read them (no API key)"),
