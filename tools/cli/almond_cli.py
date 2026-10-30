@@ -296,9 +296,11 @@ TOOLS = [
           all={"type": "boolean", "description": "replace every occurrence (false)", "optional": True}),
     _tool("list_dir", "List a directory (subdirectories end in /).", path={"type": "string"}),
     _tool("run_command", "Run a bash command in the working directory (no input: it must not wait for a key); its "
-          "output and exit code. Numbers print with a dot as the decimal point.",
+          "output and exit code. Numbers print with a dot as the decimal point. It waits for the command: for a slow "
+          "one (du or find over a big tree) pass a longer timeout instead of running it in the background and polling; "
+          "keep stderr (no 2>/dev/null) when an empty output would leave you guessing.",
           command={"type": "string"},
-          timeout={"type": "integer", "description": "seconds (120)", "optional": True}),
+          timeout={"type": "integer", "description": "seconds (120, at most 900)", "optional": True}),
 ]
 
 
@@ -353,8 +355,11 @@ class Agent:
             text = f"error: {e}"
         if len(text) > TOOL_OUT:
             text = text[:TOOL_OUT // 2] + f"\n[... {len(text) - TOOL_OUT} characters cut ...]\n" + text[-TOOL_OUT // 2:]
-        first = text.splitlines()[0] if text else ""
-        say(f"{DIM}  {first[:120]}{' ...' if len(text) > len(first) else ''}{RESET}")
+        lines = [x for x in text.splitlines() if x.strip()]
+        first = lines[0] if lines else ""
+        last = lines[-1] if len(lines) > 1 and lines[-1].startswith("[") else ""   # the exit code or the timeout
+        say(f"{DIM}  {first[:120]}{' ...' if len(lines) > 1 else ''}"
+            + (f" {last}" if last and (len(lines) <= 3 or "exit code 0" not in last) else "") + RESET)
         return text
 
     def t_read_file(self, path, offset=1, limit=None):
@@ -424,13 +429,14 @@ class Agent:
         q = subprocess.Popen(["bash", "-c", command], cwd=self.root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, env=env, start_new_session=True)
         try:
-            out, _ = q.communicate(timeout=float(timeout or 120))
+            out, _ = q.communicate(timeout=min(900.0, float(timeout or 120)))
         except (subprocess.TimeoutExpired, KeyboardInterrupt) as e:
             os.killpg(q.pid, signal.SIGKILL)    # the command and whatever it started
             out, _ = q.communicate()
             if isinstance(e, KeyboardInterrupt):
                 raise
-            return out.decode(errors="replace").rstrip() + f"\n[timed out after {timeout} s: stopped]"
+            return (out.decode(errors="replace").rstrip() + f"\n[timed out after {timeout} s: stopped, its output "
+                    "lost; run it again with a longer timeout]")
         return out.decode(errors="replace").rstrip() + f"\n[exit code {q.returncode}]"
 
 
