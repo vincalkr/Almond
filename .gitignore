@@ -122,3 +122,4 @@ local/glm-slots/
 local/vision-memory.json
 local/.run-ctx-*
 local/session-log/
+local/chats/

@@ -116,8 +116,14 @@ instead.
   without calls (at most 50 steps; Ctrl+C stops). Reads and listings inside the working directory go ahead; a write,
   an edit (shown as a diff first), a command (shown first) or any path outside asks y / n / a (always, for that
   tool, this session); `--yes` asks only for paths outside, which always ask.
-- `/models`, `/model NAME` (switches through the router), `/clear`, `/read FILE`, `/system TEXT`, `/ctx`, `/hide`,
-  `/show`; a line ending in `\` goes on, `"""` opens a block; Ctrl+C stops an answer.
+- Conversations: `/new` (the current one saved first), `/save [NAME]`, `/sessions`, `/load N|NAME`, `/rename`,
+  `/delete` (to the trash); they live in `local/chats/`, leaving saves too, `./almond -c` resumes the last one. A
+  conversation the engine still keeps is not read again.
+- `/retry`, `/undo`, `/edit` (the last exchange: again, dropped, your message back to edit), `/export [FILE]`
+  (Markdown), `/status`, `/cd DIR` (the agent's directory).
+- `/models`, `/model NAME` (switches through the router), `/read FILE`, `/system TEXT`, `/ctx`, `/hide`, `/show`;
+  `/` alone lists the commands, Tab completes them (with what each does) and their arguments; a line ending in `\`
+  goes on, `"""` opens a block; Ctrl+C stops an answer.
 
 For DeepSeek, reasoning effort follows its encoder: `low` (50), `high` (75, default), `max` (100), a number 1-100, or `none`;
 as `reasoning_effort`, `reasoning.effort` (OpenAI) or `output_config.effort` / `thinking` (Anthropic).

@@ -9,7 +9,14 @@
 Thinking: --nothink, --think (the model's default), --think-max, --think-level LEVEL - the levels are the model's own
 (GLM-5.3-Flash: low / high / max, it always thinks; DeepSeek-V4.1: off / low / high / max = 0 / 50 / 75 / 100).  In the conversation:
 
-  /help  /quit  /models  /model NAME  /think [LEVEL]  /nothink  /clear  /read FILE  /system TEXT  /ctx
+  /help  /quit  /models  /model NAME  /think [LEVEL]  /nothink  /read FILE  /system TEXT  /ctx  /status
+  /new               a new conversation (the current one is saved first; /clear is the same)
+  /save [NAME]  /sessions  /load N|NAME  /rename NAME  /delete N|NAME
+                     the conversations saved in local/chats/ (on /new and on leaving too); ./almond -c resumes the
+                     last one, and a conversation the engine still keeps is not read again
+  /retry  /undo  /edit   the last answer again; drop the last exchange; drop it and edit your message again
+  /export [FILE]     the conversation as Markdown
+  /cd DIR            the agent's working directory
   /set [KEY VALUE]   sampling: temp, top_p, top_k, min_p, repeat_penalty, presence_penalty, seed, max_tokens
                      (/set alone shows them and the model's defaults; /set KEY default goes back to the model's)
   /stats             what the server's monitor shows: speed, GPUs, VRAM, CPU, RAM, disk, context, experts, requests
@@ -43,6 +50,23 @@ ROOT = Path(__file__).resolve().parents[2]
 TTY = sys.stdout.isatty()
 DIM, BOLD, CYAN, RED, RESET = (("\x1b[2m", "\x1b[1m", "\x1b[36m", "\x1b[31m", "\x1b[0m") if TTY else ("",) * 5)
 HISTORY = Path.home() / ".almond_history"
+CHATS = ROOT / "local" / "chats"
+COMMANDS = [    # (name, arguments, what it does): /help's order, Tab's suggestions
+    ("new", "", "a new conversation (the current one is saved)"), ("clear", "", "the same as /new"),
+    ("save", "[NAME]", "save the conversation"), ("sessions", "", "the saved conversations"),
+    ("load", "N|NAME", "resume a saved conversation"), ("rename", "NAME", "rename this conversation"),
+    ("delete", "N|NAME", "a saved conversation to the trash"),
+    ("retry", "", "the last answer again"), ("undo", "", "drop the last exchange"),
+    ("edit", "", "drop the last exchange, edit your message again"),
+    ("model", "NAME", "another model"), ("models", "", "the models and their state"),
+    ("think", "[LEVEL]", "the thinking level"), ("nothink", "", "the lowest thinking level"),
+    ("set", "[KEY VALUE]", "sampling"), ("system", "TEXT", "the system prompt"),
+    ("read", "FILE", "a file sent with your next message"), ("agent", "[on|off]", "the agent's tools"),
+    ("cd", "DIR", "the agent's working directory"), ("hide", "", "hide the thinking"), ("show", "", "show the thinking"),
+    ("status", "", "model, context, thinking, sampling, agent, conversation"), ("ctx", "", "the context in use"),
+    ("stats", "", "the server's monitor"), ("forget", "", "clear the engine's conversation cache"),
+    ("export", "[FILE]", "the conversation as Markdown"), ("help", "", "the commands"), ("quit", "", "leave"),
+]
 
 
 class Api:
@@ -395,6 +419,8 @@ class Chat:
         self.bar = Bar(api)
         self.agent = Agent(a.yes) if a.agent else None
         self.yes, self.stopped = a.yes, False
+        self.name = None                        # the conversation's name in local/chats/ once saved
+        self.prefill = ""                       # /edit: the text the next prompt starts with
 
     # ---- models and levels
     def refresh(self):
@@ -641,7 +667,10 @@ class Chat:
         arg = arg.strip()
         if cmd in ("quit", "exit", "q"):
             return False
-        if cmd == "help":
+        if cmd == "":                           # "/" alone: the commands
+            for n, args, what in COMMANDS:
+                say(f"  /{n + (' ' + args if args else ''):<20} {DIM}{what}{RESET}")
+        elif cmd == "help":
             say(__doc__.split("In the conversation:")[1].split("It speaks")[0].strip("\n:"))
         elif cmd == "models":
             self.refresh()
@@ -672,9 +701,76 @@ class Chat:
                 say(f"{DIM}thinking {self.level_text()}{RESET}")
             elif self.set_level(arg):
                 say(f"{DIM}thinking {self.level_text()}{RESET}")
-        elif cmd == "clear":
-            self.messages, self.ctx_used = [], 0
+        elif cmd in ("new", "clear"):
+            if self.messages:
+                say(f"{DIM}saved as {self.save()}{RESET}")
+            self.messages, self.ctx_used, self.name = [], 0, None
             say(f"{DIM}a new conversation{RESET}")
+        elif cmd == "save":
+            say(f"{DIM}saved as {self.save(arg or None)}{RESET}" if self.messages else f"{DIM}nothing to save{RESET}")
+        elif cmd == "sessions":
+            rows = self.saved()
+            if not rows:
+                say(f"{DIM}no saved conversations ({CHATS}){RESET}")
+            for i, (f, d) in enumerate(rows, 1):
+                mark = "*" if f.stem == self.name else " "
+                n = sum(1 for m in d.get("messages", []) if m.get("role") == "user")
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(f.stat().st_mtime))
+                say(f" {mark}{i:>3}  {f.stem:<40} {d.get('model', '?'):<26} {n:>3} turns  {d.get('ctx_used', 0):>7} tokens  {when}")
+        elif cmd == "load":
+            f = self.saved_one(arg)
+            if f:
+                self.load(f)
+        elif cmd == "rename":
+            if not arg:
+                say(f"{RED}/rename NAME{RESET}")
+            else:
+                old = self.name
+                self.name = None
+                new = self.save(arg)
+                if old and old != new and (CHATS / f"{old}.json").exists():
+                    (CHATS / f"{old}.json").unlink()
+                say(f"{DIM}this conversation is {new}{RESET}")
+        elif cmd == "delete":
+            f = self.saved_one(arg)
+            if f:
+                subprocess.run(["gio", "trash", str(f)], check=False)
+                say(f"{DIM}{f.stem} moved to the trash{RESET}")
+                if f.stem == self.name:         # this conversation: a new one, so leaving does not save it again
+                    self.messages, self.ctx_used, self.name = [], 0, None
+                    say(f"{DIM}a new conversation{RESET}")
+        elif cmd in ("retry", "undo", "edit"):
+            i = next((j for j in range(len(self.messages) - 1, -1, -1) if self.messages[j]["role"] == "user"), None)
+            if i is None:
+                say(f"{DIM}no message yet{RESET}")
+                return True
+            text = self.messages[i]["content"]
+            del self.messages[i:]
+            if cmd == "retry":
+                self.ask(text)
+            elif cmd == "edit":
+                self.prefill = text
+            else:
+                say(f"{DIM}the last exchange dropped{RESET}")
+        elif cmd == "export":
+            f = Path(os.path.expanduser(arg or f"{self.name or 'chat-' + time.strftime('%Y%m%d-%H%M%S')}.md"))
+            f.write_text(self.markdown(), encoding="utf-8")
+            say(f"{DIM}written: {f.resolve()}{RESET}")
+        elif cmd == "status":
+            say(f"{self.model['id']}, thinking {self.level_text()}\n"
+                f"context    {self.ctx_used} of {self.model.get('max_context') or '?'} tokens, {len(self.messages)} messages\n"
+                f"sampling   {self.sampling_text()}\n"
+                f"agent      {('on in ' + str(self.agent.root)) if self.agent else 'off'}\n"
+                f"saved as   {self.name or '-'}")
+        elif cmd == "cd":
+            d = Path(os.path.expanduser(arg or "~")).resolve()
+            if not d.is_dir():
+                say(f"{RED}no directory {d}{RESET}")
+            else:
+                os.chdir(d)
+                if self.agent:
+                    self.agent.root = d
+                say(f"{DIM}working directory {d}{RESET}")
         elif cmd == "system":
             self.system = arg or None
             say(f"{DIM}system prompt {'set' if arg else 'cleared'}{RESET}")
@@ -715,6 +811,127 @@ class Chat:
             say(f"{RED}unknown command /{cmd} (/help){RESET}")
         return True
 
+    # ---- saved conversations (local/chats/NAME.json)
+    def save(self, name: str | None = None) -> str:
+        if name:
+            self.name = "".join(c if c.isalnum() or c in "-_." else "-" for c in name).strip("-.") or None
+        if not self.name:
+            first = next((m["content"] for m in self.messages if m.get("role") == "user"), "")
+            words = "-".join("".join(c for c in w if c.isalnum()) for w in str(first).split()[:5]).strip("-")
+            self.name = time.strftime("%Y%m%d-%H%M") + ("-" + words[:40] if words else "")
+        CHATS.mkdir(parents=True, exist_ok=True)
+        data = {"model": self.model["id"], "level": self.level, "sampling": self.sampling, "system": self.system,
+                "cwd": str(self.agent.root if self.agent else Path.cwd()), "ctx_used": self.ctx_used,
+                "messages": self.messages}
+        (CHATS / f"{self.name}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        return self.name
+
+    def saved(self) -> list:
+        out = []
+        for f in sorted(CHATS.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True) if CHATS.is_dir() else []:
+            try:
+                out.append((f, json.loads(f.read_text(encoding="utf-8"))))
+            except (OSError, ValueError):
+                pass
+        return out
+
+    def saved_one(self, arg: str):
+        rows = self.saved()
+        if arg.isdigit() and 1 <= int(arg) <= len(rows):
+            return rows[int(arg) - 1][0]
+        hits = [f for f, _ in rows if f.stem == arg] or [f for f, _ in rows if arg and f.stem.startswith(arg)]
+        if len(hits) == 1:
+            return hits[0]
+        say(f"{RED}{'which one? ' + ', '.join(f.stem for f in hits) if hits else 'no saved conversation ' + repr(arg) + ' (/sessions)'}{RESET}")
+        return None
+
+    def load(self, f: Path):
+        d = json.loads(f.read_text(encoding="utf-8"))
+        if self.messages and self.name != f.stem:
+            say(f"{DIM}the current one saved as {self.save()}{RESET}")
+        if d.get("model") and d["model"] != self.model["id"]:
+            try:
+                self.pick(d["model"])
+            except (SystemExit, RuntimeError) as e:
+                say(f"{RED}{e}; it goes on with {self.model['id']}{RESET}")
+        self.messages, self.system = d.get("messages") or [], d.get("system")
+        self.ctx_used, self.name = d.get("ctx_used", 0), f.stem
+        self.sampling = d.get("sampling") or self.sampling
+        if d.get("level") in self.values():
+            self.level = d["level"]
+        if self.agent and d.get("cwd") and Path(d["cwd"]).is_dir():
+            os.chdir(d["cwd"])
+            self.agent.root = Path(d["cwd"])
+        n = sum(1 for m in self.messages if m.get("role") == "user")
+        say(f"{DIM}{f.stem}: {n} turns, {self.ctx_used} tokens, {self.model['id']}, thinking {self.level_text()}{RESET}")
+        last = next((m for m in reversed(self.messages) if m.get("role") == "assistant" and m.get("content")), None)
+        if last:
+            tail = last["content"].strip()
+            say(f"{DIM}the last answer: {tail[:300]}{'...' if len(tail) > 300 else ''}{RESET}")
+
+    def markdown(self) -> str:
+        out = [f"# {self.name or 'conversation'}", "", f"{self.model['id']}, thinking {self.level_text()}", ""]
+        for m in self.messages:
+            r = m.get("role")
+            if r == "user":
+                out += ["## you", "", m["content"], ""]
+            elif r == "assistant":
+                out += ["## " + self.model["id"], ""]
+                if m.get("content"):
+                    out += [m["content"], ""]
+                for c in m.get("tool_calls") or []:
+                    out += [f"`{c['function']['name']} {c['function']['arguments']}`", ""]
+            elif r == "tool":
+                out += ["```", str(m.get("content", ""))[:4000], "```", ""]
+        return "\n".join(out)
+
+    # ---- Tab: the commands with what each does, then each one's arguments
+    def complete_setup(self, readline):
+        readline.set_completer_delims(" \t\n")
+        readline.parse_and_bind("tab: complete")
+        readline.parse_and_bind("set show-all-if-ambiguous on")
+        readline.set_completer(self.complete)
+        readline.set_completion_display_matches_hook(self.show_matches)
+        self.readline = readline
+
+    def complete(self, text: str, state: int):
+        if state == 0:
+            buf = self.readline.get_line_buffer()
+            head = buf[:self.readline.get_begidx()]
+            if not buf.startswith("/"):
+                self.matches = []
+            elif not head.strip():
+                self.matches = ["/" + n for n, *_ in COMMANDS if ("/" + n).startswith(text)]
+            else:
+                cmd = head.split()[0][1:]
+                opts = {"model": lambda: [m["id"] for m in self.models],
+                        "think": self.values, "agent": lambda: ["on", "off"],
+                        "set": lambda: ["temp", "top_p", "top_k", "min_p", "repeat_penalty", "presence_penalty",
+                                        "seed", "max_tokens"],
+                        "load": lambda: [f.stem for f, _ in self.saved()],
+                        "delete": lambda: [f.stem for f, _ in self.saved()]}.get(cmd)
+                self.matches = [o for o in (opts() if opts else []) if o.startswith(text)]
+                if not opts and cmd in ("read", "cd", "export"):
+                    import glob
+                    self.matches = [p + ("/" if os.path.isdir(p) else "") for p in glob.glob(os.path.expanduser(text) + "*")]
+        try:
+            return self.matches[state] + ("" if self.matches[state].endswith("/") or len(self.matches) > 1 else " ")
+        except IndexError:
+            return None
+
+    def show_matches(self, substitution, matches, longest):
+        what = {"/" + n: (args, w) for n, args, w in COMMANDS}
+        sys.stdout.write("\n")
+        for m in matches:
+            m = m.rstrip()
+            if m in what:
+                args, w = what[m]
+                sys.stdout.write(f"  {m + (' ' + args if args else ''):<20} {DIM}{w}{RESET}\n")
+            else:
+                sys.stdout.write(f"  {m}\n")
+        sys.stdout.write(f"{BOLD}>{RESET} " + self.readline.get_line_buffer())
+        sys.stdout.flush()
+
     def loop(self):
         try:
             import readline
@@ -726,12 +943,16 @@ class Chat:
         except ImportError:
             readline = None
         self.pending = ""
+        if readline:
+            self.complete_setup(readline)
         self.banner()
         self.bar.start()
         try:
             self.talk()
         finally:
             self.bar.stop()
+            if self.messages:
+                say(f"{DIM}saved as {self.save()} (./almond -c resumes it){RESET}")
         if readline:
             try:
                 readline.write_history_file(HISTORY)
@@ -742,7 +963,8 @@ class Chat:
         while True:
             self.bar.idle(self)
             try:
-                line = read_input(f"{BOLD}>{RESET} " if TTY else "> ")
+                line = read_input(f"{BOLD}>{RESET} " if TTY else "> ", self.prefill)
+                self.prefill = ""
             except EOFError:
                 say("")
                 break
@@ -891,9 +1113,22 @@ def run_monitor(api: Api):
         pass
 
 
-def read_input(prompt: str) -> str:
-    """One message: a line, lines joined by a trailing \\, or a \"\"\" block."""
-    line = input(prompt)
+def read_input(prompt: str, prefill: str = "") -> str:
+    """One message: a line, lines joined by a trailing \\, or a \"\"\" block; prefill: the line's start (/edit)."""
+    if prefill:
+        try:
+            import readline
+            readline.set_startup_hook(lambda: readline.insert_text(prefill))
+        except ImportError:
+            pass
+    try:
+        line = input(prompt)
+    finally:
+        if prefill:
+            try:
+                readline.set_startup_hook(None)
+            except NameError:
+                pass
     if line.strip() == '"""':
         lines = []
         while True:
@@ -965,6 +1200,8 @@ def main() -> int:
     ap.add_argument("--agent", action="store_true",
                     help="the model may read and edit files and run commands in the working directory (it asks first)")
     ap.add_argument("--yes", action="store_true", help="with --agent: do not ask before a write, an edit or a command (a path outside the directory still asks)")
+    ap.add_argument("-c", "--resume", nargs="?", const="", default=None, metavar="NAME",
+                    help="resume the last saved conversation (or NAME, from /sessions)")
     ap.add_argument("--hide-thinking", action="store_true", help="do not print the thinking")
     ap.add_argument("--no-start", action="store_true", help="never start the router")
     ap.add_argument("--keep", action="store_true", help="leave a router this started running on exit")
@@ -1002,6 +1239,12 @@ def main() -> int:
             if a.prompt == "-":
                 a.prompt = sys.stdin.read()
             return 0 if chat.ask(a.prompt) else 1
+        if a.resume is not None:
+            f = chat.saved_one(a.resume) if a.resume else next((f for f, _ in chat.saved()), None)
+            if f:
+                chat.load(f)
+            elif not a.resume:
+                say(f"{DIM}no saved conversation: a new one{RESET}")
         chat.loop()
         return 0
     except RuntimeError as e:
