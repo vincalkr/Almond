@@ -566,6 +566,11 @@ struct VisionInput {
     void done() {
         if (resident || !be) return;
         enc.unload();
+        if (std::getenv("ALMOND_VRAM_TRACE")) {
+            size_t f0 = 0, t0 = 0;
+            ggml_backend_dev_memory(ggml_backend_get_device(be), &f0, &t0);
+            std::fprintf(stderr, "vram trace: after the encoder's unload free %.2f GiB\n", f0 / 1073741824.0);
+        }
         be = nullptr;
     }
 };
