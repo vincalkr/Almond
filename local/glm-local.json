@@ -15,12 +15,14 @@
     "local/glm-expert-profile.bin"
   ],
   "env": {
-    "STRATA_GLM_RESERVE_MB": "576",
-    "STRATA_GLM_RAM_HEADROOM_GB": "16",
-    "STRATA_GLM_PREFILL_SUB": "1024",
-    "STRATA_GLM_PREFILL_MB": "4096",
-    "STRATA_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-glm-hipblaslt-100401-local.txt",
-    "STRATA_GLM_MTP_GGUF": "models/glm53-gsq-rco/GLM-5.3-Flash-Maya-M-NextN.gguf"
+    "ALMOND_GLM_RESERVE_MB": "576",
+    "ALMOND_GLM_RAM_HEADROOM_GB": "16",
+    "ALMOND_GLM_PREFILL_SUB": "1024",
+    "ALMOND_GLM_PREFILL_MB": "4096",
+    "ALMOND_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-glm-hipblaslt-100401-local.txt",
+    "ALMOND_GLM_MTP_GGUF": "models/glm53-gsq-rco/GLM-5.3-Flash-Maya-M-NextN.gguf",
+    "ALMOND_GLM_SLOT_KEEP": "1",
+    "ALMOND_GLM_SLOT_DIR": "local/glm-slots"
   },
   "cwd": ".",
   "tokenizer": "models/glm53-gsq-rco/pack/tokenizer",
@@ -35,5 +37,7 @@
   "sampling": {
     "temperature": 1.0,
     "top_p": 0.95
-  }
+  },
+  "loop_guard": true,
+  "reasoning_loop_recovery": "close"
 }

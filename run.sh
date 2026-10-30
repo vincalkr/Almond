@@ -69,7 +69,12 @@ case $MODEL in
     ds41|deepseek) ;;
     glm)
         SHIM="$R/tools/glm/serve/serve_glm.py"
-        [ -n "$CFG" ] || CFG="$R/local/glm-local.json"
+        if [ -z "$CFG" ]; then
+            CFG="$R/local/glm-local.json"
+            # with the image encoder (local/fetch.sh glm-vision) and maya-vision built: images on, loaded per picture
+            [ -s "$R/models/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf" ] && [ -x "$R/build-maya-vision/build/bin/maya-vision" ] &&
+                CFG="$R/local/glm-local-vision.json"
+        fi
         [ -x "$R/build-maya-hip/maya" ] || { echo "run.sh: build-maya-hip/maya is not built (./build.sh builds it)" >&2; exit 1; }
         # the expert profile the engine starts its VRAM pools from and saves what it learns into: project-maya's
         # until this machine has its own
@@ -107,7 +112,7 @@ model = a[a.index("-m") + 1] if "-m" in a else ""
 pack = a[a.index("--glm-pack") + 1] if "--glm-pack" in a else ""
 engram = a[a.index("--engram") + 1].split(":") if "--engram" in a else []
 meta = (c.get("env") or {}).get("DS41_META")          # the geometry overlay a foreign pack reads
-mtp = (c.get("env") or {}).get("STRATA_GLM_MTP_GGUF")  # GLM's draft block (local/glm-mtp-extract.py makes it)
+mtp = (c.get("env") or {}).get("ALMOND_GLM_MTP_GGUF")   # GLM's draft block (local/glm-mtp-extract.py makes it)
 need = ([model] if model else []) + ([pack] if pack else []) + engram + ([c["tokenizer"]] if c.get("tokenizer") else []) + ([meta] if meta else []) + ([mtp] if mtp else [])
 def whole(p):
     q = p if os.path.isabs(p) else os.path.join(root, p)

@@ -39,7 +39,15 @@ cmake -S . -B build-hip-fused "${COMMON[@]}" \
 cmake --build build-hip-fused -j "$JOBS"
 echo "=== GLM engine (engines/maya, project-maya's, -> build-maya-hip/maya)"
 cmake -S engines/maya -B build-maya-hip "${COMMON[@]}" \
-    -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_PREFILL_MMQ=ON -DSTRATA_NATIVE_EXPERTS=ON \
-    -DSTRATA_BUILD_TESTS=OFF -DSTRATA_GGML_DIR="$PWD/engines/maya/third_party/llama.cpp"
+    -DALMOND_ENABLE_HIP=ON -DALMOND_ENABLE_CUDA=OFF -DALMOND_PREFILL_MMQ=ON -DALMOND_NATIVE_EXPERTS=ON \
+    -DALMOND_BUILD_TESTS=OFF -DALMOND_GGML_DIR="$PWD/engines/maya/third_party/llama.cpp"
 cmake --build build-maya-hip --target maya -j "$JOBS"
-echo "=== done: build-hip-fused/ds41_generate, build-maya-hip/maya"
+echo "=== GLM image encoder (engines/maya/tools/vision: llama.cpp's mtmd at the engine's pinned commit + GLM-5.3's tower)"
+# the pinned llama.cpp the GLM engine's build fetched, copied and patched (tools/vision/glm5next_patch.py, idempotent)
+VL=build-maya-vision/llama.cpp
+if [ ! -d "$VL" ]; then mkdir -p build-maya-vision && cp -r build-maya-hip/_deps/strata_llamacpp-src "$VL"; fi
+python3 engines/maya/tools/vision/glm5next_patch.py "$VL"
+cmake -S engines/maya/tools/vision -B build-maya-vision/build "${COMMON[@]}" -DLLAMA_DIR="$PWD/$VL" \
+    -DALMOND_VISION_HIP=ON -DGGML_HIP_NO_VMM=ON
+cmake --build build-maya-vision/build --target maya-vision -j "$JOBS"
+echo "=== done: build-hip-fused/ds41_generate, build-maya-hip/maya, build-maya-vision/build/bin/maya-vision"

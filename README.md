@@ -47,6 +47,10 @@ local/fetch-rco-1017.sh                                               # everythi
 ./run.sh                                                              # the server on 127.0.0.1:8150
 ```
 
+- `./setup.sh` checks a new installation step by step (tools, `.venv`, models, build, power-tune, each model's
+  context); `./setup.sh --check` only says what is there. `local/fetch.sh` lists the models with their state in
+  `models/` and asks which to download (DeepSeek's pack and FP8 Engram rows through their own scripts, GLM, its MTP
+  block, both image encoders).
 - `local/fetch-rco-1017.sh` downloads the four shards and the pack's Engram IQ4_NL GGUF with `aria2c` (4 connections,
   `CONN`), checks each sha256, and writes the geometry overlay `local/rco-iq2xxs-meta/meta.gguf` with
   `tools/v41/ds41_pack_meta.py` (its reference geometry is `local/rco-iq2xxs-meta/geometry-keys.json`, 8 KB, in the

@@ -69,3 +69,42 @@ Sampling at the API's values costs the drafts nothing measurable (one run an arm
   repetition_penalty 3.0 (2 words), then the first again - the same 10 words.
 - The server sent top_k 0 ("off") to DeepSeek as 64; DeepSeek's engine without one takes its 256 best candidates,
   which is what it gets now.
+
+## Loops in the thinking (2026-10-30)
+
+GLM-5.3-Flash at max, "cosa sono le terzine incatenate ? citando i versi": the 3.0bit quant does not remember Dante's
+verses and tries again and again ("nella miseria; e, fuor di mia credenza" - hmm, no), each round a few words
+different. Before: 16,000 tokens of thinking, no answer (twice).
+
+- project-maya's loop guard (`serve/loop_guard.py`, MIT, unchanged; `"loop_guard": true`, `ALMOND_LOOP_GUARD=0/1`):
+  a block repeated back to back gets a short repetition penalty, the third loop in the thinking closes it, a loop that
+  comes back in the answer ends it. On this prompt it saw one loop only, at 13,831 tokens (the rounds are not exact).
+- `"reasoning_loop_recovery": "close"`: the passage detector (#728, 12-word passages seen three times over the last
+  2,000 words) closes the thinking with the budget's wrap-up and the model answers. Offline on the saved 16,000-token
+  thinking it fires from ~3,200 tokens (coverage 0.52); live it closed at 2,560 tokens and GLM answered (4,191 tokens,
+  finish "stop"). A normal max question (a train timetable, 572 tokens) was untouched.
+- `clear_thinking` true by default (Z.ai's model card: "for chat scenarios, explicitly pass clear_thinking=true"):
+  earlier turns' reasoning is not put back into the prompt; the reasoning after the last user message (tool calls)
+  stays. A client's `chat_template_kwargs.clear_thinking` wins.
+
+Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
+
+## Images
+
+- DeepSeek: the encoder (0.9 GiB) loads on card 0 for a request with images and is freed after; the VRAM expert cache
+  reopens into the room. Measured before the fix below: card 0 held 2172 experts before an image, 1872 / 1855 after
+  (15.51 / 15.38 GiB free at the reseed against ~16.1 after a text prompt); text decode 23.2 tok/s before, 21.1, 23.7,
+  23.7, 22.1, 23.5 after (one run each). Open: where the missing ~0.6 GiB goes. Clearing ggml-hip's buffer pool
+  after the encoder (tried, 2026-10-30) gave back 112 MiB only and the next decode hit an illegal memory access: removed.
+- GLM: project-maya's encoder (`maya-vision`, llama.cpp's mtmd with GLM-5.3's tower, built by `./build.sh` for HIP;
+  `local/fetch.sh glm-vision` gets the mmproj F16 + vocab, 1.1 GB) starts only when a picture arrives, in 2.78 GB the
+  engine lends it from the tail of card 0's expert pool (273 experts moved to colder slots, 27 dropped) and takes back
+  after (`local/glm-local-vision.json`, which `./run.sh --model glm` picks when the encoder is there). Text decode, one
+  run each: 29.2, 32.2 before, 29.8, 33.3 after the first picture, 29.2 after the second (cached: no encoder start).
+
+## Sessions on disk
+
+- DeepSeek: `--conversation-disk local/conv-cache-rco` (as in ds41e).
+- GLM: `ALMOND_GLM_SLOT_KEEP=1`, `ALMOND_GLM_SLOT_DIR=local/glm-slots`: the conversation in the model is saved when
+  the engine ends and taken back after a start. Measured: a 7,163-token prompt read in 13.6 s; after a stop and a
+  start the same conversation plus a question was taken back from disk in 0.1 s and read 123 new tokens (2.3 s).

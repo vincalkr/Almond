@@ -4,20 +4,25 @@ third shard) into a GGUF of its own: the GSQ-RCO 3.0bit GGUF was published witho
 another quant of the same model (STRATA_GLM_MTP_GGUF, engines/maya/src/core/glm_model.cu: the block reads the trunk's
 hidden state and the embedding, so any quant's block fits).  The metadata is copied as it is; only blk.45's tensors.
 
-  STRATA_GGUF_PY=engines/maya/third_party/llama.cpp/gguf-py .venv/bin/python local/glm-mtp-extract.py SRC.gguf OUT.gguf
+  ALMOND_GGUF_PY=engines/maya/third_party/llama.cpp/gguf-py .venv/bin/python local/glm-mtp-extract.py SRC.gguf OUT.gguf
 """
 import os
 import sys
 
-sys.path.insert(0, os.environ.get("STRATA_GGUF_PY", os.path.join(os.path.dirname(__file__), "..", "engines", "maya",
+sys.path.insert(0, os.environ.get("ALMOND_GGUF_PY", os.path.join(os.path.dirname(__file__), "..", "engines", "maya",
                                                                  "third_party", "llama.cpp", "gguf-py")))
 import gguf  # noqa: E402
 
 src, out = sys.argv[1], sys.argv[2]
 r = gguf.GGUFReader(src)
 # a later shard of a split GGUF carries no architecture key: the first shard's (the name with -00001-of-)
-head = r if "general.architecture" in r.fields else gguf.GGUFReader(__import__("re").sub(r"-\d{5}-of-", "-00001-of-", src))
-arch = head.fields["general.architecture"].contents()
+if "general.architecture" in r.fields:
+    arch = r.fields["general.architecture"].contents()
+elif os.environ.get("GGUF_ARCH"):              # (local/fetch.sh: only the shard 3 is downloaded)
+    arch = os.environ["GGUF_ARCH"]
+else:
+    head = gguf.GGUFReader(__import__("re").sub(r"-\d{5}-of-", "-00001-of-", src))
+    arch = head.fields["general.architecture"].contents()
 w = gguf.GGUFWriter(out, arch)
 for name, f in r.fields.items():
     if name.startswith("GGUF.") or name == "general.architecture" or name.startswith("split."):

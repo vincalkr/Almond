@@ -59,6 +59,7 @@ from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_mess
                             tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
+from serve import loop_guard  # noqa: E402
 from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
@@ -155,7 +156,8 @@ REASONING_CLOSE = "\n</think>\n\n"
 REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n"
 # #728: opt-in handling of reasoning that repeats whole passages (which the single-token guard above cannot see).
 # "reasoning_loop_recovery": "stop" ends the reply there; "recover" (or true) goes on from the same output with the
-# low-effort instruction in place of the xhigh one.  Both off by default.
+# low-effort instruction in place of the xhigh one (a Qwen template's sentence: nothing for another model); "close" closes
+# the thinking the way the thinking budget does (REASONING_WRAP_UP) and lets the model answer.  All off by default.
 HIGH_EFFORT = EFFORT_TEXT["xhigh"]
 LOW_EFFORT = EFFORT_TEXT["low"]
 LOOP_CHECK_EVERY = 512           # output tokens between two looks at the reasoning (at a clean parser boundary)
@@ -878,6 +880,27 @@ class AlmondEngine:
     def alive(self) -> bool:
         proc = self.proc                                 # read once: restart() / close() may set it to None meanwhile
         return proc is not None and not getattr(self, "ended", False) and proc.poll() is None
+
+    def command(self, line: str, expect: str, timeout: float = 60.0) -> str:
+        """One control line between requests (the GLM engine's VLEND / VRECLAIM) -> its answer line; ValueError on
+        the engine's ERR or no answer.  The caller holds the service's FIFO, so no request is reading the lines."""
+        try:
+            self.proc.stdin.write(line + "\n")
+            self.proc.stdin.flush()
+        except OSError:
+            raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
+        end = time.time() + timeout
+        while True:
+            try:
+                got = self.lines.get(timeout=max(0.1, end - time.time()))
+            except queue.Empty:
+                raise ValueError(f"the engine did not answer {line.split()[0]}") from None
+            if got is None:
+                raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
+            if got.startswith(expect):
+                return got.strip()
+            if got.startswith("ERR"):
+                raise ValueError(got[4:].strip())
 
     def exit_code(self):
         if self.proc is None:
@@ -1953,17 +1976,62 @@ class Vision:
             args += ["--max-tokens", str(cfg["max_tokens"])]
         if cfg.get("min_tokens"):                       # #767: mtmd's image_min_tokens (a hand-edited key)
             args += ["--min-tokens", str(cfg["min_tokens"])]
+        if cfg.get("no_flash_attn"):   # GLM-5.3's encoder on a GPU: full-precision attention (cosine 0.9997 vs 0.999)
+            args.append("--no-flash-attn")
         self.dir = self.work_dir()
         self.spawn = (args, log, env)                   # to start it again after an unload
         self.proc = None
         self.stopped = True
         self.lock = threading.Lock()
         self.cache: dict[str, tuple[Path, int]] = {}
+        # on demand (project-maya's way, "on_demand": true in the config's "vision"): no process until a picture needs
+        # encoding; the engine first empties the tail of its expert pool on the first GPU and frees it (VLEND), the
+        # encoder starts in that memory, and once the request's pictures are encoded (active()) it ends and the engine
+        # takes the memory back (VRECLAIM): between pictures the decode keeps its whole expert pool
+        self.lend = self.reclaim = None                 # callables, wired by main()
+        self.owed = False                               # the engine's memory is not back yet
         if not lazy:
             self._start()
 
+    @property
+    def on_demand(self) -> bool:
+        return getattr(self, "lend", None) is not None   # (a subclass without Vision.__init__: never on demand)
+
+    def settle(self) -> bool:
+        """The engine takes back the memory an earlier encode borrowed (true when nothing is owed)."""
+        if not self.owed:
+            return True
+        try:
+            self.reclaim()
+            self.owed = False
+        except ValueError:
+            pass
+        return not self.owed
+
+    @contextlib.contextmanager
+    def active(self):
+        """The request's pictures are encoded inside: an on-demand encoder ends at the exit and the engine has its
+        memory back before the request runs."""
+        try:
+            yield self
+        finally:
+            if self.on_demand and self.proc is not None:
+                self.close()
+                self.owed = True
+                for _ in range(40):                     # the driver frees an ended process's memory within moments
+                    if self.settle():
+                        break
+                    time.sleep(0.25)
+                else:
+                    print("[almond] the vision encoder's GPU memory is not back yet: the engine takes it back at the "
+                          "next picture", flush=True)
+
     def _start(self):
         args, log, env = self.spawn
+        if self.on_demand:
+            self.settle()
+            self.lend()
+            args = args + ["--no-warmup"]
         # cwd is the encoder's directory: the ENC lines name the files relative to it (#480: no space in the line)
         self.proc = popen("the image encoder", args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=log or subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1, env=env,
@@ -2129,6 +2197,9 @@ class Vision:
                 self.cache[key] = self.cache.pop(key)                  # most recently used last
                 return self.cache[key]
             img, out = self.dir / f"{key}.img", self.dir / f"{key}.sve"
+            if self.on_demand and (self.proc is None or self.proc.poll() is not None):
+                self.proc = None
+                self._start()                           # (in the memory the engine lends it)
             img.write_bytes(data)
             try:
                 self.proc.stdin.write(f"ENC {img.name} {out.name}\n")      # relative to the encoder's cwd (#480)
@@ -2177,6 +2248,45 @@ class Vision:
         /tmp that is RAM) goes with it instead of piling up with every start.  unload() keeps it for the restart."""
         self.close()
         shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def vision_footprint(vcfg: dict, env: dict, cache_file: Path) -> tuple[int, int] | None:
+    """(image token cap, bytes) for the on-demand vision encoder on the first GPU (project-maya's): measured once by
+    `maya-vision --measure` before the model loads, cached per encoder file and cap in `cache_file`.  A cap the
+    config does not set is the largest of 4096 / 2048 / 1024 image tokens within 15% of the card.  None: no measurement."""
+    try:
+        cache = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    if not isinstance(cache, dict):
+        cache = {}
+    st = Path(vcfg["mmproj"]).stat()
+    caps = [int(vcfg["max_tokens"])] if vcfg.get("max_tokens") else [4096, 2048, 1024]
+    for i, cap in enumerate(caps):
+        key = f"{Path(vcfg['mmproj']).resolve()}|{st.st_size}|{int(st.st_mtime)}|cap{cap}"
+        m = cache.get(key)
+        if not isinstance(m, dict) or not all(isinstance(m.get(k), int) and m[k] > 0 for k in ("bytes", "total")):
+            m = None
+        if m is None:
+            args = [vcfg["exe"], "--mmproj", vcfg["mmproj"], "--model", vcfg["model"], "--gpu", "--max-tokens",
+                    str(cap), "--measure"]
+            print(f"[almond] images: measuring the vision encoder on the GPU ({cap} image tokens) ...", flush=True)
+            try:
+                r = subprocess.run(args, capture_output=True, text=True, timeout=600, env=env)
+                f = next((ln.split() for ln in r.stdout.splitlines() if ln.startswith("MEM ")), None) \
+                    if r.returncode == 0 else None
+            except (OSError, subprocess.TimeoutExpired):
+                f = None
+            if f is None or len(f) != 4 or not all(x.isdigit() for x in f[1:]) or int(f[3]) == 0:
+                return None
+            m = cache[key] = {"bytes": int(f[1]) + int(f[2]) + (256 << 20), "total": int(f[3])}
+            try:
+                cache_file.write_text(json.dumps(cache, indent=1), encoding="utf-8")
+            except OSError:
+                pass
+        if len(caps) == 1 or m["bytes"] <= 0.15 * m["total"] or i == len(caps) - 1:
+            return cap, int(m["bytes"])
+    return None
 
 
 def gpu_list(cfg: dict) -> list[int]:
@@ -2462,6 +2572,8 @@ def child_env(cfg: dict) -> dict:
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in ordered_gpus(cfg))
     for k, v in (cfg.get("env") or {}).items():      # engine settings the config carries (AMD: the GEMM tuning table)
         env[str(k)] = str(v)
+        if str(k).startswith("ALMOND_"):            # the vendored GLM engine (project-maya's) reads them as STRATA_*:
+            env["STRATA_" + str(k)[7:]] = str(v)     # the configurations say ALMOND_* only
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -2754,6 +2866,8 @@ class Service:
         self.before_load = None
         self.vram_reserve = None                         # #533: the last POST /v1/vram reserve (None: the start's)
         self.reasoning_loop_recovery = False
+        self.loop_guard = False                          # project-maya's loop guard (serve/loop_guard.py): opt-in
+        self.loop_guard_counts = {"detected": 0, "penalised": 0, "thinking_closed": 0, "stopped": 0}
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
         self.reasoning_budget_by_effort = {}             # {"low": N, "high": N, "max": N}: per level (0: none)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
@@ -2919,7 +3033,8 @@ class Service:
         return value if value > 0 else None
 
     def _vision_down(self) -> bool:
-        return self.vision is not None and hasattr(self.vision, "alive") and not self.vision.alive()
+        return self.vision is not None and hasattr(self.vision, "alive") and not self.vision.alive() \
+            and not getattr(self.vision, "on_demand", False)
 
     def free_vram_mib(self) -> int | None:
         """Free VRAM on the engine's (first) GPU, from NVML (AMD backend: amdgpu's sysfs files, #301); None when it can't
@@ -3423,8 +3538,11 @@ class Service:
             # "reading the prompt" with CPU and GPU busy, for good (reproduced).  So encoding takes its turn in the
             # same FIFO as the requests.
             with self.fifo:
-                encoded = (self.vision.encode_all(images) if hasattr(self.vision, "encode_all")
-                           else [self.vision.encode(src) for src in images])
+                if getattr(self.vision, "on_demand", False):
+                    self.ensure_loaded()                # (the encoder borrows the engine's memory: it must run)
+                with (self.vision.active() if hasattr(self.vision, "active") else contextlib.nullcontext()):
+                    encoded = (self.vision.encode_all(images) if hasattr(self.vision, "encode_all")
+                               else [self.vision.encode(src) for src in images])
             ids = self.expand_image_tokens(ids, encoded)
         ctx = self.engine.max_context
         if ctx <= 0:
@@ -3648,7 +3766,14 @@ class Service:
         timings, before = None, None                    # this request's timings; the engine's `last` before it
         recovery_count, reasoning_text, repeat_coverage = 0, "", 0.0
         looped, next_loop_check = False, LOOP_CHECK_EVERY       # #728: reasoning that repeats whole passages
+        loop_closed = False                                     # ... closed by "close" (the wrap-up's message)
         raw_ids = []                                    # every generated id (ALMOND_DEBUG: dump raw model text)
+        # project-maya's loop guard (serve/loop_guard.py, "loop_guard": true): a block of tokens repeated back to back
+        # gets a short repetition penalty (the first loop in the answer, the first two in the thinking), the third in
+        # the thinking closes it (the budget's wrap-up), a loop that comes back in the answer ends it.  What was sent
+        # stays sent: nothing is held back.  Tool calls are left alone.
+        guard = loop_guard.ToolSafeGuard(-1, False, piece=Detokenizer(self.tok).push) if self.loop_guard else None
+        guard_seq, guard_act, guard_closed = [], None, None   # the ids it read; a loop to act on; the one closing
         emb, self.embeddings.path = getattr(self.embeddings, "path", None), None   # this run's to delete now
         # Only a DONE line replaces engine.last, so a request that died, errored or was disconnected must not have
         # the PREVIOUS request's decode figures recorded as its own: each pass keeps its own DONE (a segment) if
@@ -3694,8 +3819,10 @@ class Service:
                         yield "event", ev
                     while True:
                         segment_before = getattr(self.engine, "last", None)
-                        gen = self.engine.generate(prompt, max_new - n, sampling, cancel, embeddings=emb) if emb \
-                            else self.engine.generate(prompt, max_new - n, sampling, cancel)
+                        smp_call, n_call = guard.sampling(sampling, len(guard_seq), max_new - n) if guard is not None \
+                            else (sampling, max_new - n)        # (the guard's penalty: a call of its own)
+                        gen = self.engine.generate(prompt, n_call, smp_call, cancel, embeddings=emb) if emb \
+                            else self.engine.generate(prompt, n_call, smp_call, cancel)
                         recover_prompt = None
                         seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed
                         opens = False                   # the thinking is over: write the forced call's opening
@@ -3735,6 +3862,13 @@ class Service:
                                 if stops is not None and stops.hit is not None:
                                     finish = "stop"         # gen.close() below STOPs the engine, as for a stop token
                                     break
+                                if guard is not None:
+                                    if guard_act is None:
+                                        guard.in_think = parser.state in ("reasoning", "rcall")
+                                        guard_seq.append(t)
+                                        guard_act = guard.push(t, len(guard_seq))
+                                    if guard_act is not None and not parser.buf and not detok.pending():
+                                        break               # (at a clean point: the wrap-up may follow)
                                 if (self.reasoning_loop_recovery and not recovery_count and parser.state == "reasoning"
                                         and n >= next_loop_check and not parser.buf and not parser.pending
                                         and not detok.pending()):
@@ -3743,6 +3877,9 @@ class Service:
                                     if repeat_coverage >= LOOP_COVERAGE:
                                         if self.reasoning_loop_recovery == "stop":
                                             looped = True        # #728: end the reply here, as for a repeated token
+                                            break
+                                        if self.reasoning_loop_recovery == "close":
+                                            wrap, loop_closed = True, True   # closed as the budget does: it answers
                                             break
                                         if not emb:              # "recover": not for a request with pictures
                                             recover_prompt = focused_recovery_prompt(self.tok, ids, raw_ids)
@@ -3784,6 +3921,31 @@ class Service:
                             segment_done = getattr(self.engine, "last", None)
                             if segment_done is not None and segment_done is not segment_before:
                                 segments.append(dict(segment_done))
+                        if guard_act is not None and finish == "stop":
+                            guard_act = None            # (the model ended on its own first)
+                        if guard_act is not None and not cancel.is_set():
+                            act, guard_act = guard_act, None
+                            guard.resume(guard_seq, act)
+                            print(f"[almond] loop guard: {act.describe()}", flush=True)
+                            with self.status_lock:
+                                c = self.loop_guard_counts
+                                c["detected"] += 1
+                                c[{loop_guard.PENALTY: "penalised", loop_guard.CLOSE_THINKING: "thinking_closed",
+                                   loop_guard.STOP: "stopped"}[act.kind]] += 1
+                            if act.kind == loop_guard.STOP:
+                                finish = "stop"
+                                break
+                            if act.kind == loop_guard.CLOSE_THINKING and parser.state == "reasoning":
+                                wrap, guard_closed = True, act      # the budget's wrap-up, below
+                            elif n < max_new:
+                                prompt = self.continue_prompt(prompt, seg, [], "")
+                                continue
+                        elif (guard is not None and n_call < max_new - n + len(seg) and len(seg) >= n_call
+                                and finish == "length" and not (wrap or opens or repeated or looped)
+                                and recover_prompt is None and not cancel.is_set()):
+                            # the guard's penalty call ended: on with the request's own sampling
+                            prompt = self.continue_prompt(prompt, seg, [], "")
+                            continue
                         if recover_prompt is not None and not cancel.is_set() and n < max_new:
                             recovery_count += 1
                             # Only the two settings that keep the same words coming are raised (temperature to at
@@ -3842,8 +4004,14 @@ class Service:
                         if max_new - n - len(extra) < 1:
                             break                       # no room left to answer: "length", as without a budget
                         if wrap:
-                            print(f"[almond] thinking budget reached ({thought} tokens): wrapping up the thinking",
+                            print(f"[almond] the thinking repeated the same passages (coverage={repeat_coverage:.3f}) "
+                                  f"at {n} tokens: closing it, the model answers (reasoning_loop_recovery: \"close\")"
+                                  if loop_closed else
+                                  f"[almond] loop guard: the thinking closed at {n} tokens, the model answers"
+                                  if guard_closed else
+                                  f"[almond] thinking budget reached ({thought} tokens): wrapping up the thinking",
                                   flush=True)
+                            guard_closed, loop_closed = None, False
                         for t in extra:
                             n += 1
                             raw_ids.append(t)
@@ -5924,8 +6092,19 @@ def main() -> int:
             vcfg = {k: (os.path.abspath(os.path.join(cfg.get("cwd") or ".", v))
                         if k in ("exe", "mmproj", "model") and isinstance(v, str) and not os.path.isabs(v) else v)
                     for k, v in cfg["vision"].items()}
+            on_demand = vcfg.get("on_demand") is True
+            if on_demand:                               # the GLM engine lends the encoder its expert pool's tail
+                fp = vision_footprint(vcfg, vision_env(cfg, env),
+                                      Path(a.config).resolve().with_name("vision-memory.json"))
+                if fp is None:
+                    raise SystemExit("[almond] images: the vision encoder could not be measured on the GPU")
+                vcfg = dict(vcfg, max_tokens=fp[0])
+                env = dict(env, ALMOND_GLM_VISION_LEND_MB=str((fp[1] >> 20) + 1),
+                           STRATA_GLM_VISION_LEND_MB=str((fp[1] >> 20) + 1))   # (the engine's name)
+                print(f"[almond] images: the vision encoder needs {fp[1] / 2**30:.2f} GB on the GPU at up to {fp[0]} "
+                      "image tokens; it starts when a picture arrives, in memory the engine lends it", flush=True)
             vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
-                            env=vision_env(cfg, env), lazy=lazy)
+                            env=vision_env(cfg, env), lazy=lazy or on_demand)
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a minute or two) ...", flush=True)
         warn_budget_over_ram(engine_args(cfg) if "args" in cfg else [])      # #1080
@@ -5952,6 +6131,9 @@ def main() -> int:
         engine = AlmondEngine(exe, engine_args(cfg) + (effort_end or []), cwd=cfg.get("cwd"), log=cfg.get("log"),
                               env=env, lazy=lazy)
         engine.silence_s = silence                      # an attribute of its own: restart() keeps it
+        if vision is not None and cfg["vision"].get("on_demand") is True:
+            vision.lend = lambda: engine.command("VLEND", "VLENT")
+            vision.reclaim = lambda: engine.command("VRECLAIM", "VRECLAIMED")
         warn_tight_ram(engine.info.get("arena_mib"))
         note = desktop_vram_note(cfg.get("backend"), engine.info.get("vram_free_mib"), engine.spawn[1],
                                  linux_desktop())
@@ -6053,13 +6235,18 @@ def main() -> int:
         svc.reasoning_budget_by_effort = dict(by_effort)
         print("[almond] thinking budget by effort: " + ", ".join(
             f"{k} {v if v else 'none'}" for k, v in by_effort.items()), flush=True)
-    recovery = cfg.get("reasoning_loop_recovery", False)   # #728: false (default) | "stop" | "recover" (true)
+    recovery = cfg.get("reasoning_loop_recovery", False)   # #728: false | "stop" | "recover" (true) | "close"
     if recovery is True:
         recovery = "recover"
-    if recovery is not False and recovery not in ("stop", "recover"):
-        raise SystemExit("[almond] config \"reasoning_loop_recovery\" must be false, \"stop\" or \"recover\", "
+    if recovery is not False and recovery not in ("stop", "recover", "close"):
+        raise SystemExit("[almond] config \"reasoning_loop_recovery\" must be false, \"stop\", \"recover\" or \"close\", "
                          f"not {recovery!r}")
     svc.reasoning_loop_recovery = recovery
+    lg = os.environ.get("ALMOND_LOOP_GUARD")             # project-maya's loop guard: the config's "loop_guard",
+    svc.loop_guard = (lg.strip().lower() not in ("0", "off", "false", "no")) if lg is not None \
+        else cfg.get("loop_guard") is True              # ALMOND_LOOP_GUARD=1/0 wins
+    if svc.loop_guard:
+        print("[almond] loop guard: on (serve/loop_guard.py)", flush=True)
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)

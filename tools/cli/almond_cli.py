@@ -483,6 +483,49 @@ def monitor_text(m: dict, model: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+def session_dirs() -> list[tuple[str, Path]]:
+    """Each model's folder of conversations kept on disk, from its configuration: DeepSeek's --conversation-disk,
+    GLM's ALMOND_GLM_SLOT_DIR."""
+    out = []
+    for name, cfg, get in (("DeepSeek", "ds41-local.json",
+                            lambda c: (c.get("args") or [])[c["args"].index("--conversation-disk") + 1]
+                            if "--conversation-disk" in (c.get("args") or []) else None),
+                           ("GLM", "glm-local.json", lambda c: (c.get("env") or {}).get("ALMOND_GLM_SLOT_DIR"))):
+        try:
+            d = get(json.loads((ROOT / "local" / cfg).read_text()))
+        except (OSError, ValueError):
+            d = None
+        if d:
+            out.append((name, (ROOT / d) if not os.path.isabs(d) else Path(d)))
+    return out
+
+
+def sessions_text() -> str:
+    """The conversations kept on disk: per model, the files and their size."""
+    lines = []
+    for name, d in session_dirs():
+        files = [f for f in d.rglob("*") if f.is_file()] if d.is_dir() else []
+        n = sum(1 for f in files if f.suffix in (".meta", ".rec", ".json")) or len(files)
+        size = sum(f.stat().st_size for f in files)
+        lines.append(f"sessions   {name:<9} {n} on disk, {size / 1e9:.2f} GB  ({d})")
+    return "\n".join(lines)
+
+
+def clear_sessions() -> int:
+    """Move every model's kept conversations to the trash (gio trash); only with no engine running, which holds them."""
+    busy = subprocess.run(["pgrep", "-f", "ds41_generate|build-maya-hip/maya"], capture_output=True).returncode == 0
+    if busy:
+        raise SystemExit("almond: an engine is running and holds its sessions: ./stop.sh first")
+    for name, d in session_dirs():
+        files = list(d.iterdir()) if d.is_dir() else []
+        if not files:
+            print(f"{name}: nothing on disk")
+            continue
+        subprocess.run(["gio", "trash", *map(str, files)], check=True)
+        print(f"{name}: {len(files)} file(s) moved to the trash ({d})")
+    return 0
+
+
 def idle_text(api: Api) -> str:
     """The router with no model loaded: its models, nothing else to show."""
     data = api.get("/v1/models").get("data") or []
@@ -500,6 +543,7 @@ def run_monitor(api: Api):
                 h = api.get("/health")
                 text = idle_text(api) if h.get("service") == "almond-router" and not h.get("loaded") else \
                     monitor_text(api.get("/metrics"))
+                text += "\n" + sessions_text()
             except (OSError, RuntimeError, ValueError, http.client.HTTPException) as e:
                 text = f"{RED}{e}{RESET}"
             sys.stdout.write("\x1b[H\x1b[2J" + text + f"\n{DIM}(Ctrl+C leaves){RESET}\n" if TTY else text + "\n")
@@ -567,12 +611,20 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--max-tokens", type=int, default=None)
     ap.add_argument("--monitor", action="store_true", help="what the server's monitor shows, refreshed every second")
+    ap.add_argument("--sessions", action="store_true", help="the conversations kept on disk, per model")
+    ap.add_argument("--clear-sessions", action="store_true",
+                    help="move the conversations kept on disk to the trash (no engine may be running)")
     ap.add_argument("--system", default=None, help="a system prompt")
     ap.add_argument("--hide-thinking", action="store_true", help="do not print the thinking")
     ap.add_argument("--no-start", action="store_true", help="never start the router")
     ap.add_argument("--keep", action="store_true", help="leave a router this started running on exit")
     a = ap.parse_args()
 
+    if a.sessions:
+        print(sessions_text())
+        return 0
+    if a.clear_sessions:
+        return clear_sessions()
     api = Api(a.url, a.api_key)
     started = None
     if a.monitor:                       # a look, never a start: nothing is loaded for it

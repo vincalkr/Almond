@@ -160,6 +160,10 @@ def _render_glm(self, messages, tools=None, add_generation_prompt=True, **kwargs
     off = kwargs.pop("enable_thinking", True) is False
     level = kwargs.pop("reasoning_effort", None)
     kwargs["reasoning_effort"] = "low" if off else level if level in ("low", "high") else "max"
+    # Z.ai's model card: the template keeps every earlier turn's reasoning unless clear_thinking is true ("for chat
+    # scenarios, explicitly pass clear_thinking=true"); the reasoning since the last user message (tool calls) stays
+    # either way.  A client's own chat_template_kwargs.clear_thinking wins.
+    kwargs.setdefault("clear_thinking", True)
     out = _render(self, messages, tools, add_generation_prompt, **kwargs)
     if off and add_generation_prompt and out.endswith("<think>"):
         out += "</think>"
@@ -167,6 +171,31 @@ def _render_glm(self, messages, tools=None, add_generation_prompt=True, **kwargs
 
 
 F.ChatTemplate.render = _render_glm
+
+
+def _expand_glm(self, ids, encoded):
+    """GLM-5.3's image markers (<|begin_of_image|><|image|><|end_of_image|>): one <|image|> per image token, the
+    encoder's count for each picture in prompt order (project-maya's layout)."""
+    pad = self.tok.encode("<|image|>", parse_special=True)[0]
+    start = self.tok.encode("<|begin_of_image|>", parse_special=True)[0]
+    literal = self.tok.encode("<|image|>", parse_special=False)
+    out, k = [], 0
+    for j, t in enumerate(ids):
+        if t == pad and j > 0 and ids[j - 1] == start:
+            if k == len(encoded):
+                raise ValueError("the prompt and its images do not match")
+            out += [pad] * encoded[k][1]
+            k += 1
+        elif t == pad:
+            out += literal
+        else:
+            out.append(t)
+    if k != len(encoded):
+        raise ValueError("the prompt and its images do not match")
+    return out
+
+
+S.Service.expand_image_tokens = _expand_glm
 
 _op_init, _op_feed, _op_finish = F.OutputParser.__init__, F.OutputParser.feed, F.OutputParser.finish
 
