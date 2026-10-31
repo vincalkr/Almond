@@ -84,5 +84,6 @@
     "top_p": 1.0
   },
   "reasoning_loop_recovery": "recover",
-  "reasoning_close_retry": true
+  "reasoning_close_retry": true,
+  "fit_max_tokens": true
 }

@@ -49,5 +49,6 @@
     "cuda_device": 0,
     "on_demand": true
   },
-  "reasoning_loop_recovery": "close"
+  "reasoning_loop_recovery": "close",
+  "fit_max_tokens": true
 }

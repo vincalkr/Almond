@@ -81,5 +81,6 @@
   "reasoning_close_retry": true,
   "vision": {
     "max_tokens": 1024
-  }
+  },
+  "fit_max_tokens": true
 }

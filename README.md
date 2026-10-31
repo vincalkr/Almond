@@ -150,7 +150,8 @@ the model answers (docs/MODELS.md, "Loops in the thinking").
 
 The API for another program (an agent harness, an IDE): `./run.sh --router` (or `./almond --keep`) and point it at
 `http://127.0.0.1:8150/v1`; `GET /v1/models` lists `deepseek-v4.1-flash-1017` and `glm-5.3-flash`. `--session-log DIR`
-(or `ALMOND_SESSION_LOG`) writes every request and its answer to `DIR/<date>.jsonl`, for debugging.
+(or `ALMOND_SESSION_LOG`) writes every request and its answer to `DIR/<date>.jsonl`, for debugging. A request whose `max_tokens` does not fit beside its prompt (a harness sending the
+model's 128K) gets the room left instead of a 400 (`"fit_max_tokens": true` in the configurations).
 
 ## Images
 

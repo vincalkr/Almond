@@ -39,5 +39,6 @@
     "top_p": 0.95
   },
   "loop_guard": true,
-  "reasoning_loop_recovery": "close"
+  "reasoning_loop_recovery": "close",
+  "fit_max_tokens": true
 }
