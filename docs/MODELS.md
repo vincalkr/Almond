@@ -137,3 +137,8 @@ GGUF says `glm4`: digits in runs of up to three (`\p{N}{1,3}`) and whole-piece t
 (llama.cpp's `ignore_merges`). With `glm4` (`tools/almond_tokenizer.py`, `GlmTokenizer` in `serve_glm.py`) the ids are
 llama.cpp's on 7 files, ~300K tokens (README and docs, Python, C++), the prompt is 12,471 tokens, and the copy is
 0 of 200 wrong at ~12K, 0 of 120 short. The conversation caches built with the old ids are read again once.
+
+**Both tokenizers against llama.cpp (2026-10-31).** `llama-tokenize` (ggml-org master 792fcf4, `--no-escape
+--no-parse-special`) on each model's GGUF against the server's tokenizer: DeepSeek's (`joyai-llm`) gives the same ids
+on 7 texts, 305K tokens (README and docs, Python, C++, and a mixed text: accents, Chinese, Japanese, Korean, emoji,
+symbols, tabs and runs of spaces); GLM's (`glm4`) the same on those and on the mixed text.
