@@ -2276,13 +2276,17 @@ def vision_footprint(vcfg: dict, env: dict, cache_file: Path) -> tuple[int, int]
     st = Path(vcfg["mmproj"]).stat()
     caps = [int(vcfg["max_tokens"])] if vcfg.get("max_tokens") else [4096, 2048, 1024]
     for i, cap in enumerate(caps):
-        key = f"{Path(vcfg['mmproj']).resolve()}|{st.st_size}|{int(st.st_mtime)}|cap{cap}"
+        nofa = bool(vcfg.get("no_flash_attn"))
+        key = f"{Path(vcfg['mmproj']).resolve()}|{st.st_size}|{int(st.st_mtime)}|cap{cap}" + ("|nofa" if nofa else "")
         m = cache.get(key)
         if not isinstance(m, dict) or not all(isinstance(m.get(k), int) and m[k] > 0 for k in ("bytes", "total")):
             m = None
         if m is None:
+            # measured as it will run: without flash attention the attention's buffer grows with the square of the
+            # image tokens (a screenshot needed 1.82 GiB of compute buffer beside the weights, more than the measure
+            # with flash attention lent it: the encoder stopped on cudaMalloc, 2026-10-31)
             args = [vcfg["exe"], "--mmproj", vcfg["mmproj"], "--model", vcfg["model"], "--gpu", "--max-tokens",
-                    str(cap), "--measure"]
+                    str(cap), "--measure"] + (["--no-flash-attn"] if nofa else [])
             print(f"[almond] images: measuring the vision encoder on the GPU ({cap} image tokens) ...", flush=True)
             try:
                 r = subprocess.run(args, capture_output=True, text=True, timeout=600, env=env)
