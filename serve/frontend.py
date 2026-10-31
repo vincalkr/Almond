@@ -793,8 +793,19 @@ class OutputParser:
         inline code."""
         return not self.fence and not self.line.strip() and self.ticks % 2 == 0
 
+    def _closing_line(self) -> str | None:
+        """The current line closes the open fence (```` ``` ```` at its start) and goes on: what follows the closer.
+        GLM-5.3 wrote ```` ```<tool_call>... ```` - the fence's end and the call on one line; the call is not code."""
+        s = self.line.lstrip()
+        if self.fence and s.startswith(self.fence * 3):
+            return s.lstrip(self.fence)
+        return None
+
     def _in_code(self) -> bool:
         """The text so far leaves the next character inside a code fence or inline code."""
+        rest = self._closing_line()
+        if rest is not None:
+            return rest.count("`") % 2 == 1
         return bool(self.fence) or (self.ticks + self.line.count("`")) % 2 == 1
 
     def _release(self, deliver: bool) -> list[Event]:

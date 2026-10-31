@@ -201,6 +201,12 @@ class VisibleAnswer(unittest.TestCase):
                 self.assertEqual(self.run_all(self.HEAD + body)[0], ("write",))
         self.assertEqual(self.run_all(self.HEAD + CALL + "\n" + CALL)[0], ("write", "write"))
 
+    def test_a_call_on_the_fence_closing_line_fires(self):
+        # GLM-5.3 (2026-10-31): "```bash\nbash install.sh\n```<tool_call>..." - the fence's end and the call on one
+        # line; the call is not inside the code
+        self.assertEqual(self.run_all(self.HEAD + "Run:\n```bash\nbash install.sh\n```" + CALL)[0], ("write",))
+        self.assertEqual(self.run_all(self.HEAD + "```\nx\n```  " + CALL)[0], ("write",))
+
     def test_a_closed_call_in_a_length_cut_answer_stays_a_call(self):
         self.assertEqual(self.run_all(self.HEAD + "Now.\n" + CALL, finish="length")[0], ("write",))
 
