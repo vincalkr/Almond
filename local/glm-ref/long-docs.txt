@@ -1,0 +1,1282 @@
+# DeepSeek-V4.1-Flash-1017 with exact routing on this box
+
+The model is DeepSeek-V4.1-Flash-1017 as the
+[ISTA-DASLab GSQ-RCO IQ2_XXS pack](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF), run with
+the model's own routing (`--route-bias 0 --route-bias-file 0`): every expert the router picks is computed, wherever it
+is. The box: two RX 7900 XTX (`gfx1100`, 24 GB; card 1 behind a PCIe 4.0 x2 chipset link), Ryzen 9 9900X (12 cores,
+AVX-512), 122 GiB RAM, the pack on a PCIe 5.0 NVMe (ext4), ROCm 7.14. Every number below was measured on this box with
+this pack; one-shot runs are greedy and, unless they say otherwise, forced on one reference token stream
+(`ALMOND_FORCE_IDS`, `ALMOND_DEC_MARGIN=1` counting the positions whose argmax differs) so that the arms of a
+comparison decode the same text.
+
+## The pack
+
+Four shards, 138.2 GB: per layer, gate/up IQ1_M, IQ2_XXS or IQ2_XS and down IQ1_M, IQ2_XXS or IQ2_XS - eight
+(gate, down) classes over the 40 layers (14 all IQ1_M, 9 IQ2_XXS/IQ1_M, 5 IQ2_XS/IQ1_M, 5 IQ2_XXS/IQ2_XXS,
+3 IQ2_XXS/IQ2_XS, 2 IQ1_M/IQ2_XXS, 1 IQ2_XS/IQ2_XS, 1 IQ2_XS/IQ2_XXS); experts 132.1 GB, a mean expert blob of
+8,598,528 bytes; the dense half 5.2 GB, Q5_K except `attn_q_a` and `attn_kv` (Q8_0) and the BF16 router, indexer and
+Engram q/k.
+
+Its GGUF carries llama.cpp metadata, not the `deepseek41.*` keys this engine reads. `tools/v41/ds41_pack_meta.py`
+writes them into a 511 KB overlay (`local/rco-iq2xxs-meta/meta.gguf`, read through `DS41_META`): geometry and the
+config JSON from `local/rco-iq2xxs-meta/geometry-keys.json` (68 keys of the checkpoint, 8 KB, in the repo), compress
+ratios and kv / index source layers derived from which compressor tensors the pack holds, and the Engram token map,
+primes and multipliers read from the pack's own I32/I64 tensors (129,280 map ids; the primes must tile the two Engram
+tables' 384,006,168 and 384,016,682 rows exactly, so a wrong read fails at once). Rebuilt from the JSON alone it is
+byte-identical to the one in use. In the engine: expert blobs are read from whichever shard holds their stacked
+tensor (one buffered and one `O_DIRECT` descriptor per shard); the Engram tensors `engram_q` / `engram_k` /
+`engram_wkv` are stored BF16 and Q5_K and re-typed to F32 at load (on the CPU path too: ggml-cpu has no f32 x bf16
+binary op); `attn_output_a` is stored flattened; the embedding rows are Q5_K and go through the type traits; the VL
+router bias `exp_probs_b_vl.bias` is not in this pack: `DS41_VL_BIAS` adds it from `local/rco-iq2xxs-meta/vl-bias.gguf`
+(the checkpoint's `ffn.gate.bias_vl`; the pack's text bias is bit-identical to the checkpoint's, 2026-10-28).
+`test_ds41_geometry <shard 1>` passes with the overlay.
+
+## Where an expert is computed
+
+| tier | what | experts |
+| --- | --- | ---: |
+| card 0's VRAM | the ranked head, then an LRU cache with background promotion (`ALMOND_VRAM_BG`) | ~2,100-2,200 |
+| card 1's VRAM | `--peer-device 1`: a 22 GiB store (`ALMOND_PEER_GIB=22`) of ranked experts the arena does not hold (`ALMOND_PEER_DISJOINT=1`), adaptive (`ALMOND_PEER_ADAPT=1`); a miss it holds is computed there and only n_embd floats cross the link | ~2,750 |
+| CPU | the RAM arena: `--arena-gib 80` of pinned RAM with the ranking past the VRAM head (`--arena-skip-vram`); a file-tier read takes a slot (`--arena-adapt`), an expert card 1 holds first (`ALMOND_ARENA_EVICT_PEER=1`); 12 threads compute those experts' rows (`--threads 12`, the physical cores) | ~10,000 |
+| NVMe | everything else, read when routed | ~3,100-3,400 |
+
+The order the tiers are filled in is the rank (`local/rank.bin`; `local/update-rank.sh` rebuilds it, below).
+
+## The configuration (`local/ds41-local.json`)
+
+Flags: `--backend cuda --experts gpu --threads 12 --ctx 262144 --kv-q8 --prompt-batch 8192 --arena-gib 80
+--arena-skip-vram --arena-adapt --vram-margin 0.5 --peer-device 1 --pf-b 0 --pcie 0 --route-bias 0
+--route-bias-file 0`, the Engram tables, the rank, `--dump-routes local/routes-rco` and the conversation pool and
+disk store (below). `--pf-b 0` turns the predicted-expert prefetch off and `--pcie 0` the PCIe-staged compute of
+misses: a miss outside the cards is computed by the CPU from the arena. `--vram-margin 0.5` leaves 0.5 GiB of card 0
+free beside the expert cache. `--kv-q8` keeps the compressed KV and the indexer keys in q8_0. Prompts of more than 2560
+tokens skip layers 21-39 for all but their last 2560 tokens (enc-skip, on by default): those layers see earlier
+tokens only through layer 20's compressed KV and index keys, and the last row is byte-identical to the full pass.
+
+Environment: `ALMOND_DENSE_REQUANT=q6_K` (the 84 Q8_0 dense matrices to q6_K, below), `ALMOND_DENSE_NOCONT=1` (no
+`ggml_cont` of an already contiguous tensor), `ALMOND_DENSE_ALIAS=1` (results written straight into the persistent
+state tensors), `ALMOND_SUM_ZEROCOPY=1` (the weighted sum of a layer's experts reads the CPU's and card 1's rows from
+their pinned host buffers), `ALMOND_PRESTAGE_GIB=1.5` / `ALMOND_PRESTAGE_MIN=512` (a device region the prompt path
+stages the next layer's experts into), `ALMOND_VRAM_BG=1`, `ALMOND_PF_NO_DUMMY=1`, `ALMOND_NO_LARGEPAGES=1`, the
+peer switches above, `ALMOND_SERVE_STEP_MAX=96` (up to 96 new prompt tokens run as decode passes, more as a batch),
+`ALMOND_SERVE_PASS_BATCH=1`, `ALMOND_SERVE_PASS_BIAS=0`.
+
+## Speed (2026-10-26)
+
+One-shot, the configuration's flags, power-tune on (`local/power-tune.sh`: NVMe APST and CPU C3 off, `performance`
+governor), 3 runs each (`local/bench-v41/ab-rco-requant.sh`, `ab-rco-levers.sh`; `local/sweep-rco-rq`,
+`local/sweep-rco-lev`):
+
+| | tok/s |
+| --- | ---: |
+| decode, Promessi Sposi (19-token prompt, 300 tokens) | 23.2-23.7 |
+| decode at 17K context (128 tokens; one-shot with the server's elastic state columns, `ALMOND_ELASTIC_COLS=1`) | 18.4-19.2 |
+| prompt from scratch, 8,192 tokens | 371-414 |
+| prompt from scratch, 17,349 tokens | 433-459 |
+| prompt from scratch, 25,500 tokens | 458-484 |
+
+A from-scratch 123,416-token prompt read at 483-493 tok/s (`local/bench-v41/repro-mmq-crash.py`, 2026-10-27).
+Through the server, in a coding-agent session at 120-190K context: 16-20 tok/s decode, a turn's new tokens (tens to
+~1,500) resumed on the saved conversation in 0.6-10.5 s (`local/serve-engine.log`, 2026-10-27).
+
+## Quality (2026-10-26)
+
+Lucebox's held-out set (8 x 1024 tokens; `local/eval-lucebox/run-eval.sh`, one card, arena 75 GiB, ctx 4096,
+`--kv-q8`, 12 threads; `--against` scores one run's logits against another's):
+
+| run | ppl | own top-1 | against | KL | same top-1 |
+| --- | ---: | ---: | --- | ---: | ---: |
+| the pack's iq4_nl Engram table (`rco-iq2xxs-iq4eng`) | 10.334 | 50.6% | | | |
+| the checkpoint's FP8 Engram rows (`rco-iq2xxs-fp8eng`) | 10.369 | 50.7% | iq4_nl | 0.026 | 93.6% |
+| FP8 rows, repeated (`rco-iq2xxs-fp8eng-rep`) | 10.369 | 50.7% | FP8 | 0.000 | 100% |
+| FP8 rows + `ALMOND_DENSE_REQUANT=q6_K` (`rco-iq2xxs-fp8eng-q6k`) | 10.372 | 50.7% | FP8 | 0.018 | 94.7% |
+
+The one-card eval is deterministic (the repeat is bit-identical), so the two small KLs are real; neither moves the
+ppl. The FP8 1017 checkpoint itself reads ppl 8.56 on this set.
+
+## The q6_K dense requant
+
+On this pack it re-types the 84 Q8_0 matrices (`attn_q_a`, `attn_kv`; 0.39 -> 0.30 GB). Speed, arms alternated:
+
+| | q6_K | the pack's own types |
+| --- | --- | --- |
+| Promessi Sposi | 20.99 / 22.97 / 23.20 | 23.61 / 23.26 / 23.30 |
+| 17K context | 17.66 / 18.30 / 18.32 | 15.11 / 17.88 / 18.30 / 18.33 |
+| prompt 8,192 | 379.1 / 392.3 / 371.2 | 413.7 / 384.7 / 378.6 |
+| prompt 17,349 | 436.1 / 433.4 / 450.0 | 435.3 / 459.2 / 447.5 |
+| prompt 25,500 | 482.2 / 483.5 / 470.5 | 460.3 / 458.3 / 477.3 |
+
+The same within the spread, ppl +0.003: the configuration keeps it (0.09 GB of VRAM).
+
+## Where a token goes (2026-10-26)
+
+`ALMOND_DEC_PROF=1` / `DS4_TIER_PROF=1` / `ALMOND_POOL_PROF=1`, ms per token (`local/sweep-prof-rco/`):
+
+| | begin | attention + router | tier | finish | tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Promessi Sposi | 1.0 | 24.8 | 14.7 | 1.4 | 23.6 |
+| 17K context | 0.5 | 27.8 | 27.5 | 1.6 | 18.4 |
+
+In the tier: the CPU pool 7.4 ms (35 experts a token) / 16.8 ms (74), reading at 47 GB/s - the RAM's limit with
+power-tune on (`local/ram-bench.sh`: 61-62 GB/s streaming); waiting for card 1's rows and the sum 6.2 / 7.1 ms. Card
+0's kernel trace (`rocprofv3`, 64 Promessi Sposi tokens): 3,378 kernels and 19.9 ms busy a token (`mul_mat_vec_q` 7.2
+ms, the expert kernels 3.6 ms). Of its idle time, 8.6 ms a token is the gap between its own expert kernels and the
+sum (waiting for the CPU's rows) and ~6 ms is spread over the 40 per-layer host round trips (router readback, the
+tier's decision, the next graph). Neither is a kernel cost: fusing the dense half's small kernels cannot remove them.
+Routing on the card would remove a round trip only where all six of a layer's experts are on the card - ~35% of
+layers on short prompts, ~6% at 17K (from the measured hit rates) - so it was not built.
+
+Card 1's link: a hand-off moves a few KB each way, so it is latency-bound, not bandwidth-bound; a wider link would
+not change it.
+
+## Levers measured and not taken (2026-10-26)
+
+`local/bench-v41/ab-rco-levers.sh`, 3 rounds alternated, tok/s (VRAM hits):
+
+| | 17K, 128 tokens | Promessi Sposi, 300 tokens |
+| --- | --- | --- |
+| the configuration | 17.67 / 16.69 / 18.50 (62.7%) | 23.69 / 23.31 / 23.68 (84.0%) |
+| the configuration again (a third arm; see below) | 18.44 / 18.33 / 18.28 | 23.55 / 23.65 / 23.74 |
+| `--rank local/rank-rco-calib.bin` (the pack's byte-correct order over the calibration corpus) | 18.92 / 18.45 / 18.39 (62.6-64.9%) | 23.88 / 22.97 / 23.79 (84.2%) |
+
+The rank is inside the spread, with the configuration's argmax counts. The third arm was meant to put the pack's
+IQ2_XXS / IQ2_XS / IQ1_M down rows on the AMD expert layouts, but those layouts are not compiled for gfx1100
+(`ALMOND_EXP_LAYOUTS` is 0 there), so it ran the default kernels: it is a repeat of the configuration, and the switch
+was removed. A release of
+ggml's device memory pool after the prompt gave back 0.22 GiB and was removed. A one-shot run keeps the prompt's 8192
+state columns (~2.5 GiB) after the prompt where the server gives them back (`elastic_cols`); `ALMOND_ELASTIC_COLS=1`
+lets a one-shot run do as the server does (2,176 experts on card 0 after the 17K prompt instead of 1,594).
+
+**Misses split between the CPU and card 0** (`--pcie F`: a share F of the misses outside the cards is copied from the
+arena over PCIe x16 and computed on card 0 while the CPU computes the rest; `local/bench-v41/ab-rco-pcie.sh`, the
+configuration's flags with `ALMOND_ELASTIC_COLS=1`, 2 rounds alternated, 2026-10-27, tok/s):
+
+| `--pcie` | 17K context, 128 tokens | Promessi Sposi, 300 tokens | CPU-computed experts (17K / Sposi) |
+| --- | --- | --- | --- |
+| 0 (the configuration) | 15.29 (first run) / 18.71 | 22.96 / 23.29 | 8,950 / 10,590 |
+| 0.15 | 19.09 / 19.03 | 23.01 / 23.12 | 7,650 / 9,080 |
+| 0.3 | 18.89 / 18.12 | 22.87 / 22.92 | 6,360 / 7,480 |
+
+The CPU computes 15-30% fewer experts and its time goes down by as much (1.73 -> 1.39 s on the 17K run), but the
+decode does not move beyond the spread: each expert card 0 takes costs it a copy of ~8 MB over PCIe in the same
+window. `--pcie 0` stays.
+
+## Lookup drafts: measured, opt-in, off (2026-10-27)
+
+`ALMOND_LOOKUP=K` (one-shot, greedy): after each token the last `ALMOND_LOOKUP_NGRAM` (default 3) tokens are looked up
+in the prompt and the text so far; where they occurred before, the up to K tokens that followed are verified with the
+token in one pass (`pass_v`) and the leading ones the model's argmax agrees with are emitted - the same tokens as
+plain decoding (the outputs below are identical to a plain run's, and where a run differs from the plain one, a second
+plain run differs at the same token: a near-tie). The width adapts by default (`ALMOND_LOOKUP_ADAPT`): a fully
+accepted draft doubles the next, a rejection shrinks it. After a rejection a feed at an odd position re-feeds the last
+accepted token, as for any verify pass.
+
+One-shot, the configuration's flags with `ALMOND_ELASTIC_COLS=1`, power-tune on, 400 tokens, tok/s
+(`local/sweep-lookup`):
+
+| | `dev-code` (a review with a patch) | `dev-edit` (a 1.7K-token header rewritten with one rename) |
+| --- | ---: | ---: |
+| plain | 21.77 / 22.75 | 21.17 |
+| K 8 | 16.41 (2.53 of 5.8 accepted a pass) | 23.65 (7.82 of 8) |
+| K 12 | | 26.43 (11.84 of 11.84) |
+| K 12, n-gram 8 | 19.55 (3.50 of 7.7) | 25.87 |
+| K 12, n-gram 6, adaptive | 19.34 (1.22 of 2.6) | 24.09 |
+| K 8, misses on the CPU (`ALMOND_TIER_BATCH_PCIE=0`) | 14.72 | 19.16 |
+
+A verified token costs about what a plain step costs here (a 13-token pass 480 ms, 37 ms a token, against 46 ms a
+plain step): each token routes its own experts and the CPU computes them at the RAM's limit, so a verify pass shares
+little. Even text copied whole gains only 14-25%, and a review that writes new text loses 10-25%; the server keeps
+plain decoding.
+
+## The VRAM cache seeded by the conversation: measured, opt-in, off (2026-10-27)
+
+The VRAM cache re-opens after every turn that runs as a batch (its slots give the prompt's buffers their VRAM), and
+re-opens in the rank's order. `ALMOND_VRAM_CONV=<per mille>` gives that share of its byte budget first to the experts
+this conversation routed most (prompt and decode counts, times `ALMOND_VRAM_CONV_DECAY`, default 0.9, at every
+release), then the rank. Routing is unchanged; only which experts sit in VRAM changes.
+
+Through the server (`local/bench-v41/ab-vram-conv.py`, `local/sweep-vram-conv`): the configuration without the
+conversation disk, the `dev-code` review (16,709 tokens) and three ~400-token follow-ups, 128 tokens each, greedy,
+3 runs interleaved, tok/s:
+
+| turn | off | `ALMOND_VRAM_CONV=500` (~1,000 experts, 7.6-8.5 GiB, from the conversation) |
+| --- | ---: | ---: |
+| after the prompt | 15.2 / 18.5 / 18.9 | 17.9 / 18.1 / 18.2 |
+| +365 tokens | 16.9 / 17.2 / 17.3 | 15.0 / 16.8 / 17.1 |
+| +400 tokens | 17.4 / 19.3 / 18.8 | 16.2 / 16.6 / 19.1 |
+| +361 tokens | 18.6 / 18.9 / 18.7 | 19.9 / 19.4 / 19.3 |
+| mean of all 12 | 17.98 | 17.80 |
+
+The hit rate rises a little on the last turn (0.70-0.79 off, 0.76-0.79 on), the speed does not: card 0's VRAM holds
+2,128 experts, card 1 2,754 more and the RAM arena 10,001, so an expert the seed moves into VRAM was mostly in a fast
+tier already. The default stays off.
+
+## DSpark on the GSQ-RCO pack: slower, off (2026-10-28)
+
+`ALMOND_SERVE_DSPARK` (the checkpoint's mtp.0-2 drafter, `V41-MTP-Vision-1017.Q2_K.gguf` from
+kaushikvira/DeepSeek-V4.1-Flash-1017-GSQ-agentic-almond, 5.66 GB, kept in `models/dspark-1017`) now loads on this pack:
+the drafter read its embedding rows as F16 only, and the pack's `token_embd` is quantized; it now decodes the rows
+with their type's `to_float`, as the trunk does. Drafts never change the output (each is verified), only the speed.
+
+Through the server (`local/bench-v41/ab-dspark.py`, `local/sweep-dspark/summary-rco.txt`): the configuration without
+the conversation disk, the `dev-code` review (16,709 tokens), three ~500-token follow-ups and an Italian prose request,
+256 tokens each, greedy, one run each, tok/s:
+
+| turn | off | conf 0.6, depth 4 | conf 0.6, depth 2 |
+| --- | ---: | ---: | ---: |
+| after the prompt | 17.6 | 12.5 | 14.8 |
+| +493 tokens | 18.6 | 10.8 | 12.5 |
+| +528 tokens | 17.8 | 15.2 | 16.4 |
+| +489 tokens | 18.3 | 11.9 | 12.8 |
+| prose, +309 tokens | 18.0 | 13.6 | 15.7 |
+
+The drafter takes 5.14 GB of card 0 (its VRAM cache holds 1,525 experts instead of ~2,128), but the first turn's hit
+rate is the same (0.753 against 0.752) and the speed still drops: the verify pass reads the experts of every drafted
+token, which at exact routing are mostly different experts, from the peer card, RAM and NVMe. Engines that report a
+gain from DSpark on this model pair it with a route bias toward cached experts (the drafted tokens then share
+experts), which changes the output. The default stays off.
+
+Short chats, for comparison (`local/bench-v41/short-chat.py`, `local/sweep-short/summary.txt`, the default
+configuration, 256 tokens greedy, 3 runs): a 48-token question 17.6-19.8 tok/s, follow-ups at 322 and 601 tokens
+16.1-19.2, a fresh 1,464-token prompt 15.0-19.0. The decode speed barely depends on the context length here; it is set
+by the expert reads (hit rate 0.76-0.81).
+
+## Idle time between the card and the CPU: measured (2026-10-28)
+
+A decode token alternates: card 0 runs a layer's attention while the CPU and the RAM wait, then card 0 waits for the
+CPU's experts. Two ways to use that time were measured before building anything.
+
+**Experts in L3.** `local/bench-v41/bench-cpu-expert-l3.sh` runs the engine's native CPU kernels the way the pool does
+(fixed row slices per thread, a barrier between gate/up and down), two experts a layer, on the pack's bytes; cold =
+new experts every layer (from DRAM), hot = the same two (from L3), `local/sweep-cpu-l3/summary.txt`:
+
+| gate/up / down | 12 threads, cold | 12 threads, hot | hot / cold | 6 threads, hot / cold |
+| --- | ---: | ---: | ---: | ---: |
+| IQ1_M / IQ1_M (7.74 MB) | 189 us (41.0 GB/s) | 134 us (57.9 GB/s) | 1.41x | 0.98x |
+| IQ2_XXS / IQ1_M (8.66 MB) | 210 us (41.3 GB/s) | 134 us (64.6 GB/s) | 1.56x | 1.05x |
+| IQ2_XS / IQ1_M (9.40 MB) | 216 us (43.5 GB/s) | 148 us (63.5 GB/s) | 1.46x | 1.09x |
+
+With 12 threads the kernels' own ceiling is ~58-65 GB/s, so an expert already in L3 computes 1.4-1.6x faster; with
+6 the arithmetic is the limit. (The IQ2_XXS / IQ2_XXS case hung in the bench's barrier and was not measured.)
+
+**How well the next layer's experts are predicted.** `ALMOND_FILE_PRED=1` now also scores the experts the CPU
+computes (in the arena, not in card 0's VRAM) against `Ds41Dense::predict` from the state entering the layer (k=0,
+what `finish_predict` gives for free) and one layer earlier (k=1); one-shot, forced, `local/sweep-cpu-pred`:
+
+| | CPU-computed routes | top 4 | top 6 | top 8 | top 12 | top 16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Promessi Sposi, k=0 | 13,179 | 45.9% | 63.6% | 71.6% | 78.6% | 82.1% |
+| Promessi Sposi, k=1 | 12,363 | 42.2% | 56.3% | 63.7% | 71.3% | 75.3% |
+| 17K context, k=0 | 11,007 | 42.2% | 52.5% | 59.2% | 68.4% | 74.1% |
+| 17K context, k=1 | 10,511 | 34.9% | 42.8% | 47.9% | 56.2% | 62.0% |
+
+Together: an L3 prefetch of the predicted CPU experts during the attention would serve ~60-70% of them from L3, a
+third faster each - about 2-3.5 ms of the CPU's 7-17 ms a token, +3-6% decode. Not built: it is at the size of the
+run-to-run spread.
+
+**Spinning host synchronizations** (`ALMOND_HIP_SPIN=1`, opt-in: `hipDeviceScheduleSpin` on both cards;
+`local/bench-v41/ab-hip-spin.sh`, power-tune on, 3 rounds alternated, `local/sweep-hip-spin`, tok/s):
+
+| | 17K context, 128 tokens | Promessi Sposi, 300 tokens |
+| --- | --- | --- |
+| the configuration | 19.11 / 18.69 / 19.21 | 23.65 / 23.24 / 19.10 |
+| `ALMOND_HIP_SPIN=1` | 18.96 / 19.15 / 19.43 | 19.30 / 23.51 / 23.72 |
+
+The same (one run in each arm drops to ~19 on Promessi Sposi, either arm): the ~6 ms of per-layer round trips are not
+the thread's wake-up. Off.
+
+## The Engram tables, in either form
+
+The Engram rows come as the pack's own iq4_nl GGUF (`DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`, 110.6 GB, one tensor a
+layer, 144 bytes a row read in one pread) or as the checkpoint's FP8 rows (two safetensors a layer, F8_E4M3 weights
+and F8_E8M0 scales, 256 + 8 bytes a row in two preads; 203 GB in `models/engram-1017`). `--engram` takes either.
+iq4_nl is not linear: `ds41_dequant_iq4_nl_row` is ggml's `block_iq4_nl` arithmetic, gated by
+`src/ds41/test_ds41_engram.cpp` (1,028,096 of 1,028,096 values bit-identical to ggml's `to_float`).
+
+Rows per second of the batched reader (`build-hip-fused/bench_ds41_engram`, 4096-token sequence, 16 threads, internal
+NVMe; cold = `drop_cache` between reps):
+
+| pass | FP8 warm | iq4_nl warm | FP8 cold | iq4_nl cold |
+|---|---:|---:|---:|---:|
+| 1 token | 592,878 | 2,466,598 | 577,617 | 2,671,119 |
+| 512 tokens | 3,014,128 | 7,001,799 | 1,962,231 | 7,464,885 |
+| 4096 tokens | 5,630,238 | 5,951,369 | 5,062,294 | 7,150,841 |
+
+Quality: the Lucebox table above. The configuration names the FP8 rows; where they are missing the engine uses the
+iq4_nl table beside the pack and prints that it does. Two guards against a table cut short by a crash (a
+`truncate()`-reserved file keeps its size and reads as zeros): the extractor writes `.part`, renames after `fsync` and
+samples 256 rows, and the engine samples 512 rows at open (`ALMOND_ENGRAM_NO_ZERO_CHECK=1` skips it).
+
+## CPU expert rows: IQ1_M in AVX-512
+
+`src/kernels/cpu/iq_avx512.cpp` computes IQ1_M rows (and IQ2_XXS / IQ2_XS / IQ3_XXS / IQ3_S / IQ2_S) for several
+tokens at once: it decodes a block once and applies it to every token. Real rows of the pack, one core, ns per
+row-token against ggml-cpu's dispatched dot (`local/bench-v41/fmt-cost/fmt_cost.cpp`):
+
+| rows | ggml-cpu | kernel, 4 tokens | kernel, 8 tokens |
+|---|---:|---:|---:|
+| IQ1_M gate/up @5120 | 168.00 | 150.23 (1.12x) | 138.86 |
+| IQ1_M down @2304 | 78.53 | 67.51 (1.16x) | 61.54 |
+| IQ2_XXS gate/up @5120 | 83.25 | 38.28 (2.17x) | 38.32 |
+| IQ2_XS gate/up @5120 | 198.60 | 89.97 (2.21x) | 93.06 |
+
+IQ1_M rows are bit-exact against ggml's generic dot (680 / 680 at eight tokens). Below four tokens ggml-cpu is faster
+(`native_gu_mt_min` = 4 for IQ1_M), and decode hands the CPU pool one token at a time, so the kernel serves only
+multi-token groups; in decode it is not on the path (`ALMOND_NO_IQ512=1` decodes the same).
+
+## Conversations
+
+Every conversation a request does not continue is kept in a 4 GiB pool of pinned RAM
+(`--conversation-cache-mib 4096`) and on disk (`--conversation-disk local/conv-cache-rco --conversation-disk-gib 32`,
+saved in the background after each answer); a request resumes the longest saved prefix it shares. Resuming is exact:
+a resume a few tokens before a saved end (a client that re-renders the tail of the last turn) re-feeds from the even
+position `ps = lcp & ~1` after `restore()`, only when `P - ps <= 16` (the window ring's reach), for the live and for a
+parked conversation, and the Engram history of the first new positions is rewritten.
+`tools/v41/check_conv_reuse.py --scenario single` (a re-render 12 tokens back, resumed at 298 of 310) is
+bit-exact against a fresh prefill on the CPU backend. A client that cuts the middle of a conversation is read again
+from the cut: there is no state to resume from there. `ALMOND_SERVE_LIVE_PARTIAL=0` turns the live-conversation
+partial resume off.
+
+## Fixed: the prompt MMQ read past its id buffer (2026-10-27)
+
+The MMQ product reads up to J_best - 1 (<= 127) ids past a run's last row; the down product took them from a buffer
+allocated to exactly n x top_k entries, so the last run of a batch read past it - a GPU page fault ("chunk sync: an
+illegal memory access") on a 3,918-token batch over a 123K conversation. Reproduced at 8,000 + 3,918 and 123,416 +
+3,918 tokens (`local/bench-v41/repro-mmq-crash.py`); with 128 ints of slack on those buffers both run through three
+turns, at the same prompt speed.
+
+## The expert rank
+
+`local/update-rank.sh` adds the chat's own routing counts (`local/routes-rco`, written by `--dump-routes`) to the
+calibration corpus's (`local/calib/stats-merged`), ranks the experts per byte with the pack's formats
+(`local/rco-iq2xxs-map.json`), measures the candidate against the rank in use on a code review and a documentation
+prompt (`local/make-dev-prompts.py`: `dev-code`, 16.7K tokens of C++, and `dev-docs`, 10.8K tokens of docs) and
+applies it only if it is at least 1% faster with neither prompt more than 2% slower.
+
+Run on 2026-10-27 (the chat's 41.4M routed selections against the corpus's 2.0M, 3 runs a side, power-tune on;
+`local/sweep-rank`): rank in use 19.15 / 19.77 / 19.56 on `dev-code` and 16.79 / 17.99 / 16.42 on `dev-docs`, the
+candidate 19.68 / 17.20 / 17.36 and 19.14 / 18.00 / 18.92 - code -7%, docs +9%: kept.
+
+## Reproduce
+
+```
+./build.sh
+./run.sh                                         # the server, local/ds41-local.json
+bash local/bench-v41/ab-rco-requant.sh           # decode and prompt speed (server stopped)
+bash local/eval-lucebox/run-eval.sh TAG          # quality; MODEL / RANK / ENGRAM as in the table above
+```
+
+## Gate
+
+`test_ds41_geometry <shard 1>` with the overlay, `test_ds41_engram`, `test_ds41_dense <shard 1> --engram <tables>` on
+the CPU, `bench_ds41_engram ... --check 200`, the server tests (`.venv/bin/python -m unittest discover -s serve -p
+"test_*.py" -t .`) and `check_conv_reuse.py` for anything that touches conversation reuse.
+# DeepSeek-V4.1-Flash on AMD (gfx1100, HIP) - how this checkout runs it
+
+The engine (`src/ds41/`) was written for CUDA; on this box - two Radeon RX 7900 XTX (gfx1100, wave32), Ryzen 9
+9900X, 122 GiB RAM, ROCm 7.14 - the whole expert path runs on HIP. Speed, quality and the configuration are in
+[V41_EXACT_FAST.md](V41_EXACT_FAST.md).
+
+## What runs where
+
+| part | where |
+| --- | --- |
+| dense half (attention, router, shared expert, Engram add, head) | card 0 through `ggml-hip`; `--backend cuda` picks the GPU by type, so the HIP build keeps the same flag |
+| routed experts | card 0's VRAM, card 1's VRAM (`--peer-device 1`), the CPU over the pinned RAM arena, and the NVMe - the `DS4_MOE_CUDA` tier compiled as HIP |
+| Engram tables | read at run time from the files `--engram` names |
+
+## Build
+
+`./build.sh` builds the vendored ggml (`third_party/llama.cpp/ggml`, with the fork's patches - also kept in
+`tools/v41/ggml/`) into `third_party/llama.cpp/build-hip`, statically (the engine calls ggml internals a shared build
+hides), then the engine into `build-hip-fused` against it, with `-DALMOND_DSV41_FQ_OP=ON -DALMOND_DSV41_HC_MIX=ON` (the
+fused activation quantize-dequantize and hyper-connection mixes, one node each instead of a chain of small ops) and the
+MMQ prompt path (`-DALMOND_PREFILL_MMQ=ON`). `ROCM`, `GFX`, `JOBS`, `REBUILD_GGML=1` from the environment.
+
+The port changes in this tree:
+
+1. `CMakeLists.txt`: with `ALMOND_ENABLE_HIP` the `BUILD_SHARED_LIBS OFF` / `GGML_STATIC ON` FORCEs are skipped.
+2. `src/ds41/v41_engine.cmake`: `ds41_dense` links `ggml-hip` and keeps the `DS41_HAVE_CUDA` compile path
+   (ggml's HIP backend is the CUDA backend's sources compiled as HIP, so it exports `ggml_backend_cuda_*`); the expert
+   tier gets a `ds41_moe_hip` flavour - the same `DS4_MOE_CUDA` source, `almond_hip_runtime` force-including the compat
+   header - and `ds41_generate` prefers it.
+3. `include/almond/hip_compat/cuda_profiler_api.h`: `cudaProfilerStart/Stop` -> `hipProfilerStart/Stop`.
+4. `src/prefill/moe_mmq.cu`: the MMQ host API's two spellings (`prec_src1`) behind `ALMOND_MMQ_PREC_SRC1`, detected
+   from the ggml tree in use.
+5. `src/prefill/ggml_cuda_host.cu`: its host symbols are weak, so the real backend's copy wins when `ggml-hip` is
+   linked.
+
+The tier carries no device code of its own: the kernels live in `almond_kernels`, compiled for gfx1100.
+
+## One-shot run
+
+```sh
+./local/run-one-shot.sh --ids-file local/prompts/dev-docs.i32 -n 96
+```
+
+`ALMOND_NO_LARGEPAGES=1` pins the RAM arena with 4 KiB pages (with THP the pinning takes minutes).
+`local/encode_prompt.py` / `local/detok.py` turn a text into `--ids-file` ids and back.
+
+## The Engram tables on ext4
+
+The engine prefers raw block-device reads when a table file has >= 1024 extents and the device node is readable;
+`/dev/nvme0n1p4` is `root:disk` here, so it prints `... extents, /dev/nvme0n1p4 not readable - filesystem reads` and
+uses preads, which on ext4 cost nothing measurable.
+
+## Flash attention at head size 512
+
+V4.1's attention heads are 512 wide, so ggml runs `flash_attn_tile<512, 512, ...>`, not the WMMA kernel RDNA3 has for
+heads up to 256: `ggml_cuda_get_best_fattn_kernel` allows AMD WMMA only for heads <= 256 and more than 16 columns, and
+the kernel compiles no AMD WMMA device code for `DKQ > 256` (selecting it anyway aborts: "HIP kernel
+flash_attn_ext_f16 has no device code"). Using the matrix cores here would take a head-512 kernel written for gfx1100.
+
+## Expert kernels: the AMD layouts are compiled out
+
+`src/kernels/cuda/iq_kernels.cu` has a CUDA layout for the grouped expert kernels (mode 0) and AMD layouts (modes
+1-8, `ALMOND_EXP_MODE`). The AMD layouts are compiled only for `ALMOND_HIP_GFX906` (`ALMOND_EXP_LAYOUTS` is 0 on every
+other HIP architecture), so on gfx1100 the tier runs mode 0; `-DCMAKE_HIP_FLAGS=-DALMOND_HIP_EXP_LAYOUTS=1` compiles
+them in for a measurement. They are tuned for a 64-lane wavefront.
+
+## The second card sits on a PCIe 4.0 x2 uplink
+
+`lspci`: card 0 is `03:00.0` behind `02:00.0` (x16, 16 GT/s); card 1 is `16:00.0` behind `15:00.0` (x16), which is
+behind `14:00.0`: **width 2, 16 GT/s = PCIe 4.0 x2** (~4 GB/s). The card negotiates x16, so the endpoint's
+`current_link_width` alone is misleading. HIP reports peer access both ways, but over this path it is no faster than
+going through pinned host memory (`hipMemcpyAsync` + sync, median of 300, 2026-10-23):
+
+| bytes | card 1 -> pinned host | card 1 -> card 0, P2P |
+| ---: | ---: | ---: |
+| 16 KiB | 40.1 us | 46.3 us |
+| 48 KiB | 26.1 us | 55.8 us |
+| 1 MiB | 335 us (3.1 GB/s) | 372 us (2.8 GB/s) |
+| 16 MiB | 5.12 ms (3.3 GB/s) | 5.13 ms (3.3 GB/s) |
+
+So card 1 serves only work with little cross-traffic: the experts it holds, whose rows (a few KB a layer) come back
+through pinned host memory.
+
+## API server
+
+`./run.sh` starts `tools/v41/serve/serve_ds41.py` with `local/ds41-local.json` on `127.0.0.1:8150`: OpenAI
+`/v1/chat/completions` and `/v1/responses`, Anthropic `/v1/messages`, the web chat and monitor at `/`.
+# Models: thinking levels and sampling
+
+What each model gets, where it comes from, and what was measured.  Everything below is the server's behaviour with the
+shipped configurations (`local/ds41-local*.json`, `local/glm-local.json`); a client sees the levels in `/health`,
+`/v1/models` (the router) and `./almond`'s `/models`.  Reviewed 2026-10-29.
+
+## DeepSeek-V4.1-Flash-1017 (GSQ-RCO IQ2_XXS, `ds41_generate`)
+
+Source: DeepSeek's cloud API reference (api-docs.deepseek.com, create-chat-completion, `deepseek-flash`) and the
+model card (`deepseek-ai/DeepSeek-V4.1-Flash-1017`: temperature 1.0, top_p 1.0).  The GSQ-RCO pack's card gives no
+sampling and measured its benchmarks at reasoning effort 50.
+
+| | thinking (default) | thinking off |
+| --- | --- | --- |
+| levels | low 50, high 75 (default), max 100, or 1-100 | none |
+| temperature | 1.0, the request's ignored (the API: "no effect") | the request's, 0-2, default 1.0 |
+| top_p | the request's, 0.95-1.0, default 1.0 | 1.0 |
+| top_k / min_p | off (the engine's 256 best candidates) | off |
+| penalties | none (the API ignores them) | none |
+| max_tokens unset | 64K, 128K at max | 8K |
+
+Client words: none / off / minimal = thinking off; low = 50; medium, high, xhigh = 75; max = 100; a number 1-100 as
+it is.  An Anthropic `budget_tokens` under 8K asks for high, else max.
+
+Beyond the API (in the configuration, not DeepSeek's):
+
+- No thinking cap, as the API (the configurations' `reasoning_budget_by_effort` {low 1024, high 4096}, never measured,
+  went in this review); a request's own `reasoning_budget_tokens` still caps it.
+- `reasoning_close_retry`: a reply that ends inside its thinking is continued once with the thinking closed.
+- `reasoning_loop_recovery: "recover"` does nothing for DeepSeek (it swaps a Qwen template sentence the prompt does
+  not have).
+
+`ALMOND_DS41_FREE_SAMPLING=1` passes a request's sampling through as it is (measurements).
+
+## GLM-5.3-Flash (GSQ-RCO 3.0bit, the engine)
+
+Source: Z.ai's API reference (docs.z.ai, chat completions, the GLM-5.3-Flash series); the GGUF's
+`general.sampling.temp` 1.0 and `general.sampling.top_p` 0.95 say the same.
+
+| | |
+| --- | --- |
+| levels | low, high, max (default); thinking cannot be turned off ("can only be enabled") |
+| temperature | 0-1, default 1.0 |
+| top_p | 0.01-1, default 0.95 |
+| top_k / min_p | off (the engine's widest, 64 candidates) |
+| penalties | none |
+| max_tokens | at most 131072; unset = the rest of the context up to that |
+
+Client words: none / off / minimal / `enable_thinking: false` / Anthropic's `disabled` = low (the API's nearest);
+medium = high; xhigh = max.  An Anthropic `budget_tokens` under 2K asks for low, under 8K high, else max.
+`ALMOND_GLM_THINK_OFF=1` brings back an Off level (low with the thinking closed at once: not Z.ai's, not measured);
+`ALMOND_GLM_FREE_SAMPLING=1` passes a request's sampling through.
+
+Measured, the server with MTP drafts and the expert profile, a fresh start each arm, six 600-token requests (three
+code, one Italian prose, one English explanation, after one asyncio question), thinking low, tok/s:
+
+| sampling | 1 | 2 | 3 | 4 | 5 | 6 | mean | drafts accepted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| temperature 0 (greedy) | 30.3 | 32.3 | 38.0 | 37.3 | 34.6 | 27.3 | 33.3 | 80.8% |
+| Z.ai's 1.0 / 0.95, top_k off (the default) | 32.1 | 32.1 | 36.4 | 36.5 | 32.8 | 26.1 | 32.7 | 81.2% |
+| 1.0 / 0.95, top_k 20 (the engine default) | 30.0 | 32.4 | 35.3 | 36.0 | 32.1 | 26.8 | 32.1 | 79.5% |
+
+Sampling at the API's values costs the drafts nothing measurable (one run an arm: the means are within 4%).
+
+## Fixed in this review
+
+- ds41_generate kept a request's repetition / frequency / presence penalty for every request after it (one global
+  state): each request now starts from the command line's.  Checked: greedy "apple" x10, then a request with
+  repetition_penalty 3.0 (2 words), then the first again - the same 10 words.
+- The server sent top_k 0 ("off") to DeepSeek as 64; DeepSeek's engine without one takes its 256 best candidates,
+  which is what it gets now.
+
+## Loops in the thinking (2026-10-30)
+
+GLM-5.3-Flash at max, "cosa sono le terzine incatenate ? citando i versi": the 3.0bit quant does not remember Dante's
+verses and tries again and again ("nella miseria; e, fuor di mia credenza" - hmm, no), each round a few words
+different. Before: 16,000 tokens of thinking, no answer (twice).
+
+- the loop guard (`serve/loop_guard.py`, MIT, unchanged; `"loop_guard": true`, `ALMOND_LOOP_GUARD=0/1`):
+  a block repeated back to back gets a short repetition penalty, the third loop in the thinking closes it, a loop that
+  comes back in the answer ends it. On this prompt it saw one loop only, at 13,831 tokens (the rounds are not exact).
+- `"reasoning_loop_recovery": "close"`: the passage detector (#728, 12-word passages seen three times over the last
+  2,000 words) closes the thinking with the budget's wrap-up and the model answers. Offline on the saved 16,000-token
+  thinking it fires from ~3,200 tokens (coverage 0.52); live it closed at 2,560 tokens and GLM answered (4,191 tokens,
+  finish "stop"). A normal max question (a train timetable, 572 tokens) was untouched.
+- `clear_thinking` true by default (Z.ai's model card: "for chat scenarios, explicitly pass clear_thinking=true"):
+  earlier turns' reasoning is not put back into the prompt; the reasoning after the last user message (tool calls)
+  stays. A client's `chat_template_kwargs.clear_thinking` wins.
+
+Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
+
+## Images
+
+- DeepSeek: the encoder (0.9 GiB) loads on card 0 for a request with images and is freed after; the VRAM expert cache
+  reopens into the room. Measured before the fix below: card 0 held 2172 experts before an image, 1872 / 1855 after
+  (15.51 / 15.38 GiB free at the reseed against ~16.1 after a text prompt); text decode 23.2 tok/s before, 21.1, 23.7,
+  23.7, 22.1, 23.5 after (one run each). Open: where the missing memory goes. Measured 2026-10-30 with
+  ALMOND_VRAM_TRACE=1: a 531-token text prompt (layer-major batch) leaves 17.37 GiB free at the reseed (2104 experts),
+  a 452-token prompt with a picture 15.46 (1865): ~1.9 GiB, taken during the image prompt's batch, not by the encoder
+  (17.26 GiB free right after it was freed). Freeing the dense half's cached graphs and both allocators after it
+  changed nothing (15.45): not kept. Clearing ggml-hip's buffer pool
+  after the encoder (tried, 2026-10-30) gave back 112 MiB only and the next decode hit an illegal memory access: removed.
+- GLM: the encoder (`almond-vision`, llama.cpp's mtmd with GLM-5.3's tower, built by `./build.sh` for HIP;
+  `local/fetch.sh glm-vision` gets the mmproj F16 + vocab, 1.1 GB) starts only when a picture arrives, in 2.78 GB the
+  engine lends it from the tail of card 0's expert pool (273 experts moved to colder slots, 27 dropped) and takes back
+  after (`local/glm-local-vision.json`, which `./run.sh --model glm` picks when the encoder is there). Text decode, one
+  run each: 29.2, 32.2 before, 29.8, 33.3 after the first picture, 29.2 after the second (cached: no encoder start).
+
+## Sessions on disk
+
+- DeepSeek: `--conversation-disk local/conv-cache-rco` (as in Almond).
+- GLM: `ALMOND_GLM_SLOT_KEEP=1`, `ALMOND_GLM_SLOT_DIR=local/glm-slots`: the conversation in the model is saved when
+  the engine ends and taken back after a start. Measured: a 7,163-token prompt read in 13.6 s; after a stop and a
+  start the same conversation plus a question was taken back from disk in 0.1 s and read 123 new tokens (2.3 s).
+
+## GLM-5.3-Flash against llama.cpp (2026-10-30)
+
+Is the engine computing the model right, or are GLM's mistakes in an agent session ours? The same tokens through an
+independent implementation: llama.cpp's own (ggml-org master 792fcf4, which has `glm5-next`), the same GSQ-RCO 3.0bit
+file, experts in RAM (`--cpu-moe`), `llama-perplexity -c 512 --chunks 1` on `local/glm-ref/doc.txt` (its tokens are
+`local/glm-ref/doc512.i32`'s, checked with `llama-tokenize`); Almond's engine `LOGP 257` on those tokens (the 255
+llama-perplexity scores, the second half of the chunk), three runs:
+
+| | PPL |
+| --- | ---: |
+| llama.cpp | 7.1997 |
+| Almond | 7.1433, 7.0977, 7.0221 |
+
+The same within the engine's run-to-run spread. Copying numbers (40 random sizes, five copies at temperature 1.0):
+0 wrong of 200 with MTP off, 0 of 200 with MTP on on a fresh server and 0 of 200 after replaying an agent session;
+one earlier copy on a long-running server wrote "O" for "0" six times (6 of 520 with MTP on in all). The digits GLM
+garbled in agent sessions (47G read as 447G, 185G written as 1.8 TB) are the model's, not the engine's; the agent's
+system prompt (`AGENT_PROMPT`) asks it to keep figures as the tools print them.
+<h1 align="center">Almond - MoE models on RX 7900 XTX</h1>
+
+<p align="center"><b>DeepSeek-V4.1-Flash-1017 and GLM-5.3-Flash on one or two RX 7900 XTX, their experts across VRAM, pinned RAM and NVMe</b><br>
+Linux - ROCm/HIP - MIT</p>
+
+A C++/HIP inference engine for large MoE models (one executable, `build-hip-fused/almond-engine`), an OpenAI- and
+Anthropic-compatible server, a router that serves every model at one address, and a terminal chat with an agent mode.
+
+- **DeepSeek-V4.1-Flash-1017** as the [ISTA-DASLab GSQ-RCO pack](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)
+  (IQ2_XXS/IQ2_XS/IQ1_M experts, four shards, 138.2 GB), read through the geometry overlay `DS41_META` because its
+  GGUF carries llama.cpp metadata instead of this engine's `deepseek41.*` keys. Every expert the model routes to is
+  computed (no route bias), wherever it is: card 0's VRAM, the second card, an 80 GiB pinned RAM arena, or the NVMe.
+- **GLM-5.3-Flash** as the GSQ-RCO 3.0bit pack (117 GB) with its MTP draft block (`src/glm`).
+
+How each model is set up and measured: [docs/MODELS.md](docs/MODELS.md); the one-engine work:
+[docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md).
+
+## Performance
+
+DeepSeek-V4.1-Flash, two RX 7900 XTX, Ryzen 9 9900X, 122 GiB RAM, PCIe 5.0 NVMe, ROCm 7.14, the default configuration's flags with
+power-tune on, the GSQ-RCO pack (2026-10-26, one-shot runs, 3 each):
+
+| | |
+| --- | ---: |
+| decode, Promessi Sposi (300 tokens) | 23.2-23.7 tok/s |
+| decode at 17K context (128 tokens) | 18.4-19.2 tok/s |
+| prompt from scratch, 8K / 17K / 25.5K tokens | 371-414 / 433-459 / 458-484 tok/s |
+
+Through the server, in a coding-agent session at 120-190K context: 16-20 tok/s decode, and a turn's new tokens resumed
+on the saved conversation in 0.6-10.5 s.
+
+Quality on Lucebox's held-out set (8 x 1024 tokens, exact routing): ppl 10.37 with the checkpoint's FP8 Engram rows,
+10.33 with the pack's own iq4_nl table (KL 0.026 between the two); the FP8 1017 checkpoint itself reads 8.56. Every
+number and how it was measured: [docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md).
+
+GLM-5.3-Flash, the same machine, through the server (thinking low, 600 tokens, three prompts, two rounds): 31.8 tok/s
+decode; PPL 10.36-10.43 on `local/glm-ref/doc512.i32` (docs/ENGINE_PLAN.md).
+
+## Requirements
+
+| | |
+| --- | --- |
+| OS, GPU stack | Linux, ROCm (7.14 here) with `hipcc`, hipBLAS and `/opt/rocm/lib/llvm/bin/clang++` |
+| GPU | RX 7900 XT / XTX (`gfx1100`); a second 24 GB card is used as an expert tier when present |
+| RAM | 128 GB class (the engine holds ~94 GB with the 80 GiB arena) |
+| CPU | x86-64 with AVX2 (AVX-512 used when present) |
+| disk | on an NVMe for `models/`: DeepSeek ~250 GB (138 GB pack in four shards + 111 GB Engram GGUF + 0.9 GiB image encoder; the checkpoint's own FP8 Engram rows instead of that GGUF are 203 GB), GLM ~122 GB (pack, MTP block, image encoder) |
+| tools | `cmake` >= 3.24, gcc, Python 3, curl, `aria2c` (faster downloads) |
+
+## Quick start
+
+```sh
+./setup.sh                                   # tools, .venv, the models to download, the build, power-tune, each model's context
+./almond                                     # the chat (it starts the router on 127.0.0.1:8150)
+```
+
+or by hand:
+
+```sh
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # the server's Python packages
+local/fetch.sh                                                        # the models: what is in models/, which to download
+./build.sh                                                            # ggml, the engine, GLM's image encoder (tens of minutes the first time)
+./run.sh                                                              # DeepSeek's server on 127.0.0.1:8150 (--model glm: GLM's)
+```
+
+- `./setup.sh --check` only says what is there. `local/fetch.sh` lists the models with their state in `models/` and
+  asks which to download (DeepSeek's pack and FP8 Engram rows through their own scripts, GLM, its MTP block, both
+  image encoders); `local/fetch.sh --list` only lists.
+- `local/fetch-rco-1017.sh` downloads the four shards and the pack's Engram IQ4_NL GGUF with `aria2c` (4 connections,
+  `CONN`), checks each sha256, and writes the geometry overlay `local/rco-iq2xxs-meta/meta.gguf` with
+  `tools/v41/ds41_pack_meta.py` (its reference geometry is `local/rco-iq2xxs-meta/geometry-keys.json`, 8 KB, in the
+  repo) plus the rank byte map.
+- The Engram tables come in two forms and the engine reads either. `local/fetch-rco-1017.sh` brings the pack's own
+  (iq4_nl, 144 bytes a row, 111 GB), and that is all a new machine needs. The checkpoint's FP8 rows (264 bytes a row,
+  203 GB in `models/engram-1017`) measured the same on Lucebox (ppl 10.37 against 10.33, KL 0.026);
+  `local/fetch-model.sh` extracts them (it downloads a 366 GB source pack, which can be deleted afterwards). The
+  default configuration names the FP8 rows; where they are missing the engine uses the iq4_nl table beside the pack
+  and prints that it does.
+- `./build.sh` builds the vendored ggml (`third_party/llama.cpp/ggml`) into `third_party/llama.cpp/build-hip`, the
+  engine into `build-hip-fused`, and GLM's image encoder into `build-vision`; `ROCM`, `GFX`, `JOBS`, `REBUILD_GGML=1`
+  from the environment.
+- `./run.sh` uses cards 0 and 1; `./run.sh --gpu 0` (or `--gpu 1`) one card, `--gpu 0,1` both. The number of cards
+  picks the configuration: `local/ds41-local.json` (two cards) or `local/ds41-local-1gpu.json` (one);
+  `--config FILE` uses that file. Other arguments go to the server (`./run.sh --port 8151`). `./stop.sh` stops a
+  server started in the background (as Ctrl+C would; `--force` kills it if it does not end in 60 s). Loading takes about a minute; the API is at
+  `http://127.0.0.1:8150/v1` (OpenAI and Anthropic), the chat is `./almond` (below). Never expose the server beyond
+  `127.0.0.1` without `--api-key`.
+
+## Models, the router and the chat
+
+Almond serves DeepSeek-V4.1-Flash (`./run.sh`, the default) and GLM-5.3-Flash (`./run.sh --model glm`, its path of
+the same executable in `src/glm`, MIT: `src/glm/LICENSE`; `local/fetch.sh` downloads and prepares its files).
+`./run.sh --router` puts every model of `local/router.json` behind one address, as llama-server's
+router mode does: `GET /v1/models` lists them with their status (loaded / loading / unloaded), context and thinking
+levels (`reasoning_levels`, `reasoning_default`); `POST /models/load` / `/models/unload {"model": NAME}`; a request that
+names another model loads it, stopping the one running once its requests are done (the cards hold one at a time:
+GLM loaded in 32 s, DeepSeek in 38 s from the file cache). The others go to the loaded model; `--no-autoload` refuses
+instead.
+
+`./almond` is the chat in the terminal (it starts the router when nothing answers, and stops it on leaving):
+
+```sh
+./almond                                   # a conversation; /help lists the commands
+./almond -m glm --think-level low -p "..." # one prompt, the answer on stdout (the thinking on stderr)
+./almond --monitor                         # the server's state, refreshed every second (no web pages)
+./almond --session-log                     # the servers it starts log every request and answer to local/session-log/<date>.jsonl
+```
+
+- thinking: each model's own levels, from the client's words. GLM-5.3-Flash: low / high / max (its default; an
+  Anthropic budget under 2K low, under 8K high, else max). DeepSeek-V4.1: off / low (50) /
+  high (75, default) / max (100) or a number 1-100 (`none` is taken as off). `--nothink`, `--think`, `--think-max`, `--think-level L`; `/think L`,
+  `/nothink` in the chat. `/health` and `/v1/models` say which levels a model has.
+- DeepSeek's sampling follows its cloud API (deepseek-flash): with thinking the temperature has no effect (1.0) and
+  top_p is 0.95-1.0 (default 1.0); without thinking temperature 0-2 (default 1.0) and top_p 1.0; no top_k, min_p or
+  penalties; an unset max_tokens is 8K without thinking, 64K with it, 128K at max effort.
+  `ALMOND_DS41_FREE_SAMPLING=1` passes a request's values as they are.
+- GLM-5.3-Flash follows Z.ai's API: it always thinks, at low / high / max (default max; none, minimal and
+  Anthropic's disabled are low, medium high, xhigh max); temperature 0-1 (default 1.0), top_p 0.01-1 (0.95), no
+  penalties, top_k or min_p, at most 128K tokens out. `ALMOND_GLM_FREE_SAMPLING=1` and `ALMOND_GLM_THINK_OFF=1`
+  (an Off level that closes the thinking at once: not Z.ai's, not measured) step outside it.
+- sampling: `--temp`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--presence-penalty`, `--seed`,
+  `--max-tokens`; `/set KEY VALUE` in the chat, `/set` alone shows them next to the model's defaults (`/props`).
+- `/stats` (or `--monitor`): `GET /metrics` as text - state, speed, context, experts in VRAM, each GPU's load, VRAM,
+  temperature and power, PCIe, CPU, RAM, disk, the conversation cache, the last requests and the totals.
+  `/forget` clears the conversation cache.
+- on a terminal the last line is a status bar (a scroll region the chat scrolls above): reading the
+  prompt a bar with tokens read / total and tok/s, writing the tokens, tok/s, the time and thinking or answer, idle the
+  last request's prompt / reused / output and tok/s, the context in use, the thinking level and the model (from
+  `/metrics`); `-p` and piped output have none.
+- `--agent` (or `/agent on`): the model gets tools - `read_file`, `write_file`, `edit_file`, `list_dir`,
+  `run_command` (bash in the working directory, the output cut to 8 KB) - and the chat runs them until an answer
+  without calls (at most 50 steps; Ctrl+C stops). Reads and listings inside the working directory go ahead; a write,
+  an edit (shown as a diff first), a command (shown first) or any path outside asks y / n / a (always, for that
+  tool, this session); `--yes` asks only for paths outside, which always ask. Without `--system` the agent gets a
+  short English system prompt (`AGENT_PROMPT` in `tools/cli/almond_cli.py`): the machine and directory, how to use the
+  tools, and to report figures as the tools printed them.
+- Conversations: `/new` (the current one saved first), `/save [NAME]`, `/sessions`, `/load N|NAME`, `/rename`,
+  `/delete` (to the trash); they live in `local/chats/`, leaving saves too, `./almond -c` resumes the last one. A
+  conversation the engine still keeps is not read again.
+- `/retry`, `/undo`, `/edit` (the last exchange: again, dropped, your message back to edit), `/export [FILE]`
+  (Markdown), `/status`, `/cd DIR` (the agent's directory).
+- `/models`, `/model NAME` (switches through the router), `/read FILE`, `/system TEXT`, `/ctx`, `/hide`, `/show`;
+  `/` alone lists the commands, Tab completes them (with what each does) and their arguments; a line ending in `\`
+  goes on, `"""` opens a block; Ctrl+C stops an answer.
+
+Through the API the level is `reasoning_effort`, `reasoning.effort` (OpenAI) or `output_config.effort` / `thinking`
+(Anthropic). DeepSeek's goes into its prompt (`Reasoning Effort: N`), with no cap on the thinking, as DeepSeek's API
+(a request's `reasoning_budget_tokens` sets one). Thinking that loops is caught (`serve/loop_guard.py`) and closed so
+the model answers (docs/MODELS.md, "Loops in the thinking").
+
+The API for another program (an agent harness, an IDE): `./run.sh --router` (or `./almond --keep`) and point it at
+`http://127.0.0.1:8150/v1`; `GET /v1/models` lists `deepseek-v4.1-flash-1017` and `glm-5.3-flash`. `--session-log DIR`
+(or `ALMOND_SESSION_LOG`) writes every request and its answer to `DIR/<date>.jsonl`, for debugging.
+
+## Images
+
+Both models read images; each one's encoder is in VRAM only for a request with images.
+
+**GLM-5.3-Flash:** with its encoder in `models/glm53-vision`, `./run.sh --model glm` picks
+`local/glm-local-vision.json`; the encoder (`build-vision/build/bin/almond-vision`) runs in 2.7 GB of VRAM the engine
+lends it for the request and takes back after (docs/MODELS.md, "Images").
+
+**DeepSeek-V4.1-Flash:** images need the model's image routing bias, `blk.N.exp_probs_b_vl.bias`, which the GSQ-RCO pack does not carry. It is
+in the repository as `local/rco-iq2xxs-meta/vl-bias.gguf` (61 KB): the checkpoint's `ffn.gate.bias_vl`, as
+ISTA-DASLab publish it (`exp_probs_b_vl.f32`), written by `tools/v41/ds41_vl_bias.py`; the configurations add it with
+`DS41_VL_BIAS`. The pack's text bias is bit-identical to the checkpoint's in all 40 layers, so the pack's routing was
+not recalibrated and the image bias fits it. With the image encoder in `models/vision-1017` (`local/fetch-rco-1017.sh`
+builds it from the checkpoint), `./run.sh` picks `local/ds41-local-vision.json` (`-1gpu-vision` for one card).
+
+The encoder (0.9 GiB) is loaded on card 0 only for a request with images, in the VRAM the expert cache gives up for
+the prompt, and freed before the cache re-opens; text requests never load it. A 22x70-patch image is loaded in 0.6 s
+and encoded in 0.2 s; encoded images are kept (8 by default, `ALMOND_VISION_CACHE`), so a conversation re-sends them
+free. After any batch prompt (an image's, or text over ~128 new tokens) the next request opens the expert cache again
+once into the VRAM ggml gave back meanwhile: free VRAM 0.59-0.60 GiB after it as before, decode 20.7-21.9 tok/s
+(docs/ENGINE_REVIEW.md; `ALMOND_VRAM_REGROW=0` turns it off).
+
+## Conversations
+
+DeepSeek's engine keeps every conversation a request does not continue in a 4 GiB pool of pinned RAM
+(`--conversation-cache-mib`, ~340 MB for a 190K-token session) and resumes the one a request continues, exactly (a
+re-rendered tail a few tokens back included). They are also saved in `local/conv-cache-rco` (`--conversation-disk`,
+up to 32 GiB), so a restarted server resumes a session instead of reading it again
+([docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md), "The conversation pool", "Conversations on disk"). GLM's
+keeps its conversations in `local/glm-slots` (`ALMOND_GLM_SLOT_KEEP`, docs/MODELS.md, "Sessions on disk").
+`./almond --sessions` shows both folders and their size, `./almond --clear-sessions` moves them to the trash (with no
+engine running), and `--monitor` shows them too.
+
+## Power-tune (optional, root)
+
+Decode reads an expert from the NVMe every 10-20 ms; between reads the drive (APST) and the CPU cores (C3) fall
+asleep and each read costs more. `local/power-tune.sh on` keeps them awake and sets the `performance`
+governor; it also raises the RAM's streaming bandwidth from 51-54 to 61-62 GB/s, which the CPU's experts read at.
+Install it once and `./run.sh` switches
+it on at start and off when the server ends:
+
+```sh
+sudo local/install-power-tune.sh             # a root-owned copy and a sudo rule for it alone
+```
+
+`DS41_POWER_TUNE=0 ./run.sh` leaves the settings alone; `sudo local/install-power-tune.sh uninstall` removes it;
+`sudo local/power-tune.sh on|off|show` by hand.
+
+## Expert rank (DeepSeek)
+
+Which experts live in VRAM and in the RAM arena follows a rank of the most used ones (`local/rank.bin`). The server
+counts what the router picks (`local/routes-rco`); `local/update-rank.sh` builds a new rank from those counts (experts
+ranked per byte with the pack's formats, `local/rco-iq2xxs-map.json`), measures it against the one in use on a code
+review and a documentation prompt (`local/prompts/dev-code`, `dev-docs`; ~30 minutes, the server stopped meanwhile)
+and applies it only if it is faster.
+
+## Another machine (DeepSeek's configuration)
+
+`local/cfg.py` edits `local/ds41-local.json` (`python3 local/cfg.py show` prints it):
+
+```sh
+python3 local/cfg.py arg --threads 8         # the CPU's physical cores (12 here)
+python3 local/cfg.py arg --arena-gib 50      # pinned RAM for experts: 80 GiB on 122 GiB here, keep ~40 GiB free beside it
+```
+
+The arena is the biggest lever after the cards: an expert that is in neither VRAM nor the arena is read from the
+NVMe. `--vram-margin` (0.5 GiB) is the VRAM left free beside the expert cache; raise it if another program uses the
+card. With one card use `./run.sh --gpu 0` (the two-card default stops at startup: "peer device 1 does not exist").
+
+## Development
+
+- Server tests (no GPU or model): `.venv/bin/python -m unittest discover -s serve -p "test_*.py" -t .`
+- Measurement scripts: `local/bench-v41/` (one-shot sweeps, profiles, the server benchmark `serve-bench.py`);
+  quality: `local/eval-lucebox/`; `local/ram-bench.sh TAG [--decode]` compares RAM bandwidth and decode across BIOS
+  settings (no arguments: the results so far).
+- [docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md) - DeepSeek's configuration and every measurement behind
+  it; [docs/ds4/AMD_HIP_NOTES.md](docs/ds4/AMD_HIP_NOTES.md) - the HIP port; [docs/MODELS.md](docs/MODELS.md) - each
+  model; [docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md) - one engine for every model; [docs/ENGINE_REVIEW.md](docs/ENGINE_REVIEW.md)
+  - the engine's review; [HANDOVER.md](HANDOVER.md) - the state and what is open; [docs/ALMOND_PLAN.md](docs/ALMOND_PLAN.md)
+  - the first multi-model work, kept for its measurements.
+# Handover
+
+Where Almond stands and what is open. How it runs and every measured number: [README](README.md),
+[docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md), [docs/ds4/AMD_HIP_NOTES.md](docs/ds4/AMD_HIP_NOTES.md).
+
+## State (2026-10-27)
+
+- **Model:** DeepSeek-V4.1-Flash-1017 as the ISTA-DASLab GSQ-RCO IQ2_XXS pack (`models/rco-iq2xxs`, four shards,
+  138.2 GB), read through the geometry overlay `local/rco-iq2xxs-meta/meta.gguf` (`DS41_META`). Exact routing.
+- **Engram:** the checkpoint's FP8 rows in `models/engram-1017` (203 GB); the pack's own iq4_nl table is the
+  measured-equivalent alternative and the fallback (`local/fetch-rco-1017.sh` brings it).
+- **Machine:** two RX 7900 XTX (card 1 on a PCIe 4.0 x2 uplink), Ryzen 9 9900X, 122 GiB RAM, PCIe 5.0 NVMe, ROCm 7.14.
+  The cards' 305 W cap, -200 mV and stock memory clock are deliberate; power-tune (NVMe APST and CPU C3 off, the
+  `performance` governor) runs with the server.
+- **Server:** `./run.sh` / `./stop.sh`, `127.0.0.1:8150`, the conversation pool (4 GiB) and disk store
+  (`local/conv-cache-rco`, 32 GiB), reasoning effort none / low / high / max with a thinking cap per level.
+- **Speed:** decode ~23 tok/s on short prompts, ~18-19 at 17K, 16-20 in agent sessions at 120-190K context; prompts
+  from scratch 370-490 tok/s. **Quality:** Lucebox ppl 10.37 (the FP8 checkpoint: 8.56).
+
+## Fixed recently
+
+- 2026-10-27: the prompt MMQ read up to 127 ids past its buffer (a GPU page fault on a 3,918-token batch);
+  `local/bench-v41/repro-mmq-crash.py` reproduces the shape.
+- 2026-10-27: a prompt that re-rendered the last few tokens of the live conversation was read again from zero; it now
+  resumes exactly (`ALMOND_SERVE_LIVE_PARTIAL`).
+
+## Open
+
+- **Where the time goes:** the CPU tier is at the RAM's bandwidth (47 GB/s of 61), and card 0 waits ~6 ms a token in
+  40 per-layer host round trips. Faster RAM (`local/ram-bench.sh` compares BIOS settings) is the hardware lever;
+  routing on the card was estimated at ~5% on short prompts and ~0 at long ones and not built.
+- **Speculative decoding:** a verify pass costs about as much as decoding its tokens here. Lookup drafts
+  (`ALMOND_LOOKUP`, opt-in) gain 14-25% only on text copied whole and lose 10-25% on new text; off.
+- **The VRAM cache seeded by the conversation** (`ALMOND_VRAM_CONV`, opt-in): 17.80 against 17.98 tok/s over
+  12 turns; off.
+- **DSpark on the GSQ-RCO pack** (`ALMOND_SERVE_DSPARK`, opt-in; the drafter now reads the pack's quantized
+  `token_embd`): 10.8-15.2 (depth 4) and 12.5-16.4 (depth 2) against 17.6-18.6 tok/s; off. Short chats run
+  15.0-19.8 tok/s, about as fast as long ones.
+- **CPU/card idle time:** experts in L3 compute 1.4-1.6x faster than from DRAM, and the next-layer prediction
+  catches 59-72% (top 8) of the CPU's experts: an L3 prefetch would gain ~3-6%, not built. Spinning host syncs
+  (`ALMOND_HIP_SPIN`, opt-in): no change; off.
+- **The rank:** `local/update-rank.sh` measures a rank built from the chat's routing on code and documentation prompts
+  and applies it only if faster.
+- **Images:** on when the encoder is in `models/vision-1017`: the VL router bias the pack lacks comes from
+  `local/rco-iq2xxs-meta/vl-bias.gguf` (`DS41_VL_BIAS`); the encoder is loaded on card 0 per image request and freed.
+- **Prompt format:** `tools/v41/dsv41_encoding.py` is DeepSeek's 1017 encoder (2026-10-28; before it was the launch
+  one): a user turn of tool results only no longer opens a new turn, tool content may hold blocks (images).
+
+## Constraints
+
+- Never expose the server beyond `127.0.0.1` without `--api-key`.
+- A new feature is opt-in; a default changes only where it measured better, with the numbers written down.
+- The engine is not bit-reproducible run to run (an expert's kernel depends on the tier that serves it): compare
+  quality with Lucebox or repeated runs, not with a diff.
+- Commit messages in English.
+# One engine
+
+Today Almond runs two engines: `ds41_generate` (DeepSeek-V4.1-Flash, `src/ds41` + `src/`, from Almond) and
+the engine for GLM-5.3-Flash (`engines/glm`, vendored, ~160K lines with DeepSeek and MiniMax paths Almond
+does not use, its own pinned ggml). The goal: one engine of Almond's own, no vendored part, one ggml, one build, one
+executable that runs every model, and the parts both need written once.
+
+Every step keeps the models' numbers: PPL on the same documents (GLM: `local/glm-ref/doc512.i32`, 510 positions;
+DeepSeek: the Lucebox set, `local/eval-lucebox/`) and decode tok/s through the server, before and after. A step that
+measures worse is not merged.
+
+## Steps
+
+1. **One ggml.** GLM's engine built against Almond's ggml (`third_party/llama.cpp`, 0.26 with Almond's patches)
+   instead of its pinned 0.24 copy. `src/prefill/moe_mmq.cu` already followed ggml's MMQ API change (`J_best`,
+   the src1 precision as a template argument); GLM's copy gets the same change. Then
+   `engines/glm/third_party/llama.cpp` goes.
+2. **The code in `src/`.** GLM's model, its expert pools and RAM tier, its prompt path, MTP drafting and the
+   conversation slots move from `engines/glm/src` into `src/` beside DeepSeek's; DeepSeek's engine moves from
+   `src/ds41` into `src/` too. What only the DeepSeek (`src/ds4`) and MiniMax (`src/mm3`) paths
+   use is left out. One CMake project (`build.sh` builds one tree).
+3. **One executable** (`almond-engine`): the model's GGUF / pack says which path runs; the server protocol (GEN,
+   GENI, STOP, LOGP, VLEND ...) is one.
+4. **Our names.** `STRATA_*` / `MAYA_*` environment variables, macros, namespaces and file names become `ALMOND_*` /
+   `almond::`; the configurations already say `ALMOND_*`.
+5. **Shared parts, one at a time, each measured:** the CPU worker pool and its pinning, the expert tiers (VRAM pool,
+   pinned RAM, file reads; the expert profile both can learn from), conversations on disk (DeepSeek's
+   `--conversation-disk` and GLM's slots), the vision encoder's memory lending (GLM's VLEND for DeepSeek's encoder:
+   the ~0.6 GiB it leaves behind today), GLM's image tower inside the engine on Almond's ggml as DeepSeek's is (today
+   `almond-vision`, a separate process on llama.cpp's mtmd at another commit, `build-vision`), power and timing tools.
+6. **Other repositories:** other engines - what each does better for
+   these models, measured here before it goes in.
+
+## Measured
+
+**Step 1, one ggml (2026-10-30).** GLM's engine on Almond's ggml 0.26 (one change: `engines/glm/src/prefill/moe_mmq.cu`
+picks MMQ's tile width `J_best` and passes the src1 precision, as `src/prefill/moe_mmq.cu` does). GLM-5.3-Flash
+GSQ-RCO 3.0bit, `LOGP` on `local/glm-ref/doc512.i32` (510 positions), three runs each (the engine is not
+bit-reproducible run to run):
+
+| ggml | PPL runs | mean |
+| --- | --- | ---: |
+| the pinned 0.24 | 10.4473, 10.3724, 10.4727 | 10.431 |
+| Almond's 0.26 | 10.3646, 10.4876, 10.4328 (10.3262 after the rebuild) | 10.429 |
+
+Server, thinking low, temperature 0, 600 tokens, three prompts (code, Italian, English), two rounds alternated, tok/s:
+0.24 32.2 31.0 30.8 / 32.1 32.7 30.7 (mean 31.6); 0.26 32.4 32.4 30.6 / 31.8 32.0 30.5 (mean 31.6).
+`engines/glm/third_party/llama.cpp` is gone; gguf-py moved to `third_party/llama.cpp/gguf-py`.
+
+**Step 2, the code in `src/` (2026-10-30).** GLM's model, kernels, prompt path, MTP and slots: `src/glm/` (with
+the LICENSE), its own CMakeLists.txt added by the top one, on the top level's prebuilt ggml; the executable
+is `build-hip-fused/almond-glm`. the DeepSeek (`src/ds4`) and MiniMax (`src/mm3`) paths, its tests and
+benches went to the trash. Its Python tools (the pack builder, the hipBLASLt tuner, the image encoder's sources):
+`tools/glm/`. DeepSeek's engine: `tools/v41/engine` -> `src/ds41` (its Python tools in `tools/v41/`). GLM, `almond-glm`:
+PPL 10.4159, 10.4583, 10.2627 (mean 10.379); server tok/s 32.1 33.2 31.5 / 32.1 31.9 30.1 (mean 31.8). DeepSeek's code
+only moved (the binary differs in its source paths).
+
+**Step 3, one executable (2026-10-30).** `build-hip-fused/almond-engine`: DeepSeek's engine target with GLM's path
+linked in (`glm_program`, link-only so each tree keeps its own forced `hip_compat/cuda_runtime.h`); `src/engine_main.cpp`
+runs GLM's path when the arguments name `--glm-pack`, DeepSeek's otherwise. GLM's ggml-cuda host shim is weak, as
+DeepSeek's: ggml-hip's own definitions win. GLM: PPL 10.3034, 10.4309, 10.4771 (mean 10.404); server tok/s 32.1 32.1
+30.7 / 32.4 33.0 31.1 (mean 31.9). DeepSeek: text 20.9-23.9 tok/s, the two pictures read as before.
+
+**Step 4, our names (2026-10-30).** GLM's code: namespace `strata::` -> `almond::glm::`, headers `strata/...` ->
+`almond/glm/...`, macros and environment variables `STRATA_*` / `MAYA_*` -> `ALMOND_*` (`ALMOND_GLM_*` for GLM's),
+CMake targets `strata_*` -> `glm_*`, the image encoder `maya-vision` -> `almond-vision` (`build-vision`); the server no
+longer maps the configurations' names. Prose that says where code came from keeps the and the names, and
+`src/glm/LICENSE` their copyright. GLM: PPL 10.2178, 10.3842, 10.4711 (mean 10.358); server tok/s 31.4 32.2 30.1 /
+32.8 33.4 31.0 (mean 31.8); pictures read, the terzine question closed and answered (2,795 tokens). DeepSeek: text
+19.0-23.8 tok/s, pictures as before.
+# Revisione del motore Almond (2026-10-30)
+
+Revisione in sola lettura di `src/ds41`, `src/glm`, delle parti condivise in `src/` e `include/`, di
+`src/engine_main.cpp`, di `CMakeLists.txt`, di `build.sh` e di come `serve/server.py` usa il protocollo del motore.
+Nessun codice del motore è stato cambiato; nessun server o motore è stato avviato o fermato.
+
+Limiti: il codice conta ~150 000 righe. Ho letto per intero la modifica non committata, `engine_main.cpp`, i CMake,
+`build.sh`, il ciclo `--serve` di DeepSeek nelle parti toccate e il lato server dei comandi; il resto (pool CPU degli
+esperti, flussi GPU, `glm_fast_path.cu`, `generate.cpp` di GLM) l'ho solo campionato. Le gare tra pool CPU e stream
+GPU non sono state verificate: restano da guardare (sotto, "Non coperto").
+
+## Gravità alta
+
+### A1. Un'allocazione fallita delle colonne lascia `Ds41Dense` senza stato, e il server continua
+`src/ds41/ds41_dense.cpp:1089-1139` (`alloc_cols`), `:1142` (`reset_columns`), `:1149` (`set_columns`).
+`alloc_cols` libera prima `nbuf` e `nctx`, scrive `im.NC = NC`, crea i tensori e solo alla fine alloca il buffer. Se
+`ggml_backend_alloc_ctx_tensors` fallisce torna `false` con `NC` già al valore nuovo, tensori senza memoria e grafi
+svuotati. Chi chiama dopo con la stessa larghezza trova `want == im.NC` e `set_columns` torna `true` senza fare nulla.
+- Nella modifica nuova: `open_cache` (`src/ds41/ds41_generate.cpp:1181-1185`) chiama `reset_columns`; se fallisce
+  (la VRAM serve proprio dopo un prompt con immagini) il ciclo `--serve` stampa `ERR VRAM seed failed` e fa
+  `continue` (`:1894`, `:2099`). La richiesta seguente gira su tensori con `data == nullptr`: crash o scritture fuori
+  posto sulla GPU.
+- Già prima: `:1442` (`set_columns(0)` dopo un batch) ha lo stesso effetto se fallisce; `:1290` riprova a metà
+  larghezza e quindi si riprende, ma solo perché la larghezza cambia.
+
+Correzione proposta: in `alloc_cols`, se l'allocazione fallisce, rimettere `im.NC = -1` (così la chiamata dopo
+ricostruisce davvero) oppure ricadere sulla larghezza minima `im.S`; nel ciclo `--serve` non tornare in attesa con lo
+stato a metà.
+
+## Gravità media
+
+### M1. Il rilascio della VRAM dopo le immagini copre solo il percorso con la cache differita
+`src/ds41/ds41_generate.cpp:1179` (`img_prompt`), `:1936`, `:731`.
+`img_prompt` è consumato solo dentro `open_cache`, che in `--serve` gira solo se `defer_vram` (prefill a blocchi o
+`prompt_batch > 1`) e la cache non è già aperta. Con `defer_vram` falso, o con la cache già aperta (percorso a passi,
+`:1893`), il ~1,9 GiB tenuto dal prompt con immagini resta occupato fino al prompt con immagini seguente. Le
+configurazioni in `local/` usano batch, quindi oggi il caso non si vede; va scritto, o il reset va fatto alla fine
+della richiesta GENI invece che in `open_cache`.
+
+Nota sulla modifica: il commento a `alloc_cols` (`:1086-1087`) dice che ogni colonna è scratch di una passata, quindi
+ricostruirle tra il prompt e la decodifica non perde stato; nel percorso DSpark (`:2014`) `open_cache` gira prima della
+coda di passate, che ricrea le sue colonne: corretto. `rdev1` viene riletto (`:1184`) come dopo `set_columns`: corretto;
+non ho trovato altri puntatori a dispositivo presi da `dense` e tenuti tra le richieste (`:1341` lo rilegge ogni volta).
+Manca una misura scritta della VRAM libera prima/dopo (l'opzione `ALMOND_VRAM_TRACE` aggiunta serve a questo).
+
+### M2. `quantize.cu` di ggml compilato due volte nello stesso eseguibile
+`CMakeLists.txt:118` (`almond_mmq`) e `src/glm/CMakeLists.txt:104-106` (`glm_mmq`).
+Cinque simboli globali sono definiti in entrambe le librerie (`quantize_mmq_q8_1_cuda`, `quantize_row_q8_1_cuda`,
+`quantize_mmq_fp4_cuda`, `quantize_scatter_mmq_q8_1_cuda`, `quantize_scatter_mmq_fp4_cuda`; trovati con `nm` sulle
+`.a` in `build-hip-fused`). Il linker prende la prima copia senza avvisare. Oggi la sorgente è la stessa
+(`ALMOND_GGML_DIR`), quindi è innocuo; se un albero cambia flag o patch, un percorso userà in silenzio la versione
+dell'altro. È il primo candidato naturale del passo 5: una sola `almond_mmq` per i due modelli.
+
+### M3. `build.sh` usa `rm -rf`
+`build.sh:25`: `rm -rf "$B.old"; mv "$B" "$B.old"`. Contro la regola del progetto (`gio trash`); cancella senza
+chiedere una vecchia build di ggml (decine di minuti di compilazione).
+
+## Gravità bassa
+
+### B1. Commento di `release_pass` staccato dal suo metodo
+`src/ds41/ds41_dense.hpp:88-91`: la dichiarazione di `reset_columns` è finita tra il commento doc di `release_pass` e
+`release_pass`, quindi il commento ora descrive `reset_columns`. Spostarla sopra il commento.
+
+### B2. Rinomina meccanica che ha rotto le frasi
+- `src/ds41/ds41_dense.cpp:1071` e `src/ds41/glm_trunk.cpp:28`: "llama.cpp's ... say "glm5-next", the "glm5next"" —
+  è sparito il soggetto (prima "project-maya's"). Es.: "the GLM packs' own writer says "glm5next"".
+- `CMakeLists.txt:3`: "Of the Almond libraries this tree started from" e `:31` "left with the Almond tree": qui
+  "Almond" ha sostituito "Strata", che era l'albero d'origine; la frase ora non ha senso.
+- `CMakeLists.txt:12`: indica `--target ds41_generate`; l'eseguibile è `almond-engine` (il target ha ancora il nome
+  vecchio, solo `OUTPUT_NAME` cambia, `:148`).
+- `src/ds41/v41_engine.cmake:1`: "included from tools/ds4/cmake/fork.cmake" — il file non esiste; è incluso da
+  `CMakeLists.txt:135`.
+- `src/ds41/ds41_generate.cpp:14`: "~/AI/Almond/serve/server.py" — il server è `serve/server.py` di questo repo.
+
+### B3. Nomi non ancora Almond
+- `src/ds41/ds41_moe.cpp`: macro e variabili `DS4_MOE_CUDA` (51 occorrenze), `DS4_MOE_MMQ` (7), `DS4_CHECK_LRU`,
+  `DS4_CHECK_GPU`, `DS4_CHECK_READ`, `DS4_TIER_PROF`, `DS4_SERIAL_SEED`, funzioni `ds4_moe*`, `ds4_key_f`.
+  (`DS41_*` per DeepSeek-V4.1 è un nome di modello, non del progetto: va bene.)
+- `include/almond/artifact/ds4_geometry.hpp` (103 occorrenze di `ds4_`).
+- `src/glm/prefill/moe_fused_rdna4.cu:179,402,438`: `-DSTRATA_W_NO_T16`, `-DSTRATA_W_LB`, `-DSTRATA_W_NO_OCC`.
+- `src/glm/LICENSE:4` "the Strata contributors": è un'attribuzione di licenza, va lasciata.
+- `build-hip-fused/src/glm/libstrata_*.a`: librerie vecchie rimaste nella cartella di build (nessun target `strata_*`
+  esiste più nei CMake); da spostare nel cestino con la build, non sono linkate.
+
+### B4. `command()` del server può attribuire una riga vecchia
+`serve/server.py:884-903`. `command()` scarta le righe che non attende ma prende la prima `ERR` come risposta: una
+`ERR` rimasta in coda da una richiesta fermata appena prima diventa il fallimento di `VLEND`. E se scade il timeout,
+la risposta tardiva (`VLENT ...`) resta in coda per la richiesta seguente (che la ignora, ma il prestito della VRAM è
+avvenuto senza che il server lo sappia: il `VRECLAIM` non viene mandato).
+
+### B5. Comandi presenti solo da una parte
+- `VLEND`/`VRECLAIM` e `LOGP` esistono solo nel percorso GLM (`src/glm/program/generate.cpp:3991-4024`); DeepSeek
+  risponde `ERR unsupported command` (`src/ds41/ds41_generate.cpp:1608`). Il server li manda solo con
+  `vision.on_demand: true`, che oggi c'è solo in `local/glm-local-vision.json`; una configurazione DeepSeek con
+  quell'opzione farebbe fallire ogni richiesta con immagini. Conviene rifiutarla all'avvio.
+- `LOGP` non è mai mandato da `serve/server.py`: usato solo da strumenti esterni, o codice morto.
+- `BGEN`/`BGENI` (`serve/server.py:1387`) esistono solo in GLM.
+
+### B6. `engine_main.cpp` cerca `--glm-pack` in tutti gli argomenti
+`src/engine_main.cpp:10`: anche come valore di un'altra opzione. Innocuo oggi; con un `ALMOND_MODEL` o un primo
+argomento `glm`/`ds41` sarebbe esplicito.
+
+### B7. `getenv("ALMOND_VRAM_TRACE")` letto due volte a ogni `open_cache`
+`src/ds41/ds41_generate.cpp:1186-1190`: costa nulla, ma lo stile del file legge le variabili una volta (`static`).
+
+## Duplicati per il passo 5 (docs/ENGINE_PLAN.md)
+
+File con lo stesso percorso in `src/` (DeepSeek) e `src/glm/` (GLM), righe e righe diverse (`diff`):
+
+| file | src/ | src/glm/ | righe diverse |
+|---|---:|---:|---:|
+| core/expert_cache.cpp | 778 | 452 | 340 |
+| core/pinned.cu | 800 | 366 | 496 |
+| platform/memory.cpp | 198 | 76 | 130 |
+| prefill/ggml_cuda_host.cu | 158 | 235 | 169 |
+| prefill/moe_mmq.cu | 358 | 276 | 280 |
+| kernels/cuda/native_mmvq.cu | 2661 | 1493 | 1286 |
+| kernels/cuda/iq_kernels.cu | 3686 | 1293 | 3559 |
+| kernels/cpu/pool.cpp | 916 | 576 | 540 |
+| kernels/cpu/expert.cpp | 633 | 700 | 101 |
+| kernels/cpu/native_expert.cpp | 283 | 375 | 430 |
+| kernels/cpu/expert_layout.cpp | 478 | 236 | 304 |
+| kernels/cpu/q2_avx2.cpp | 271 | 130 | 211 |
+| kernels/cpu/iq_avx2.cpp | 523 | 729 | 926 |
+| kernels/cpu/iq_avx512.cpp | 482 | 409 | 421 |
+
+Più `quantize.cu` di ggml (M2). Le copie vivono in namespace diversi (`almond::` e `almond::glm::`), quindi non c'è
+violazione ODR tra di loro, ma ci sono due pool di thread CPU nello stesso processo (solo uno parte per modello).
+Ordine suggerito, dal più vicino al più lontano: `expert.cpp` (101 righe diverse), `quantize.cu`/`almond_mmq`,
+`platform/memory.cpp`, poi il pool CPU (che il piano mette per primo, ma diverge per 540 righe).
+
+## Non coperto
+- Gare tra il pool CPU degli esperti e gli stream HIP (`src/kernels/cpu/pool.cpp`, `src/ds41/ds41_moe.cpp`,
+  `src/glm/core/expert_source.cpp`): non lette per intero.
+- Percorsi d'errore di `src/glm/core/glm_fast_path.cu` e `src/glm/program/generate.cpp` (16 000 righe).
+- Nessuna misura: la revisione non ha usato le GPU.
+
+## Dopo la revisione: la VRAM che DeepSeek non riprende (2026-10-30, misurato)
+
+Le due 7900 XTX, DeepSeek-V4.1-Flash-1017 RCO, `ALMOND_VRAM_TRACE=1`. Non dipende dalle immagini: qualsiasi prompt
+che passa dal percorso batch (oltre ~128 token nuovi) lascia circa 2,5 GiB occupati sulla scheda 0, e la cache
+degli esperti si riapre in 15,2-15,4 GiB liberi invece di 17,9 (un prompt di testo da 465 token: 17,90 -> 15,44;
+uno con un'immagine, 486 token: 15,24). Le richieste dopo vanno alla stessa velocità (19-21 tok/s), con circa 2,5 GiB
+di esperti in meno in VRAM.
+
+Escluso, una prova ciascuno:
+- le colonne di `Ds41Dense`: ricostruite (`reset_columns`), nessun GiB torna;
+- la pool di ggml-cuda: svuotarla restituisce 0,21 GiB e poi il motore va in crash (illegal memory access); tolto;
+- le allocazioni `hipMalloc` di 1 MiB o più (intercettate con LD_PRELOAD): dopo il batch tengono 2.288 MiB in meno,
+  non di più; nessuna chiamata a `hipMallocAsync`, `hipExtMallocWithFlags`, `hipMallocManaged`, `hipMemCreate`;
+- i moduli di kernel caricati durante il batch (rocBLAS, 4 moduli): ~24 MiB;
+- `HSA_ENABLE_SCRATCH_ASYNC_RECLAIM=1` e `HSA_SCRATCH_SINGLE_LIMIT=256 MiB`: nessun effetto.
+
+Trovato: la memoria torna davvero. La VRAM del processo vista dal kernel (`drm-memory-vram` in `/proc/<pid>/fdinfo`)
+scende di 2,1 GB sulla scheda 0 dopo il batch, e `hipFree` restituisce subito (prova a parte). Il punto è quando:
+all'apertura della cache dopo il batch ci sono 15,44 GiB liberi, all'inizio della richiesta seguente 2,53 GiB restano
+inutilizzati - ggml rende i ~2,4 GiB del batch durante la decodifica, dopo che la cache si è già dimensionata.
+
+Correzione (`ds41_generate.cpp`, `regrow`): la prima richiesta letta a passi dopo un batch, se la scheda 0 ha più di
+1 GiB oltre il margine, riapre la cache una volta in quello spazio. `ALMOND_VRAM_REGROW=0` la spegne. Misurato:
+
+| | VRAM libera scheda 0 | decode tok/s |
+| --- | ---: | ---: |
+| prima di un batch | 0,07-0,59 GiB | 21,6-21,8 |
+| dopo un batch, senza la correzione | 2,5-2,6 GiB | 19-21,5 |
+| dopo un batch (testo, 465 token) o un'immagine, con la correzione | 0,59-0,60 GiB | 20,7-21,9 |
+
+La riapertura costa 1,3-2,9 s una volta (gli esperti ricaricati dalla RAM).
+# Almond: the first multi-model work
+
+Kept for its measurements: how GLM-5.3-Flash first ran inside DeepSeek's engine (a GLM trunk in `src/ds41`, since
+removed: GLM runs on its own path, `src/glm`, 32 tok/s against that trunk's 20.7). The state today:
+[ENGINE_PLAN.md](ENGINE_PLAN.md), [MODELS.md](MODELS.md).
+
+## Rules that stay
+
+- The default path computes every expert the router picks (no route bias, no dropped experts, no lossy skip). A lossy
+  option may exist, opt-in, with its KL against the full model written down.
+- A new feature is opt-in; a default changes only where it measured better, with the numbers.
+- The box: two RX 7900 XTX (ROCm/HIP, gfx1100), Ryzen 9 9900X, 122 GiB RAM, NVMe. NVIDIA-only or Metal-only code is a
+  reference to port, not something to link.
+
+## Models, in order
+
+1. **DeepSeek-V4.1-Flash-1017** (what Almond runs, GSQ-RCO IQ2_XXS pack): unchanged, the reference.
+2. **GLM-5.3-Flash** (321 B, 18 B active): first new model.
+3. **Qwen3.8-Flash-Next** (125 B MoE): second new model. Smaller than the two above: on 48 GB of VRAM plus RAM most of
+   it is in VRAM, so it should be far faster.
+
+## Where each piece comes from
+
+All five sources are MIT. Their code is read and ported by hand; nothing downloaded is run.
+
+| source | what it has | what Almond takes |
+| --- | --- | --- |
+| Almond (ours) | DeepSeek-V4.1 on HIP: VRAM / peer card / RAM arena / NVMe tiers, exact routing, Engram, vision, server | the base: tiers, kernels, server |
+| Almond (../Almond) | DeepSeek-V4.1 engine (`src/dsv41`), Qwen 3.5/3.6 (`src/qwen35`), many kernels, CUDA/HIP/SYCL/Metal | kernels and pack tools where they beat ours; Qwen's layer code as a reference |
+| the GLM engine (../the GLM engine's origin) | GLM-5.3 on HIP (`src/core/glm_*`: fast path, prefill, DFlash, MTP, CPU lane), MiniMax M3.1, Qwen-3.8-Flash-Next (GGUF, text) | GLM's model and attention code (it already runs on this box, an IQ2_S quant / an IQ2_XXS quant); its `TRUNK_KEEP` / `MISS_SKIP` only as opt-in lossy options |
+|  (github.com/Indras-Mirror/a Almond fork) | DeepSeek-V4.1, GLM-5.3, Qwen3.8-Flash-Next, Qwen3.8-27B; NVIDIA only | Qwen3.8-Flash-Next's model code and its numbers as a target; not its GLM defaults (`--route-bias 0.25` + soft prune: lossy) |
+| ds4 (github.com/upstream/ds4) | DeepSeek V4 Flash/PRO, GLM 5.2/5.3, Qwen3.8 Flash Next; Metal and CUDA, ROCm on Strix Halo; exact routing | a small, readable reference for each architecture (attention, router, MTP) to check ours against |
+| llama.cpp (`third_party/llama.cpp/ggml`) | ggml and its HIP kernels (MMQ, MMVQ, flash attention) | stays the kernel base; GGUF readers for the new architectures |
+
+Which piece is "the best" for a model is decided by a measurement on this box, not by the source: each candidate is
+built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the reference) before it becomes a default.
+
+## Phases
+
+1. **Rename** (done): Almond -> Almond, builds, server tests.
+2. **A model interface in the engine.** Split `src/ds41` into what every MoE model shares (the expert tiers:
+   VRAM cache, peer card, RAM arena, NVMe reads; the pool; the sampler; the serve loop) and what is DeepSeek's (MLA /
+   compressed attention, HC mixes, Engram, router). A `Model` with `load`, `prefill`, `decode_step`, `route(layer)`,
+   `expert_layout`; DeepSeek becomes the first implementation. Gate: the same tok/s as Almond (3 alternated runs,
+   Promessi Sposi and 17K) and the same forced-token argmax.
+   **Done (2026-10-29):** `src/ds41/moe_trunk.hpp` (`MoeTrunk`, `TrunkConfig`, `TrunkInfo`, `make_trunk`);
+   `Ds41Dense` implements it; the driver and the conversation stores use only the interface.  Measured with
+   `local/bench-v41/ab-before.sh` (ab-hip-spin.sh's chat flags, power-tune on, forced on the reference streams):
+
+   | arm | 17K, 128 tokens (tok/s) | Promessi Sposi, 300 tokens (tok/s) | argmax diffs (17K / Sposi) |
+   | --- | --- | --- | --- |
+   | Almond | 19.18 / 19.15 / 19.09 | 23.44 / 23.52 / 23.50 | 1 / 2 |
+   | Almond | 19.02 / 19.00 / 19.12 | 23.14 / 23.03 / 23.49 | 1 / 0-2 |
+
+   Within the run-to-run noise (Almond -0.5% / -1.1% on the means, its third round equal); the same diffs.
+3. **GLM-5.3-Flash.** Port the GLM layers onto the interface, experts through Almond's tiers. Read GGUF
+   (GSQ-RCO 3.0bit, 117.5 GB; an IQ2_S quant for comparison). Gate: KL / top-1 against the GLM engine on the same pack, then speed
+   against the GLM engine on this box.
+   **First version done (2026-10-29), exact, not yet fast:** `src/ds41/glm_trunk.cpp` (llama.cpp's glm5-next
+   graph as a MoeTrunk), the experts through Ds41MoeTier (`Ds41FileBlobs` reads llama.cpp's stacked expert tensors;
+   Q4_K down added to the grouped GPU kernel). Checked on GSQ-RCO 3.0bit (`pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF`,
+   117.5 GB, `models/glm53-gsq-rco`) against llama.cpp (c3df4b7, HIP, `llama-perplexity -c 512 --chunks 1`) on the
+   first 512 tokens of `docs/ds4/V41_EXACT_FAST.md`, the second half scored as llama-perplexity scores it:
+
+   | engine | PPL | top-1 |
+   | --- | ---: | ---: |
+   | llama.cpp | 7.1997 (+/- 1.13) | |
+   | Almond | 7.2401 | 0.574 |
+
+   Per-layer sums (`ALMOND_GLM_DEBUG=1` against `llama-eval-callback`, 20 tokens) agree within ~1% through layer 7.
+   Prompt 12.1 tok/s (chunked, --prefill-chunk 64, arena 20 GiB, graphs rebuilt per call, no VRAM cache during the
+   prompt).
+   **Cached decode graphs (2026-10-29):** each layer's graphs are built once and kept (the MLA layers per 256 cells
+   of context), allocated once in their own buffers. Exact: the same PPL to four decimals (10.5520 over all 511
+   tokens, top-1 0.546). Decode, 128-token prompt, 64 tokens, arena 60 GiB, peer card 22 GiB: 2.91 -> 3.58 tok/s;
+   the prompt 2.1 -> 15.0 tok/s. Still slow because only 8.7% of the experts hit VRAM (no GLM rank file) and the peer
+   card computes no rows.
+   **The routed sum on the card (2026-10-29):** `GlmTrunk::routed_dev()` gives the tier a device tensor, so decode
+   takes the tier's `run_to_dev` path, the one where the peer card computes its experts (it computed none before).
+   PPL the same (10.5520). Decode, same command: 3.58 -> 6.04 tok/s (peer 4964 rows over 64 tokens; file reads
+   5973 -> 1009).
+   **Fused HC ops (2026-10-29):** the hyper-connection mixes, Sinkhorn and post through ggml's DeepSeek-V4 ops
+   (`ggml_dsv4_hc_comb/pre/post`, `ggml_dsv41_hc_mixes`; llama.cpp's glm5-next has the same fused path), instead of
+   ~300 stock-op kernels a layer. `ALMOND_GLM_HC_COMPOSITE=1` = the stock ops. PPL 10.5520 -> 10.5312 (top-1 0.546 ->
+   0.548: the fused kernels round differently). `ALMOND_GLM_PROF=1`, 130 tokens: a KDA layer's graph 1.81 -> 1.26 ms,
+   an MLA layer's 2.21 -> 1.32 ms, finish 0.16 -> 0.06 ms; decode 6.45 -> 7.77 tok/s (both with the profiler on).
+   An expert rank from the 17K prompt's routes (`tools/v41/glm_rank.py`, `local/glm-rank.bin`: 30 GiB cover
+   87% of the selections) measured no faster (5.62 against 6.04/5.70 tok/s without), so it is not used: GLM's routing
+   follows the text. The rank's first 35 GiB cover 28.5% of the doc prompt's routes (a uniform pick: ~35%), and the
+   per-expert counts of the two texts (a C++ review, 17K tokens; this markdown, 192) correlate at -0.05 to -0.22 by layer.
+   Where a token goes now (130 tokens, `ALMOND_DEC_PROF=1`): attn_router 41-53 ms, the expert tier 63-78 ms (CPU
+   experts ~31 ms: 210 of the 336 picks a token; 11% VRAM hits), finish 2.6 ms. The trunk's GPU work is ~0.55 ms a
+   layer (rocprofv3) against ~1.0-1.3 ms of wall time: the rest is the dispatch gap of ~80 kernels a layer; ggml's
+   HIP graphs change nothing (`GGML_CUDA_DISABLE_GRAPHS=1`: 1.03 vs 1.05 ms a KDA layer). Missing: the layer-major batch, the next-layer prediction, cached graphs, conversation reuse, the serve
+   path's chat template, the packs (`glm5next`: their GGUF names one key prefix differently, read already).
+   **the engine, vendored (2026-10-29): the GLM path that runs.** The trunk above has a floor: ~45 ms a
+   token of attention and router alone, where the whole token on this box is ~28 ms (an IQ2_S quant, 82% VRAM
+   hits, `NOTES-AMD-2x7900.md`). Its engine reads our GGUF as it is, through its pack (`local/glm-pack.sh`, 1 GB, a few
+   seconds), so it is vendored instead of ported piece by piece: `engines/glm` (the GLM engine v1.1.37, 7ee8f27, MIT,
+   with its pinned ggml), built by `./build.sh` into `build-maya-hip/glm`, served by Almond's server through
+   `tools/glm/serve/serve_glm.py` (GLM's `<arg_key>` tool calls translated into the server's form, as serve_ds41.py
+   does for DSML) and `./run.sh --model glm` (`local/glm-local.json`, 128K context). It splits the layers over the two
+   cards (0-22 / 23-44), each card's experts in its own LRU pool (~4300 slots), a pinned RAM tier and a CPU lane.
+   Exact routing (no `TRUNK_KEEP`). Same GGUF, the 512-token doc, 510 positions scored:
+
+   | engine | PPL | top-1 | second half |
+   | --- | ---: | ---: | ---: |
+   | llama.cpp | | | 7.1997 |
+   | Almond trunk (above) | 10.3334 | 0.547 | 7.2401 |
+   | the engine | 10.3788 | 0.545 | 7.0003 |
+
+   (KL from the Almond trunk 0.063 mean, 0.035 median; argmax agree 88.4%.) Decode, 128-token prompt, 130 tokens,
+   greedy, a cold start: 7.77 -> 20.71 tok/s (VRAM hits 11% -> 66%, CPU experts 210 -> 97 a token). Through the
+   server (`./run.sh --model glm`, power-tune on, thinking off, 700 tokens of code three times): 21.1, 25.1, 25.4
+   tok/s; a short Italian answer 24.7 then 28.8 (85% hits). Tool calls (OpenAI, streamed, the tool's result back),
+   Anthropic thinking: checked by hand. The Almond trunk (`--trunk glm` in ds41_generate) stays as the reference.
+   **MTP drafts (2026-10-29, on by default):** the GSQ-RCO GGUF has no draft block (nextn 0); an IQ2_S quant
+   has one (blk.45, NextN), and the engine takes a block from another quant of the same model (`STRATA_GLM_MTP_GGUF`:
+   it reads the trunk's hidden state and the embedding). `local/glm-mtp-extract.py` copies blk.45 out of an IQ2_S quant's third
+   shard into `models/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf` (3.6 GB, 29 tensors), and `local/glm-local.json`
+   names it. The second card drafts, the first verifies. Server, power-tune on, temperature 0, thinking off, 600
+   tokens each, a fresh start each arm (three times the same code prompt, an Italian history prompt, an English
+   explanation):
+
+   | arm | code 1 | code 2 | code 3 | Italian | English | drafts accepted |
+   | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+   | no drafts | 23.6 | 26.3 | 26.3 | 27.3 | 25.6 | |
+   | an IQ2_S quant's shard | 29.8 | 36.1 | 36.2 | 33.5 | 28.5 | 82.1% |
+   | the extracted block | 24.7 | 35.7 | 35.8 | 32.3 | 27.8 | 81.3% |
+   | the same, default config | 29.9 | 36.4 | 35.5 | 33.4 | 29.8 | 82.6% |
+
+   (tok/s.) Greedy output is not token for token the one without drafts: on the 128-token doc the two part at token
+   12, "64" against "128" (a near tie: the verify window's batched kernels round differently from the one-token
+   path, as the prompt path does). Tool calls checked again with drafts on (3 of 3, the integer argument typed).
+   **The expert profile (2026-10-29, on by default):** the engine starts each card's VRAM pool from a profile (the
+   most routed experts first, and each layer's share of slots) and saves what it routed into it on quit and every
+   10 minutes; the pools stay LRU while it runs. `local/glm-local.json` passes `--expert-profile` and
+   `--expert-profile-save` on `local/glm-expert-profile.bin`, which run.sh seeds with its shipped
+   (`engines/glm/data/expert-profile-glm.bin`). A fresh start each arm, six 600-token requests (temperature 0,
+   thinking off, MTP on), tok/s:
+
+   | arm | 1st | 2nd | 3rd | 4th | 5th | 6th | mean |
+   | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+   | no profile | 24.1 | 33.8 | 26.2 | 38.1 | 34.3 | 27.7 | 30.7 |
+   | the | 31.9 | 34.1 | 37.2 | 38.1 | 34.6 | 28.3 | 34.0 |
+   | learning, first start | 32.1 | 33.8 | 38.0 | 37.9 | 33.4 | 27.5 | 33.8 |
+   | no profile, another first prompt | 31.2 | 33.0 | 37.3 | 36.2 | 33.8 | 25.9 | 32.9 |
+   | learned, the same | 30.8 | 33.9 | 38.8 | 38.2 | 35.2 | 28.1 | 34.2 |
+
+   (One run an arm: +4-11% on the mean, most of it in the first answers after a start.)
+4. **Qwen3.8-Flash-Next**, the same way (Almond and ds4 as references).
+5. **The server stays in Python** (`serve/`, ~9,900 lines: OpenAI / Anthropic API, streaming, chat templates, tool
+   calls, web app, MCP, the engine's process). A token's time is all in the engine; the server only moves text and
+   JSON, so rewriting it would change no tok/s. Each new model adds its chat template and tool-call format here. If one
+   day Almond is to ship as a single binary with no `.venv`, a Go server can replace it endpoint by endpoint over the
+   same stdin/stdout protocol (Go over C++: far less code for HTTP, SSE, JSON and templates), with the Python tests
+   turned into Go tests on the same fixtures.
+
+## Open questions
+
+- Engine binary: one `almond` with `--model deepseek41|glm53|qwen38`, or one binary per model sharing libraries.
+- GLM pack: GSQ-RCO 3.0bit GGUF directly, or the pack format.

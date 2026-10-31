@@ -126,8 +126,14 @@ llama-perplexity scores, the second half of the chunk), three runs:
 | llama.cpp | 7.1997 |
 | Almond | 7.1433, 7.0977, 7.0221 |
 
-The same within the engine's run-to-run spread. Copying numbers (40 random sizes, five copies at temperature 1.0):
-0 wrong of 200 with MTP off, 0 of 200 with MTP on on a fresh server and 0 of 200 after replaying an agent session;
-one earlier copy on a long-running server wrote "O" for "0" six times (6 of 520 with MTP on in all). The digits GLM
-garbled in agent sessions (47G read as 447G, 185G written as 1.8 TB) are the model's, not the engine's; the agent's
-system prompt (`AGENT_PROMPT`) asks it to keep figures as the tools print them.
+The same within the engine's run-to-run spread; at 8K too (llama.cpp 5.9528, Almond 5.9706 / 6.0006 / 6.0123 on the
+first 8192 tokens of `local/glm-ref/long-docs.txt`, `local/glm-ref/logp.py`).
+
+**The figures GLM garbled were ours: the tokenizer (2026-10-31).** Copying 40 sizes after ~10K tokens of text
+(`local/glm-ref/copytest.py 8163 5 10000`, temperature 1.0, five runs, each prompt read anew): Almond 41 of 200 wrong
+with MTP, 21 of 200 without; llama.cpp's server on the same file and template 0 of 200, and its prompt 12,471 tokens
+against Almond's 13,153. The server tokenized GLM with the default `qwen35` pre-split, one digit a token, where the
+GGUF says `glm4`: digits in runs of up to three (`\p{N}{1,3}`) and whole-piece tokens before the merges
+(llama.cpp's `ignore_merges`). With `glm4` (`tools/almond_tokenizer.py`, `GlmTokenizer` in `serve_glm.py`) the ids are
+llama.cpp's on 7 files, ~300K tokens (README and docs, Python, C++), the prompt is 12,471 tokens, and the copy is
+0 of 200 wrong at ~12K, 0 of 120 short. The conversation caches built with the old ids are read again once.

@@ -121,6 +121,19 @@ def budget_effort(tokens) -> dict:
     return {"reasoning_effort": "low" if n < 2048 else "high" if n < 8192 else "max"}
 
 
+# ---- tokenizer: the server builds ST.Tokenizer(tokens, merges, types); GLM's pre-split is glm4 (digits in threes),
+# not the default qwen35 (one digit a token), as the GGUF says (tokenizer.ggml.pre = glm4)
+import almond_tokenizer as ST  # noqa: E402
+_Tok = ST.Tokenizer
+
+
+class GlmTokenizer(_Tok):
+    def __init__(self, tokens, merges, token_types=None, pre="glm4", **k):
+        super().__init__(tokens, merges, token_types, pre="glm4", **k)
+
+
+ST.Tokenizer = GlmTokenizer
+
 for mod in (F, S):
     if hasattr(mod, "effort_kwargs"):
         mod.effort_kwargs = effort_kwargs

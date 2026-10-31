@@ -82,11 +82,29 @@ JOYAI_LLM_PATTERNS = [
      r"|\s+"),
 ]
 
+# The `glm4` / `glm5` pre-tokenizer (GLM-5.3-Flash), from llama.cpp's llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_CHATGLM4):
+# digits in runs of up to three (`\p{N}{1,3}`: 58203938 is 582|039|38), where qwen35 cuts every digit alone - with
+# qwen35 the model read numbers split as it never saw them in training (a prompt 5% longer, and figures copied wrong
+# at 13K of context: 21-41 of 200 against 0 of 200 through llama.cpp, 2026-10-31).  llama.cpp also sets
+# ignore_merges for it: a piece that is a token as it stands is that token, without the merges (IGNORE_MERGES).
+GLM4_PATTERN = (
+    r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])"
+    r"|[^\r\n\p{L}\p{N}]?\p{L}+"
+    r"|\p{N}{1,3}"
+    r"| ?[^\s\p{L}\p{N}]+[\r\n]*"
+    r"|\s*[\r\n]+"
+    r"|\s+(?!\S)"
+    r"|\s+"
+)
+
 # pre type -> the pattern list llama.cpp applies, in order.  The `pre` string in GGUF metadata selects it.
 PRE_PATTERNS = {
     "qwen35": [QWEN35_PATTERN],
     "joyai-llm": JOYAI_LLM_PATTERNS,
+    "glm4": [GLM4_PATTERN],
+    "glm5": [GLM4_PATTERN],
 }
+IGNORE_MERGES = {"glm4", "glm5"}
 
 
 class Tokenizer:
@@ -268,7 +286,8 @@ class Tokenizer:
             if got is None:
                 mapped = "".join(BYTE_TO_UNICODE[b] for b in piece.encode("utf-8"))
                 got = []
-                for tok in self._bpe(mapped):
+                whole = self.ids.get(mapped) if self.pre in IGNORE_MERGES else None
+                for tok in ([mapped] if whole is not None else self._bpe(mapped)):
                     i = self.ids.get(tok)
                     if i is None:
                         raise KeyError("BPE produced a token outside the vocabulary: %r" % tok)
