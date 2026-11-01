@@ -318,9 +318,12 @@ struct Options {
     /// --serve: a prompt read from token 0 is also checkpointed at its first turn boundary - the end of the system
     /// prompt, which every chat of the same client shares - when that is at least N tokens (0 = never)
     int64_t prompt_cache_root = 2048;
-    /// --serve: the token that opens a chat turn (<|im_start|>).  The last one in a prompt is where the chat's
-    /// history ends and the new assistant turn begins, which is the checkpoint the next request can reuse.
-    int64_t turn_token = 248045;
+    /// --serve: the token that opens a user turn: GLM-5.3's <|user|> (154827).  The last one in a prompt is where the
+    /// chat's history ends, which is the checkpoint the next request can reuse: an agent's tool steps all extend it,
+    /// and a new user message (which drops the turn's reasoning: clear_thinking) reads again from there.  It was
+    /// Qwen's <|im_start|> (248045), not in GLM's vocabulary: no turn checkpoint was ever taken, and a message sent
+    /// mid-turn read 23,969 of 33,398 tokens again (2026-11-01).
+    int64_t turn_token = 154827;
     /// --serve: a text part of the prompt of at most N tokens (a chat message, the assistant header, a short tool
     /// result) goes through the verify windows, S tokens at a time, instead of the batched prompt path (0 = always
     /// the batched path)
@@ -441,7 +444,7 @@ void usage() {
                  "  --prompt-cache N     --serve: keep N conversation checkpoints between requests (default 6, ~118 MB\n"
                  "                       of RAM each; 0 = read every prompt from the start)\n"
                  "  --prompt-cache-every N  --serve: also checkpoint every N fresh prompt tokens (default 16384, 0 = off)\n"
-                 "  --turn-token ID      --serve: the token that opens a chat turn (default 248045, <|im_start|>)\n"
+                 "  --turn-token ID      --serve: the token that opens a user turn (default 154827, GLM's <|user|>)\n"
                  "  --short-read N       --serve: read at most N fresh text tokens through the decode windows instead\n"
                  "                       of the batched prompt path (default 64, 0 = off)\n"
                  "  --suffix-draft N     prompt lookup: draft from an earlier repeat of the last N+ tokens of context\n"
