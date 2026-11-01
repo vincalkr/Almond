@@ -5366,11 +5366,22 @@ def make_handler(svc: Service):
                 return self._json(200, openai_collect(chunks))
             self._sse()
             try:
+                last, head = time.monotonic(), None
                 for c in chunks:
                     if c is None:
-                        self.wfile.write(b": keep-alive\n\n")      # an SSE comment: clients ignore it
+                        # an idle timeout that counts events, not SSE comments (dsh's pi-ai: 300 s), would end a long
+                        # prompt's read: every 15 s an empty delta of this reply, which clients pass over
+                        if head is not None and time.monotonic() - last >= 15:
+                            idle = {k: head[k] for k in ("id", "object", "created", "model") if k in head}
+                            idle["choices"] = [{"index": 0, "delta": {}, "finish_reason": None}]
+                            self.wfile.write(b"data: " + json.dumps(idle).encode() + b"\n\n")
+                            last = time.monotonic()
+                        else:
+                            self.wfile.write(b": keep-alive\n\n")      # an SSE comment: clients ignore it
                     else:
+                        head = head or c
                         self.wfile.write(b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n")
+                        last = time.monotonic()
                     self.wfile.flush()
                 self.wfile.write(b"data: [DONE]\n\n")
             except OSError:
@@ -5576,10 +5587,16 @@ def make_handler(svc: Service):
                 return self._json(200, anthropic_collect(events))
             self._sse()
             try:
+                last = time.monotonic()
                 for item in events:
                     if item is None:
-                        self.wfile.write(b": keep-alive\n\n")
+                        if time.monotonic() - last >= 15:      # Anthropic's own ping event: an event, not a comment
+                            self.wfile.write(b'event: ping\ndata: {"type": "ping"}\n\n')
+                            last = time.monotonic()
+                        else:
+                            self.wfile.write(b": keep-alive\n\n")
                     else:
+                        last = time.monotonic()
                         name, e = item
                         self.wfile.write(f"event: {name}\n".encode() + b"data: " +
                                          json.dumps(e, ensure_ascii=False).encode() + b"\n\n")
