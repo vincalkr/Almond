@@ -3867,6 +3867,7 @@ class Service:
                         recover_prompt = None
                         seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed
                         opens = False                   # the thinking is over: write the forced call's opening
+                        quiet = time.monotonic()        # the last event out: tokens the parser holds send nothing
                         try:
                             for t in gen:
                                 if t is None:               # heartbeat while the engine is quiet
@@ -3899,7 +3900,13 @@ class Service:
                                         reasoning_text += ev.text or ""
                                     if ev.kind in ("content", "tool_start", "tool_call"):
                                         answered = True
+                                    quiet = time.monotonic()
                                     yield "event", ev
+                                if not evs and time.monotonic() - quiet >= 10:
+                                    # tokens are coming but the parser holds them (a call written inside the
+                                    # thinking): a heartbeat, so a client's idle timeout does not end the reply
+                                    quiet = time.monotonic()
+                                    yield "ping", None
                                 if stops is not None and stops.hit is not None:
                                     finish = "stop"         # gen.close() below STOPs the engine, as for a stop token
                                     break
