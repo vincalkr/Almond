@@ -22,7 +22,7 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   `local/fetch-model.sh`) or the pack's iq4_nl table (110.6 GB, `local/fetch-rco-1017.sh`), which the engine falls
   back to; both measured (docs/ds4/V41_EXACT_FAST.md).
 - GLM: `local/glm-local.json` (`local/glm-local-vision.json` with its encoder in `models/glm53-vision`).
-- The model files live in `models/` (a symlink to `../ds41e/models`); `local/fetch.sh` downloads and prepares them,
+- The model files live in `models/`, inside this folder (gitignored); `local/fetch.sh` downloads and prepares them,
   `./setup.sh` walks a new installation.
 
 ## Working on the code
