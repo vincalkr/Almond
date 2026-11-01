@@ -3894,6 +3894,10 @@ class Service:
                                 tail = (tail + piece)[-2:]
                                 evs = cut(parser.feed(piece))
                                 self._note(n, evs, st, rate)
+                                if parser.state == "rcall":     # a call written inside the thinking, held until it ends
+                                    with self.status_lock:
+                                        (self.status if st is None else st)["phase"] = \
+                                            f"writing a tool call inside the thinking ({len(parser.buf) / 1024:.1f} KB held)"
                                 last_print = self._progress(last_print, st=st)
                                 for ev in evs:
                                     if self.reasoning_loop_recovery and ev.kind == "reasoning":
