@@ -1135,6 +1135,8 @@ class AlmondEngine:
                     self.progress = (int(f[1]), int(f[2]))
                     self.progress_ms = float(f[3]) if len(f) >= 4 else 0.0
                     self.prefill_tok_s_mean = float(f[4]) if len(f) >= 5 else None
+                    if len(f) >= 6 and f[5].isdigit() and not self.reused:   # GLM's PP: where the read resumed
+                        self.reused = int(f[5])
                 if not stopped and cancel.is_set():
                     # #879: a Stop during the prompt read went out only after the first token (or after 10 s of
                     # silence, which a stream of PP lines never allows): the engine read the whole prompt first
@@ -1646,6 +1648,8 @@ class AlmondEngine:
                         self.progress = (int(f[1]), int(f[2]))             # prompt progress, one per chunk: also a heartbeat (the
                         self.progress_ms = float(f[3]) if len(f) >= 4 else 0.0
                         self.prefill_tok_s_mean = float(f[4]) if len(f) >= 5 else None
+                        if len(f) >= 6 and f[5].isdigit() and not self.reused:   # GLM's PP: where the read resumed
+                            self.reused = int(f[5])
                         rate, chunk = self.prefill_tok_s_mean or 0.0, int(f[1]) - read_to
                         read_to = int(f[1])
                         if silence > 0 and rate > 0 and chunk > 0:   # #481: the next chunk, as long as this one
@@ -3749,7 +3753,12 @@ class Service:
         if s.get("first_token") is None:
             pr = getattr(self.engine, "progress", None)   # (position reached, prompt tokens): a reused prefix counts
             done = f"{pr[0]:,} of {pr[1]:,}" if pr and pr[1] else f"{s.get('prompt_tokens', 0):,}"   # as read (#29)
-            print(f"[{s.get('effort') or 'almond'}] reading the prompt: {done} tokens, {el:.0f} s so far", flush=True)
+            rate = getattr(self.engine, "prefill_tok_s_mean", None)   # the new tokens' speed, from the engine's PP lines
+            speed = f", {rate:,.0f} tok/s" if rate else ""
+            reused = getattr(self.engine, "reused", 0) or 0       # from the conversation cache: not read again
+            cache = f", {reused:,} from the cache" if reused else ""
+            print(f"[{s.get('effort') or 'almond'}] reading the prompt: {done} tokens{cache}{speed}, {el:.0f} s so far",
+                  flush=True)
         else:
             rate = s["generated"] / max(1e-6, now - s["first_token"])
             print(f"[{s.get('effort') or 'almond'}] {s['phase']}: {s['generated']} of max {s.get('max_tokens')} tokens, {rate:.1f} tok/s, "
