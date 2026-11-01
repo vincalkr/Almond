@@ -3765,27 +3765,9 @@ class Service:
                   f"{el:.0f} s", flush=True)
         return now
 
-    def _prompt_diff(self, ids):
-        """A prompt that shares much less with the previous one than that one's length: where the two part, with the
-        text on each side, in the server window - what changed early in a conversation (a client rewriting an
-        earlier message, a template dropping earlier reasoning) and so is read again from there."""
-        prev, self._last_ids = getattr(self, "_last_ids", None), list(ids)
-        if not prev or len(prev) < 4000 or len(ids) < 4000:
-            return
-        n = min(len(prev), len(ids))
-        k = next((i for i in range(n) if prev[i] != ids[i]), n)
-        if k >= 0.9 * n:
-            return
-        show = lambda t: self.tok.decode(list(t)).replace("\n", "\\n")[:160]   # noqa: E731
-        print(f"[almond] the prompt parts from the previous one at token {k:,} of {len(ids):,} "
-              f"(the previous {len(prev):,}): before ...{show(ids[max(0, k - 40):k])[-120:]}", flush=True)
-        print(f"[almond]   was: {show(prev[k:k + 40])}", flush=True)
-        print(f"[almond]   now: {show(ids[k:k + 40])}", flush=True)
-
     def run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
-        self._prompt_diff(ids)
         defaults = {**self.sampling_defaults, **self.shared}   # the config's, then the Chat settings shared with apps
         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
