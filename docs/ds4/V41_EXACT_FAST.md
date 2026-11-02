@@ -371,3 +371,21 @@ bash local/eval-lucebox/run-eval.sh TAG          # quality; MODEL / RANK / ENGRA
 `test_ds41_geometry <shard 1>` with the overlay, `test_ds41_engram`, `test_ds41_dense <shard 1> --engram <tables>` on
 the CPU, `bench_ds41_engram ... --check 200`, the server tests (`.venv/bin/python -m unittest discover -s serve -p
 "test_*.py" -t .`) and `check_conv_reuse.py` for anything that touches conversation reuse.
+
+## Skipping light misses in decode (`--skip-miss`, 2026-11-02)
+
+exllamav3-rocm-moe skips the CPU-resident experts a token ranks lowest ("tail skip": +24% code decode on Qwen3.8-Flash-
+Next there). This engine's equivalent is `--skip-miss F`: a routed expert that is not in VRAM and weighs under F of the
+token's six weights is not computed (its share dropped). `local/bench-v41/ab-skip-miss.sh`, two cards, the chat flags,
+forced on one reference stream with the decode NLL (`ALMOND_DEC_NLL`), Promessi Sposi 300 tokens, two rounds (the first
+base run cold):
+
+| | s, rounds 1 / 2 | tok/s (round 2) | decode PPL of the forced text | argmax differs |
+| --- | ---: | ---: | ---: | ---: |
+| exact | 16.58 (cold) / 14.13 | 21.2 | 1.0905 / 1.0932 | 5 / 6 |
+| `--skip-miss 0.05` | 14.59 / 14.19 | 21.1 | 1.0995 | 7 |
+| `--skip-miss 0.10` | 14.45 / 13.81 | 21.7 | 1.1094 | 6 |
+| `--skip-miss 0.15` | 13.11 / 13.29 | 22.6 | 1.0996 | 11 |
+
++7% at 0.15 for +0.6-0.8% decode PPL and twice the changed argmaxes: with 84% of the picks in VRAM the CPU is a small
+part of a token here. Off, as before.
