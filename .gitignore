@@ -134,3 +134,4 @@ local/glm-ref/huge17k.txt
 local/glm-ref/long-it.txt
 local/glm-ref/short.txt
 tools/__pycache__/
+local/sweep-*/ref-*.ids
