@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Almond is a multi-model MoE engine for AMD RX 7900 XTX cards (ROCm/HIP): DeepSeek-V4.1-Flash-1017 (the published
-GSQ-RCO IQ2_XXS pack) and GLM-5.3-Flash (GSQ-RCO 3.0bit), their experts across card 0, a second 24 GB card, pinned RAM
+GSQ-RCO IQ2_XXS pack) and GLM-5.3-Flash (GSQ-RCO 3.5bit), their experts across card 0, a second 24 GB card, pinned RAM
 and NVMe. One C++/HIP executable, `build-hip-fused/almond-engine` (DeepSeek's path in `src/ds41`, GLM's in `src/glm`
 when its arguments name `--glm-pack`, the shared libraries in `src/` and `include/`); an OpenAI- and
 Anthropic-compatible server (`serve/`, started per model by `tools/v41/serve/serve_ds41.py` or

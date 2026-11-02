@@ -32,7 +32,7 @@ Beyond the API (in the configuration, not DeepSeek's):
 
 `ALMOND_DS41_FREE_SAMPLING=1` passes a request's sampling through as it is (measurements).
 
-## GLM-5.3-Flash (GSQ-RCO 3.0bit, the engine)
+## GLM-5.3-Flash (GSQ-RCO 3.0bit until 2026-11-02, then 3.5bit; the engine)
 
 Source: Z.ai's API reference (docs.z.ai, chat completions, the GLM-5.3-Flash series); the GGUF's
 `general.sampling.temp` 1.0 and `general.sampling.top_p` 0.95 say the same.
@@ -147,8 +147,9 @@ symbols, tabs and runs of spaces); GLM's (`glm4`) the same on those and on the m
 
 The same author's 3.5-bit build (`pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF`, 137.07 GB against 117.48; the card says
 +4.49% PPL over Q8_0 against +9.07%, KL 0.071 against 0.142). `local/glm-pack.sh 3.5` makes its pack
-(`models/glm53-gsq-rco/pack-3.5`), `./run.sh --model glm35` runs it (`local/glm-local-3.5*.json`: its own expert
-profile, kept slots and log). On the two 7900 XTX, power-tune on: 35.5 GB of experts on the cards as with 3.0, 84.6 GB
+(`models/glm53-gsq-rco/pack-3.5` then). It is GLM's model since 2026-11-02: the 3.0bit GGUF, its pack and kept
+slots went to the trash, and `local/glm-pack.sh`, `local/fetch.sh glm`, `./run.sh --model glm` take the 3.5bit
+(the expert profile it learned in these runs kept). On the two 7900 XTX, power-tune on: 35.5 GB of experts on the cards as with 3.0, 84.6 GB
 pinned in RAM (76 with 3.0), the rest read from the NVMe.
 
 | | 3.0 bit | 3.5 bit |

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The draft (NextN / MTP) block of GLM-5.3-Flash, blk.45.*, out of a GGUF that has one (an IQ2_S quant, its
-third shard) into a GGUF of its own: the GSQ-RCO 3.0bit GGUF was published without it, and the engine takes one from
+third shard) into a GGUF of its own: the GSQ-RCO GGUFs were published without it, and the engine takes one from
 another quant of the same model (STRATA_GLM_MTP_GGUF, src/glm/core/glm_model.cu: the block reads the trunk's
 hidden state and the embedding, so any quant's block fits).  The metadata is copied as it is; only blk.45's tensors.
 

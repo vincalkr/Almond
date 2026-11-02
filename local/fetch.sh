@@ -28,7 +28,7 @@ desc() {
         deepseek)            echo "DeepSeek-V4.1-Flash-1017, GSQ-RCO IQ2_XXS pack + Engram IQ4_NL (ISTA-DASLab)   ~249 GB";;
         deepseek-vision)     echo "DeepSeek image encoder (built from the 1017 checkpoint's vision tower)          0.9 GB";;
         deepseek-engram-fp8) echo "DeepSeek Engram, the checkpoint's FP8 rows (optional; ~570 GB while extracting) 203 GB";;
-        glm)                 echo "GLM-5.3-Flash GSQ-RCO 3.0bit (pfeifferj) + its pack                           117 GB";;
+        glm)                 echo "GLM-5.3-Flash GSQ-RCO 3.5bit (pfeifferj) + its pack                           137 GB";;
         glm-mtp)             echo "GLM MTP draft block (from an IQ2_S quant's shard 3, 20.5 GB download, kept 3.6 GB)";;
         glm-vision)          echo "GLM image encoder (mmproj F16 + vocab)                                               1.1 GB";;
     esac
@@ -38,7 +38,7 @@ files() {   # the files that make the item present
         deepseek)            echo "$DS_SHARDS"; echo "$M/rco-iq2xxs/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf";;
         deepseek-vision)     echo "$M/vision-1017/DeepSeek-V4.1-Flash-1017-Vision.gguf";;
         deepseek-engram-fp8) echo "$M/engram-1017/layers1/engram-L1.safetensors"; echo "$M/engram-1017/layers14/engram-L14.safetensors";;
-        glm)                 echo "$M/glm53-gsq-rco/GLM-5.3-Flash-GSQ-RCO-3.0bit.gguf"; echo "$M/glm53-gsq-rco/pack";;
+        glm)                 echo "$M/glm53-gsq-rco/GLM-5.3-Flash-GSQ-RCO-3.5bit.gguf"; echo "$M/glm53-gsq-rco/pack";;
         glm-mtp)             echo "$M/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf";;
         glm-vision)          echo "$M/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf"; echo "$M/glm53-vision/GLM-5.3-Flash-vocab.gguf";;
     esac
@@ -75,7 +75,7 @@ fetch() {
         deepseek-vision)     [ "$DRY_RUN" = 1 ] || { mkdir -p "$M/vision-1017"
                              "$PY" "$R/tools/v41/vision/make_vision_gguf.py" --out "$M/vision-1017/DeepSeek-V4.1-Flash-1017-Vision.gguf"; };;
         deepseek-engram-fp8) DRY_RUN=$DRY_RUN VISION=0 CONN=$CONN "$R/local/fetch-model.sh";;
-        glm)                 get $GLM_REPO GLM-5.3-Flash-GSQ-RCO-3.0bit.gguf "$M/glm53-gsq-rco/GLM-5.3-Flash-GSQ-RCO-3.0bit.gguf"
+        glm)                 get $GLM_REPO GLM-5.3-Flash-GSQ-RCO-3.5bit.gguf "$M/glm53-gsq-rco/GLM-5.3-Flash-GSQ-RCO-3.5bit.gguf"
                              [ "$DRY_RUN" = 1 ] || [ -n "$(ls -A "$M/glm53-gsq-rco/pack" 2>/dev/null)" ] ||
                                  sh "$R/local/glm-pack.sh";;
         glm-mtp)             [ -s "$M/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf" ] && { echo "have   GLM-5.3-Flash-NextN.gguf"; return; }

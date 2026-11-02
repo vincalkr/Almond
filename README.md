@@ -10,7 +10,7 @@ Anthropic-compatible server, a router that serves every model at one address, an
   (IQ2_XXS/IQ2_XS/IQ1_M experts, four shards, 138.2 GB), read through the geometry overlay `DS41_META` because its
   GGUF carries llama.cpp metadata instead of this engine's `deepseek41.*` keys. Every expert the model routes to is
   computed (no route bias), wherever it is: card 0's VRAM, the second card, an 80 GiB pinned RAM arena, or the NVMe.
-- **GLM-5.3-Flash** as the GSQ-RCO 3.0bit pack (117 GB) with its MTP draft block (`src/glm`).
+- **GLM-5.3-Flash** as the GSQ-RCO 3.5bit pack (137 GB) with its MTP draft block (`src/glm`).
 
 How each model is set up and measured: [docs/MODELS.md](docs/MODELS.md); the one-engine work:
 [docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md).
@@ -33,8 +33,9 @@ Quality on Lucebox's held-out set (8 x 1024 tokens, exact routing): ppl 10.37 wi
 10.33 with the pack's own iq4_nl table (KL 0.026 between the two); the FP8 1017 checkpoint itself reads 8.56. Every
 number and how it was measured: [docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md).
 
-GLM-5.3-Flash, the same machine, through the server (thinking low, 600 tokens, three prompts, two rounds): 31.8 tok/s
-decode; PPL 10.36-10.43 on `local/glm-ref/doc512.i32` (docs/ENGINE_PLAN.md).
+GLM-5.3-Flash (GSQ-RCO 3.5bit), the same machine, through the server (thinking low, 600 tokens, three prompts, two
+rounds): 27.5 tok/s decode; PPL 13.38-13.43 over 4,080 tokens of `local/glm-ref/long-docs.txt`, 4.3% under the 3.0bit
+build it replaced (docs/MODELS.md).
 
 ## Requirements
 
@@ -44,7 +45,7 @@ decode; PPL 10.36-10.43 on `local/glm-ref/doc512.i32` (docs/ENGINE_PLAN.md).
 | GPU | RX 7900 XT / XTX (`gfx1100`); a second 24 GB card is used as an expert tier when present |
 | RAM | 128 GB class (the engine holds ~94 GB with the 80 GiB arena) |
 | CPU | x86-64 with AVX2 (AVX-512 used when present) |
-| disk | on an NVMe for `models/`: DeepSeek ~250 GB (138 GB pack in four shards + 111 GB Engram GGUF + 0.9 GiB image encoder; the checkpoint's own FP8 Engram rows instead of that GGUF are 203 GB), GLM ~122 GB (pack, MTP block, image encoder) |
+| disk | on an NVMe for `models/`: DeepSeek ~250 GB (138 GB pack in four shards + 111 GB Engram GGUF + 0.9 GiB image encoder; the checkpoint's own FP8 Engram rows instead of that GGUF are 203 GB), GLM ~142 GB (the 3.5bit GGUF, MTP block, image encoder) |
 | tools | `cmake` >= 3.24, gcc, Python 3, curl, `aria2c` (faster downloads) |
 
 ## Quick start
