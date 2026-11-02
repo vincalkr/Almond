@@ -161,3 +161,21 @@ pinned in RAM (76 with 3.0), the rest read from the NVMe.
 One window of 255 tokens (`doc512`) read 7.38-7.43 against 3.0's 7.02-7.14: one short document does not tell two
 builds this close apart. Open: an 8K-token `LOGP` on the 3.5-bit model stopped in "returning the expert pool's tail"
 (the engine's 180 s watchdog); a 12K prompt through the server read fine.
+
+## GLM: leaving light misses out of the late layers (`ALMOND_GLM_MISS_SKIP_W`, 2026-11-02)
+
+A routed expert not in VRAM whose share of the route's weights is under W is not computed, on layers from
+`ALMOND_GLM_MISS_SKIP_FROM` on (the engine's option, from project-maya; the same idea as exllamav3-rocm-moe's tail skip).
+GSQ-RCO 3.5bit, two 7900 XTX, power-tune on, `local/glm-ref/ab-miss-skip.sh`: decode through the server
+(`speed.py`, 2 rounds of 3 prompts) and the PPL of 16 windows of 512 tokens of `long-docs.txt` (4,080 tokens; run to
+run the exact model read 13.38-13.44):
+
+| | tok/s | PPL |
+| --- | ---: | ---: |
+| exact | 25.9 | 13.44 |
+| W 0.12, layers 23+ | 32.1 (+24%) | 13.48 (+0.3%) |
+| W 0.16, layers 23+ | 33.8 (+30%) | 13.51 (+0.5%) |
+| W 0.12, every layer | 36.7 (+42%) | 14.11 (+5.0%) |
+
+The late layers take it: +24-30% for a PPL within about the run-to-run spread; every layer costs 5%. With W 0.16 from
+layer 23 the 3.5bit model decodes faster than the exact 3.0bit did (31.8 tok/s) at a lower PPL (13.51 against 14.01).
