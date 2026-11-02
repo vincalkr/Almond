@@ -112,6 +112,7 @@ add_library(glm_mmq STATIC ${_glm_mmq_sources})
 target_include_directories(glm_mmq PRIVATE "${ALMOND_GGML_DIR}/ggml/include" "${ALMOND_GGML_DIR}/ggml/src" "${_glm_mmq}"
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_definitions(glm_mmq PRIVATE GGML_USE_HIP=1)
+almond_ggml_layout(glm_mmq)   # ggml-hip's layout of ggml_backend_cuda_context (the top CMakeLists.txt)
 target_link_libraries(glm_mmq PUBLIC ggml-base hip::host roc::hipblas)
 target_link_libraries(glm_prefill PUBLIC glm_mmq)
 target_compile_definitions(glm_prefill PUBLIC ALMOND_PREFILL_MMQ=1)

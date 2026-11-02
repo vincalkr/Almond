@@ -30,6 +30,9 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 
 ## Fixed in the last days
 
+- DeepSeek's and GLM's MMQ libraries made `ggml_backend_cuda_context` 64 bytes smaller than ggml-hip's own code reads
+  it (`GGML_HIP_GRAPHS` missing): GLM's engine could stop at load with a corrupted heap; all three now use ggml's
+  layout (docs/ENGINE_REVIEW.md).
 - `stop.sh` finds the engine by its executable (Qwen's path names its main thread `qwen-host`, which `pgrep -x
   almond-engine` missed).
 

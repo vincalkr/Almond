@@ -166,3 +166,15 @@ Correzione (`ds41_generate.cpp`, `regrow`): la prima richiesta letta a passi dop
 | dopo un batch (testo, 465 token) o un'immagine, con la correzione | 0,59-0,60 GiB | 20,7-21,9 |
 
 La riapertura costa 1,3-2,9 s una volta (gli esperti ricaricati dalla RAM).
+
+## ggml_backend_cuda_context's layout (2026-11-02)
+
+ggml-hip is built with `GGML_HIP_GRAPHS`, which gives `ggml_backend_cuda_context` its CUDA-graph members (4,400 bytes);
+the MMQ libraries that create one (DeepSeek's `almond_mmq`, GLM's `glm_mmq`, Qwen's `qwen_mmq`) were compiled without
+it (4,336 bytes, the pools 64 bytes earlier), while in `almond-engine` the destructor and the other out-of-line members
+are ggml-hip's. Now every one is compiled with the ggml build's own setting (`almond_ggml_layout`, the top
+`CMakeLists.txt`). Measured on the same binary with only GLM's library left without it: the engine stopped at load
+with `malloc(): invalid size (unsorted)`; with it, GLM's PPL over 16 windows of 512 of `long-docs.txt` 13.68 and 13.62
+(the engine ended with 0; 13.51 written on 2026-11-02 with an earlier expert profile), DeepSeek through the server 19.0
+/ 21.3 / 19.9 tok/s (thinking low, 600 tokens), stopped in 2 s.
+

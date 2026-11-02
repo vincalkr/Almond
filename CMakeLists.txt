@@ -48,6 +48,15 @@ function(almond_mmq_api_version target mmq_dir)
   endif()
 endfunction()
 
+# ggml_backend_cuda_context has CUDA-graph members when ggml-hip was built with GGML_HIP_GRAPHS, and in almond-engine
+# its destructor is ggml-hip's: every MMQ library that creates one (DeepSeek's, GLM's, Qwen's) must give it the same
+# layout (without it the object was 4,336 bytes where ggml-hip's destructor reads 4,400)
+function(almond_ggml_layout target)
+  file(STRINGS "${ALMOND_GGML_PREBUILT}/CMakeCache.txt" _almond_hip_graphs REGEX "^GGML_HIP_GRAPHS:BOOL=ON$")
+  if(_almond_hip_graphs)
+    target_compile_definitions(${target} PRIVATE GGML_HIP_GRAPHS=1)
+  endif()
+endfunction()
 add_library(almond_warnings INTERFACE)
 target_compile_options(almond_warnings INTERFACE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall> $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
@@ -127,6 +136,7 @@ if(ALMOND_PREFILL_MMQ)
   target_include_directories(almond_mmq PRIVATE "${_almond_gg}/include" "${_almond_gg}/src" "${_almond_mmq}"
                                         PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   almond_mmq_api_version(almond_mmq "${_almond_mmq}")
+  almond_ggml_layout(almond_mmq)
   target_compile_definitions(almond_mmq PRIVATE GGML_USE_HIP=1)
   target_link_libraries(almond_mmq PUBLIC ggml-base hip::host roc::hipblas)
 endif()

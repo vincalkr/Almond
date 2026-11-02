@@ -105,13 +105,7 @@ target_include_directories(qwen_mmq PRIVATE "${_qwen_gg}/include" "${_qwen_gg}/s
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 almond_mmq_api_version(qwen_mmq "${_qwen_mmq}")
 target_compile_definitions(qwen_mmq PRIVATE GGML_USE_HIP=1 ALMOND_MMQ_KQUANTS=1)
-# ggml_backend_cuda_context has CUDA-graph members when ggml-hip was built with GGML_HIP_GRAPHS, and in almond-engine
-# its destructor is ggml-hip's: the context this library creates must have the same layout (without it, the delete at
-# exit read past the smaller object and segfaulted)
-file(STRINGS "${ALMOND_GGML_PREBUILT}/CMakeCache.txt" _qwen_hip_graphs REGEX "^GGML_HIP_GRAPHS:BOOL=ON$")
-if(_qwen_hip_graphs)
-  target_compile_definitions(qwen_mmq PRIVATE GGML_HIP_GRAPHS=1)
-endif()
+almond_ggml_layout(qwen_mmq)   # ggml-hip's layout of ggml_backend_cuda_context (the top CMakeLists.txt)
 target_link_libraries(qwen_mmq PUBLIC ggml-base hip::host roc::hipblas)
 target_link_libraries(qwen_prefill PUBLIC qwen_mmq)
 target_compile_definitions(qwen_prefill PUBLIC ALMOND_PREFILL_MMQ=1 ALMOND_PREFILL_FUSED=1)

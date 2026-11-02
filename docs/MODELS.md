@@ -207,7 +207,8 @@ What changed on the way in, beside the names (`almond::qwen`, `ALMOND_*`):
 - The window size (`ALMOND_VERIFY_MAX_T` 16) is a PUBLIC definition of `qwen_core`: `generate.cpp` is compiled at
   the top level, and a directory-wide definition left it with other struct layouts than the libraries (the server
   stopped at load on "the stage's layer range ... wrong").
-- `ggml_backend_cuda_context` is compiled with `GGML_HIP_GRAPHS` as ggml-hip is, its host shim is weak as GLM's and
+- `ggml_backend_cuda_context` is compiled with `GGML_HIP_GRAPHS` as ggml-hip is (so are DeepSeek's and GLM's now,
+  docs/ENGINE_REVIEW.md), its host shim is weak as GLM's and
   DeepSeek's (ggml-hip's definitions win), and the MMQ context lives as long as the process: ggml-hip's destructor
   segfaulted at exit after the run had printed everything.
 - The pack files' header (`# almond native experts v3`, `# almond hadamard v1`) is read whatever the word before

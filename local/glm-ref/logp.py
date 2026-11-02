@@ -46,4 +46,4 @@ for _ in range(runs):
     print(f"LP {tot:.4f} {cnt}  PPL {math.exp(-tot / cnt):.4f}", flush=True)
 p.stdin.write("QUIT\n")
 p.stdin.flush()
-p.wait(timeout=180)
+print("engine exit", p.wait(timeout=180))
