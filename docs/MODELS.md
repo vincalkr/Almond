@@ -179,3 +179,10 @@ run the exact model read 13.38-13.44):
 
 The late layers take it: +24-30% for a PPL within about the run-to-run spread; every layer costs 5%. With W 0.16 from
 layer 23 the 3.5bit model decodes faster than the exact 3.0bit did (31.8 tok/s) at a lower PPL (13.51 against 14.01).
+
+## GLM: DFlash2 drafter against MTP (2026-11-02)
+
+`ALMOND_GLM_DFLASH` (the engine's `--dflash`) with `Anbeeld/GLM-5.3-Flash-DFlash2-GGUF` Q8_0 (1.25 GB; 5 layers reading
+trunk layers 6, 15, 25, 34, 43, block 8) in place of the MTP block, GSQ-RCO 3.5bit with the late-layer skip, `speed.py`
+2 rounds: MTP 34.5 tok/s (76.4% of drafts accepted), DFlash2 26.6 (78.3%). The drafts are as good; the longer verify
+windows cost more than they save with the experts across two cards and RAM. MTP stays; the drafter went to the trash.

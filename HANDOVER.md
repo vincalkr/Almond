@@ -38,7 +38,7 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 
 ## Open
 
-- **GLM's DFlash2 drafter** (`--dflash`, `Anbeeld/GLM-5.3-Flash-DFlash2-GGUF`): supported, never measured against MTP.
+- **GLM's DFlash2 drafter** measured: 26.6 tok/s against MTP's 34.5 (docs/MODELS.md); MTP stays.
 - **An 8K-token `LOGP` on the 3.5bit GLM** stopped in "returning the expert pool's tail" (the 180 s watchdog); 12K
   prompts through the server read fine.
 - **DeepSeek:** `--skip-miss 0.15` +7% for +0.6-0.8% decode PPL (off); a from-layer option as GLM's is not built.
