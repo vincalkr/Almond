@@ -1,55 +1,56 @@
 # Handover
 
 Where Almond stands and what is open. How it runs and every measured number: [README](README.md),
-[docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md), [docs/ds4/AMD_HIP_NOTES.md](docs/ds4/AMD_HIP_NOTES.md).
+[docs/MODELS.md](docs/MODELS.md), [docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md),
+[docs/ds4/AMD_HIP_NOTES.md](docs/ds4/AMD_HIP_NOTES.md), [docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md),
+[docs/ENGINE_REVIEW.md](docs/ENGINE_REVIEW.md).
 
-## State (2026-10-27)
+## State (2026-11-02)
 
-- **Model:** DeepSeek-V4.1-Flash-1017 as the ISTA-DASLab GSQ-RCO IQ2_XXS pack (`models/rco-iq2xxs`, four shards,
-  138.2 GB), read through the geometry overlay `local/rco-iq2xxs-meta/meta.gguf` (`DS41_META`). Exact routing.
-- **Engram:** the checkpoint's FP8 rows in `models/engram-1017` (203 GB); the pack's own iq4_nl table is the
-  measured-equivalent alternative and the fallback (`local/fetch-rco-1017.sh` brings it).
 - **Machine:** two RX 7900 XTX (card 1 on a PCIe 4.0 x2 uplink), Ryzen 9 9900X, 122 GiB RAM, PCIe 5.0 NVMe, ROCm 7.14.
   The cards' 305 W cap, -200 mV and stock memory clock are deliberate; power-tune (NVMe APST and CPU C3 off, the
-  `performance` governor) runs with the server.
-- **Server:** `./run.sh` / `./stop.sh`, `127.0.0.1:8150`, the conversation pool (4 GiB) and disk store
-  (`local/conv-cache-rco`, 32 GiB), reasoning effort none / low / high / max with a thinking cap per level.
-- **Speed:** decode ~23 tok/s on short prompts, ~18-19 at 17K, 16-20 in agent sessions at 120-190K context; prompts
-  from scratch 370-490 tok/s. **Quality:** Lucebox ppl 10.37 (the FP8 checkpoint: 8.56).
+  `performance` governor) runs with a server (`/usr/local/sbin/almond-power-tune`).
+- **One engine:** `build-hip-fused/almond-engine`, DeepSeek's path (`src/ds41`) or GLM's (`src/glm`, `--glm-pack`), on
+  one ggml (`third_party/llama.cpp`). The router (`./run.sh --router`) serves both at `127.0.0.1:8150`, loading the
+  one a request names; `./almond` is the terminal chat and agent.
+- **DeepSeek-V4.1-Flash-1017:** the ISTA-DASLab GSQ-RCO IQ2_XXS pack (138.2 GB, four shards of the 2026-10-25
+  revision, read through `DS41_META`), the checkpoint's FP8 Engram rows, exact routing. Decode ~21-23 tok/s short,
+  ~18-19 at 17K, 16-20 in agent sessions at 120-190K; Lucebox ppl 10.37. Levels off / low / high / max.
+- **GLM-5.3-Flash:** the GSQ-RCO 3.5bit GGUF (137.1 GB) with the MTP block from an IQ2_S quant; light misses left out
+  of layers 23+ (`ALMOND_GLM_MISS_SKIP_W` 0.16): 33.8 tok/s, PPL 13.51 over 4,080 tokens (exact: 25.9, 13.44; the
+  3.0bit build it replaced: 31.8, 14.01). Its engine matches llama.cpp: PPL 7.02-7.14 against 7.20 at 512 tokens,
+  5.97-6.01 against 5.95 at 8K. Levels low / high / max.
+- **Images:** both models, each encoder in VRAM only for a request with pictures (DeepSeek's loaded and freed; GLM's
+  in 2.78 GB the engine lends it, at up to 1,024 image tokens since its memory is measured without flash attention).
+- **Conversations:** each kept in RAM and on disk and resumed from the longest prefix (`local/conv-cache-rco`,
+  `local/glm-slots`); `./almond --sessions` / `--clear-sessions`.
 
-## Fixed recently
+## Fixed in the last days
 
-- 2026-10-27: the prompt MMQ read up to 127 ids past its buffer (a GPU page fault on a 3,918-token batch);
-  `local/bench-v41/repro-mmq-crash.py` reproduces the shape.
-- 2026-10-27: a prompt that re-rendered the last few tokens of the live conversation was read again from zero; it now
-  resumes exactly (`ALMOND_SERVE_LIVE_PARTIAL`).
+- GLM's tokenizer split digits one by one (qwen35's pre-split) where the model reads them in threes (glm4): figures
+  copied wrong at 10K+ (21-41 of 200); now llama.cpp's ids on ~300K tokens, 0 of 200.
+- DeepSeek's VRAM cache opens again after a batch prompt into what ggml gave back (2.5 GiB were left unused).
+- The CLI sends the reasoning back (an agent's tool chain had lost its plan at every step); the agent has an English
+  system prompt; tool calls closing a code fence on the same line are calls.
+- Streams send events while a long prompt is read or a call written inside the thinking is held; dsh's own idle
+  timeout (300 s, pi-ai) must still be raised for a local provider (`streamIdleTimeoutMs`).
+- `fit_max_tokens` on: a client's max_tokens beside a long prompt gets the room left, not a 400.
 
 ## Open
 
-- **Where the time goes:** the CPU tier is at the RAM's bandwidth (47 GB/s of 61), and card 0 waits ~6 ms a token in
-  40 per-layer host round trips. Faster RAM (`local/ram-bench.sh` compares BIOS settings) is the hardware lever;
-  routing on the card was estimated at ~5% on short prompts and ~0 at long ones and not built.
-- **Speculative decoding:** a verify pass costs about as much as decoding its tokens here. Lookup drafts
-  (`ALMOND_LOOKUP`, opt-in) gain 14-25% only on text copied whole and lose 10-25% on new text; off.
-- **The VRAM cache seeded by the conversation** (`ALMOND_VRAM_CONV`, opt-in): 17.80 against 17.98 tok/s over
-  12 turns; off.
-- **DSpark on the GSQ-RCO pack** (`ALMOND_SERVE_DSPARK`, opt-in; the drafter now reads the pack's quantized
-  `token_embd`): 10.8-15.2 (depth 4) and 12.5-16.4 (depth 2) against 17.6-18.6 tok/s; off. Short chats run
-  15.0-19.8 tok/s, about as fast as long ones.
-- **CPU/card idle time:** experts in L3 compute 1.4-1.6x faster than from DRAM, and the next-layer prediction
-  catches 59-72% (top 8) of the CPU's experts: an L3 prefetch would gain ~3-6%, not built. Spinning host syncs
-  (`ALMOND_HIP_SPIN`, opt-in): no change; off.
-- **The rank:** `local/update-rank.sh` measures a rank built from the chat's routing on code and documentation prompts
-  and applies it only if faster.
-- **Images:** on when the encoder is in `models/vision-1017`: the VL router bias the pack lacks comes from
-  `local/rco-iq2xxs-meta/vl-bias.gguf` (`DS41_VL_BIAS`); the encoder is loaded on card 0 per image request and freed.
-- **Prompt format:** `tools/v41/dsv41_encoding.py` is DeepSeek's 1017 encoder (2026-10-28; before it was the launch
-  one): a user turn of tool results only no longer opens a new turn, tool content may hold blocks (images).
+- **GLM's DFlash2 drafter** (`--dflash`, `Anbeeld/GLM-5.3-Flash-DFlash2-GGUF`): supported, never measured against MTP.
+- **An 8K-token `LOGP` on the 3.5bit GLM** stopped in "returning the expert pool's tail" (the 180 s watchdog); 12K
+  prompts through the server read fine.
+- **DeepSeek:** `--skip-miss 0.15` +7% for +0.6-0.8% decode PPL (off); a from-layer option as GLM's is not built.
+  Prompt chunks of 4K instead of 8K (project-maya's RDNA3 finding) not measured. The CPU tier is at the RAM's
+  bandwidth; speculation (lookup, DSpark) and the conversation-seeded cache measured slower and stay off.
+- **Long agent sessions:** a client that rewrites the start of its prompt (dsh's plan mode in the system prompt,
+  DeepSeek's reasoning level at token 8 when compaction runs at another level) reads the whole conversation again.
 
 ## Constraints
 
-- Never expose the server beyond `127.0.0.1` without `--api-key`.
+- Never expose a server beyond `127.0.0.1` without `--api-key`.
 - A new feature is opt-in; a default changes only where it measured better, with the numbers written down.
-- The engine is not bit-reproducible run to run (an expert's kernel depends on the tier that serves it): compare
-  quality with Lucebox or repeated runs, not with a diff.
+- The engine is not bit-reproducible run to run: compare quality with PPL on fixed documents, Lucebox or repeated
+  runs, not with a diff.
 - Commit messages in English.
