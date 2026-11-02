@@ -9,10 +9,12 @@ FORCE=0; [ "${1:-}" = --force ] && FORCE=1
 TIMEOUT=${TIMEOUT:-60}
 
 # this folder's servers and engines only (another checkout's are left alone)
-servers() { pgrep -f "$R/tools/(v41/serve/serve_ds41|glm/serve/serve_glm|router/almond_router)[.]py" 2>/dev/null; }
+servers() { pgrep -f "$R/tools/(v41/serve/serve_ds41|glm/serve/serve_glm|qwen/serve/serve_qwen|router/almond_router)[.]py" 2>/dev/null; }
 engines() {
-    for p in $(pgrep -x almond-engine 2>/dev/null) ; do
-        [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$R" ] && echo "$p"
+    # by the executable, not the process name: Qwen's path names its main thread qwen-host
+    for p in $(pgrep -f "almond-engine" 2>/dev/null) ; do
+        [ "$(readlink "/proc/$p/exe" 2>/dev/null)" = "$R/build-hip-fused/almond-engine" ] &&
+            [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$R" ] && echo "$p"
     done
 }
 

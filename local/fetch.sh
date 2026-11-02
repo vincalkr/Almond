@@ -3,6 +3,7 @@
 #
 #   ./local/fetch.sh            the list with each item's state, then asks which to download (numbers or names)
 #   ./local/fetch.sh glm glm-mtp   those items, no question
+#   ./local/fetch.sh qwen qwen-mtp  Qwen3.8-Flash-Next and its draft block
 #   ./local/fetch.sh --list     the list only
 #
 # Every file goes to models/ with aria2c (CONN=4 connections, resumable); a file counts as present when its size is
@@ -20,9 +21,11 @@ AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: Bearer $TOKEN")
 
 GLM_REPO=pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF
 GLM_SRC_REPO=peasantsmith/GLM-5.3-Flash-Maya-GGUF
+QWEN_REPO=ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
+QWEN_SHARDS=$(for i in 1 2; do echo "$M/qwen38-iq3s/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-0000$i-of-00002.gguf"; done)
 DS_SHARDS=$(for i in 1 2 3 4; do echo "$M/rco-iq2xxs/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-0000$i-of-00004.gguf"; done)
 
-ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision)
+ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision qwen qwen-mtp qwen-vision)
 desc() {
     case $1 in
         deepseek)            echo "DeepSeek-V4.1-Flash-1017, GSQ-RCO IQ2_XXS pack + Engram IQ4_NL (ISTA-DASLab)   ~249 GB";;
@@ -31,6 +34,9 @@ desc() {
         glm)                 echo "GLM-5.3-Flash GSQ-RCO 3.5bit (pfeifferj) + its pack                           137 GB";;
         glm-mtp)             echo "GLM MTP draft block (from an IQ2_S quant's shard 3, 20.5 GB download, kept 3.6 GB)";;
         glm-vision)          echo "GLM image encoder (mmproj F16 + vocab)                                               1.1 GB";;
+        qwen)                echo "Qwen3.8-Flash-Next GSQ-RCO IQ3_S (ISTA-DASLab) + its pack                       85 GB";;
+        qwen-mtp)            echo "Qwen MTP draft block (the BF16 checkpoint's mtp.* tensors, 5.2 GB read, kept 0.8 GB)";;
+        qwen-vision)         echo "Qwen image encoder (mmproj BF16)                                                     0.9 GB";;
     esac
 }
 files() {   # the files that make the item present
@@ -41,6 +47,9 @@ files() {   # the files that make the item present
         glm)                 echo "$M/glm53-gsq-rco/GLM-5.3-Flash-GSQ-RCO-3.5bit.gguf"; echo "$M/glm53-gsq-rco/pack";;
         glm-mtp)             echo "$M/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf";;
         glm-vision)          echo "$M/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf"; echo "$M/glm53-vision/GLM-5.3-Flash-vocab.gguf";;
+        qwen)                echo "$QWEN_SHARDS"; echo "$M/qwen38-iq3s-pack/native_experts.txt";;
+        qwen-mtp)            echo "$M/qwen38-mtp/experts.bin"; echo "$M/qwen38-mtp/draft_vocab.bin";;
+        qwen-vision)         echo "$M/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf";;
     esac
 }
 state() {   # present / partial / missing (by the files being there; sizes are checked at download)
@@ -87,6 +96,20 @@ fetch() {
                              gio trash "$M/glm53-gsq-rco/src" && echo "the 20.5 GB source went to the trash";;
         glm-vision)          get $GLM_SRC_REPO vision/mmproj-GLM-5.3-Flash-F16.gguf "$M/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf"
                              get $GLM_SRC_REPO vision/GLM-5.3-Flash-vocab.gguf "$M/glm53-vision/GLM-5.3-Flash-vocab.gguf";;
+        qwen)                for f in $QWEN_SHARDS; do get $QWEN_REPO IQ3_S/$(basename "$f") "$f"; done
+                             [ "$DRY_RUN" = 1 ] || [ -s "$M/qwen38-iq3s-pack/native_experts.txt" ] ||
+                                 "$PY" "$R/tools/qwen/iq_pack.py" --gguf "$M/qwen38-iq3s/$(basename "$(echo "$QWEN_SHARDS" | head -1)")" \
+                                     --out "$M/qwen38-iq3s-pack";;
+        qwen-mtp)            [ -s "$M/qwen38-mtp/experts.bin" ] && { echo "have   qwen38-mtp"; return; }
+                             [ "$DRY_RUN" = 1 ] && { echo "get    Qwen/Qwen3.8-Flash-Next mtp.* tensors (5.2 GB of range reads)"; return; }
+                             # the checkpoint's 31 mtp.* tensors (HTTP ranges of 28 shards, SHA256-checked), packed with
+                             # Q2_0 experts, laid out for the engine, and the draft head's token subset beside them
+                             "$PY" "$R/tools/qwen/mtp_fetch.py" fetch --out "$M/qwen38-mtp-bf16"
+                             "$PY" "$R/tools/qwen/mtp_pack.py" --src "$M/qwen38-mtp-bf16" --experts q2_0 --out "$M/qwen38-mtp-bf16/mtp-q2_0.gguf"
+                             "$PY" "$R/tools/qwen/mtp_rt.py" --gguf "$M/qwen38-mtp-bf16/mtp-q2_0.gguf" --out "$M/qwen38-mtp"
+                             cp "$R/tools/qwen/data/draft_vocab.bin" "$M/qwen38-mtp/draft_vocab.bin"
+                             gio trash "$M/qwen38-mtp-bf16" && echo "the 5.2 GB of BF16 tensors went to the trash";;
+        qwen-vision)         get $QWEN_REPO mmproj-Qwen3.8-Flash-Next-BF16.gguf "$M/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf";;
         *) echo "fetch: no item '$1' (${ITEMS[*]})" >&2; exit 2;;
     esac
 }

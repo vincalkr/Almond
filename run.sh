@@ -8,6 +8,8 @@
 #                            thinking levels.  The chat: ./almond (starts the router itself when nothing answers)
 #   ./run.sh --model glm     GLM-5.3-Flash (GSQ-RCO 3.5bit) on Almond's engine (src/glm, build-hip-fused/almond-engine),
 #                            the layers split over both cards: local/glm-local.json, tools/glm/serve/serve_glm.py
+#   ./run.sh --model qwen    Qwen3.8-Flash-Next (GSQ-RCO IQ3_S) on Almond's engine (src/qwen, almond-engine --qwen):
+#                            local/qwen-local.json, tools/qwen/serve/serve_qwen.py
 # --gpu picks the configuration: local/ds41-local-vision.json for two cards, local/ds41-local-1gpu-vision.json for
 # one; without the vision encoder in models/vision-1017 (or the image routing bias local/rco-iq2xxs-meta/vl-bias.gguf)
 # the text-only ones (local/ds41-local.json, local/ds41-local-1gpu.json).  The encoder is loaded on card 0 only for a
@@ -80,7 +82,19 @@ case $MODEL in
         # the expert profile the engine starts its VRAM pools from and saves what it learns into: its shipped
         # until this machine has its own
         [ -s "$R/local/glm-expert-profile.bin" ] || cp "$R/tools/glm/data/expert-profile-glm.bin" "$R/local/glm-expert-profile.bin" ;;
-    *) echo "run.sh: --model takes ds41 or glm (got '$MODEL')" >&2; exit 1 ;;
+    qwen)
+        SHIM="$R/tools/qwen/serve/serve_qwen.py"
+        if [ -z "$CFG" ]; then
+            CFG="$R/local/qwen-local.json"
+            # with the image encoder (local/fetch.sh qwen-vision) and almond-vision built: images on, read on the CPU
+            # (the engine lends the encoder no VRAM; its cards hold the expert cache)
+            [ -s "$R/models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf" ] && [ -x "$R/build-vision/build/bin/almond-vision" ] &&
+                CFG="$R/local/qwen-local-vision.json"
+        fi
+        [ -x "$R/build-hip-fused/almond-engine" ] || { echo "run.sh: build-hip-fused/almond-engine is not built (./build.sh builds it)" >&2; exit 1; }
+        # the expert profile, as GLM's: the shipped one until this machine has its own
+        [ -s "$R/local/qwen-expert-profile.bin" ] || cp "$R/tools/qwen/data/expert-profile-qwen.bin" "$R/local/qwen-expert-profile.bin" ;;
+    *) echo "run.sh: --model takes ds41, glm or qwen (got '$MODEL')" >&2; exit 1 ;;
 esac
 cards=$(echo "${GPU:-0,1}" | tr ',' '\n' | wc -l)
 if [ -z "$CFG" ]; then
@@ -109,7 +123,7 @@ if [ -n "$CTX" ]; then
 import json, sys
 src, dst, ctx = sys.argv[1:]
 c = json.load(open(src)); a = c["args"]
-flag = "--max-context" if "--glm-pack" in a else "--ctx"
+flag = "--max-context" if "--glm-pack" in a or "--qwen" in a else "--ctx"
 if flag in a: a[a.index(flag) + 1] = ctx
 else: a += [flag, ctx]
 open(dst, "w").write(json.dumps(c, indent=2) + "\n")
@@ -127,10 +141,11 @@ c = json.load(open(cfg))
 a = c.get("args", [])
 model = a[a.index("-m") + 1] if "-m" in a else ""
 pack = a[a.index("--glm-pack") + 1] if "--glm-pack" in a else ""
+qwen = [a[a.index(f) + 1] for f in ("--pack", "--native", "--ple-gguf", "--mtp") if "--qwen" in a and f in a]
 engram = a[a.index("--engram") + 1].split(":") if "--engram" in a else []
 meta = (c.get("env") or {}).get("DS41_META")          # the geometry overlay a foreign pack reads
 mtp = (c.get("env") or {}).get("ALMOND_GLM_MTP_GGUF")   # GLM's draft block (local/glm-mtp-extract.py makes it)
-need = ([model] if model else []) + ([pack] if pack else []) + engram + ([c["tokenizer"]] if c.get("tokenizer") else []) + ([meta] if meta else []) + ([mtp] if mtp else [])
+need = ([model] if model else []) + ([pack] if pack else []) + qwen + engram + ([c["tokenizer"]] if c.get("tokenizer") else []) + ([meta] if meta else []) + ([mtp] if mtp else [])
 def whole(p):
     q = p if os.path.isabs(p) else os.path.join(root, p)
     return os.path.exists(q) and not (os.path.isfile(q) and os.path.getsize(q) == 0)
@@ -181,7 +196,7 @@ rc=0
     "--port" "8150" "$@" || rc=$?
 # Another Almond server may have started meanwhile (a restart, an A/B that stops one and starts the next): it switched
 # power-tune on and still needs it, so it stays on until the last server ends.
-if pgrep -f "[t]ools/(v41/serve/serve_ds41|glm/serve/serve_glm).py" >/dev/null 2>&1; then
+if pgrep -f "[t]ools/(v41/serve/serve_ds41|glm/serve/serve_glm|qwen/serve/serve_qwen).py" >/dev/null 2>&1; then
     echo "run.sh: another Almond server is running: power-tune stays on"
 else
     sudo -n "$PT" off >/dev/null 2>&1 && echo "run.sh: power-tune off"

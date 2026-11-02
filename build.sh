@@ -37,7 +37,7 @@ cmake -S . -B build-hip-fused "${COMMON[@]}" \
     -DALMOND_GGML_DIR="$PWD/third_party/llama.cpp" -DALMOND_GGML_PREBUILT="$PWD/third_party/llama.cpp/build-hip" \
     -DALMOND_DSV41_HC_MIX=ON -DALMOND_DSV41_FQ_OP=ON
 cmake --build build-hip-fused -j "$JOBS"
-echo "=== GLM image encoder (tools/glm/vision: llama.cpp's mtmd at the engine's pinned commit + GLM-5.3's tower)"
+echo "=== image encoder for GLM and Qwen (tools/glm/vision: llama.cpp's mtmd at the engine's pinned commit + GLM-5.3's tower)"
 # the pinned llama.cpp the GLM engine's build fetched, copied and patched (tools/vision/glm5next_patch.py, idempotent)
 VL=build-vision/llama.cpp
 # (llama.cpp's mtmd at the commit GLM's encoder was written against: a shallow fetch, once)

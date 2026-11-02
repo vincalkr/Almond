@@ -1,7 +1,7 @@
 # Models: thinking levels and sampling
 
 What each model gets, where it comes from, and what was measured.  Everything below is the server's behaviour with the
-shipped configurations (`local/ds41-local*.json`, `local/glm-local.json`); a client sees the levels in `/health`,
+shipped configurations (`local/ds41-local*.json`, `local/glm-local.json`, `local/qwen-local.json`); a client sees the levels in `/health`,
 `/v1/models` (the router) and `./almond`'s `/models`.  Reviewed 2026-10-29.
 
 ## DeepSeek-V4.1-Flash-1017 (GSQ-RCO IQ2_XXS, `ds41_generate`)
@@ -186,3 +186,56 @@ layer 23 the 3.5bit model decodes faster than the exact 3.0bit did (31.8 tok/s) 
 trunk layers 6, 15, 25, 34, 43, block 8) in place of the MTP block, GSQ-RCO 3.5bit with the late-layer skip, `speed.py`
 2 rounds: MTP 34.5 tok/s (76.4% of drafts accepted), DFlash2 26.6 (78.3%). The drafts are as good; the longer verify
 windows cost more than they save with the experts across two cards and RAM. MTP stays; the drafter went to the trash.
+
+## Qwen3.8-Flash-Next (GSQ-RCO IQ3_S, 2026-11-02)
+
+The model (`qwen4exp`: 48 layers, Gated DeltaNet with sparse attention every fourth layer, hyper-connections, the PLE
+n-gram table, 512 experts with 10 routed) as ISTA-DASLab's GSQ-RCO IQ3_S GGUF (two shards, 83.6 GB), its pack
+(`tools/qwen/iq_pack.py`: the 1.5 GB of float weights, the tensor index and the tokenizer) and the MTP block from the
+BF16 checkpoint's 31 `mtp.*` tensors (`tools/qwen/mtp_fetch.py`, `mtp_pack.py` with Q2_0 experts, `mtp_rt.py`), on
+card 0 (`local/qwen-local.json`). The engine is `src/qwen`, the Qwen path of the engine this model ran on before,
+brought into `almond-engine` (`--qwen`) on Almond's ggml.
+
+Thinking and sampling are the model's own: its template's levels none (`enable_thinking` false) / low / medium /
+xhigh (the default; high is xhigh), the server's defaults; the GGUF's `general.sampling` temperature 1.0, top_p 0.95,
+top_k 20 in the configuration.
+
+What changed on the way in, beside the names (`almond::qwen`, `ALMOND_*`):
+
+- ggml 0.26's MMQ takes the tile width (`J_best`) where the older one took the columns to optimize for and chose it:
+  `src/qwen/prefill/moe_mmq.cu` chooses it as ggml's own host code does (`mmq_tile_width`).
+- The window size (`ALMOND_VERIFY_MAX_T` 16) is a PUBLIC definition of `qwen_core`: `generate.cpp` is compiled at
+  the top level, and a directory-wide definition left it with other struct layouts than the libraries (the server
+  stopped at load on "the stage's layer range ... wrong").
+- `ggml_backend_cuda_context` is compiled with `GGML_HIP_GRAPHS` as ggml-hip is, its host shim is weak as GLM's and
+  DeepSeek's (ggml-hip's definitions win), and the MMQ context lives as long as the process: ggml-hip's destructor
+  segfaulted at exit after the run had printed everything.
+- The pack files' header (`# almond native experts v3`, `# almond hadamard v1`) is read whatever the word before
+  "native experts" (packs written before say `strata`).
+
+Checked against the previous build of the same engine (its binary, on the same files):
+
+- one-shot, the first 512 tokens of `local/glm-ref/doc.txt` (`local/qwen-ref/oneshot.sh`), greedy, 64 tokens: the
+  same 64 ids from both, at 50.8-51.0 tok/s against 48.9;
+- the pack and the MTP block written again by the tools in `tools/qwen/`: `dense.bin`, `conversions.json`, the
+  tokenizer and every row of `index.txt` / `native_experts.txt` the same bytes (the headers say `almond`); the MTP
+  block's `dense.bin`, `dense.txt` and `experts.bin` the same bytes; the regenerated pack gives the same 64 ids.
+
+Through the server, the same configuration with either binary (thinking low, temperature 0, 600 tokens, three prompts:
+code, Italian, English; two rounds alternated, a fresh start each; the server's unit tests ran beside the second round), tok/s:
+
+| engine | round 1 | round 2 | mean |
+| --- | --- | --- | ---: |
+| `almond-engine --qwen` | 100.1 79.1 81.1 | 99.3 81.7 82.8 | 87.4 |
+| the previous binary | 98.1 84.1 80.5 | 99.3 84.9 83.6 | 88.4 |
+
+The same within the runs' spread (greedy answers differ run to run, and with them the drafts accepted). The decode
+expert cache hit 89-91% of lookups; 8,996 experts (17.06 GiB) in VRAM, 546 MiB free with everything loaded. The
+previous engine's own log on this machine, in agent sessions at 8-63K context: 49-78 tok/s.
+
+Images: the encoder (`mmproj-Qwen3.8-Flash-Next-BF16.gguf`) on the CPU through `almond-vision` (12 threads, up to 300
+image tokens), the configuration `local/qwen-local-vision.json`; a 357-token request with a logo described correctly
+(its text read) in 6.7 s with 203 tokens of answer. A tool call (`read_file`) came back as a call with its arguments.
+
+Not measured yet: perplexity (the native path dumps no prompt logits and the engine has no `LOGP`), long-context
+copying, an agent session.

@@ -3,7 +3,7 @@
 
   ./almond                       a conversation (starts the router if nothing answers at --url, stops it on /quit)
   ./almond -p "question"         one prompt, the answer on stdout, then exit
-  ./almond -m glm                the model (a name from /models, or the start of one: glm, deepseek)
+  ./almond -m glm                the model (a name from /models, or the start of one: glm, deepseek, qwen)
   ./almond --ctx 65536           the context window of the models it starts (a running server keeps its own)
 
 Thinking: --nothink, --think (the model's default), --think-max, --think-level LEVEL - the levels are the model's own
@@ -1290,7 +1290,7 @@ def start_router(api: Api, port: int, ctx: int | None = None, session_log: str |
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-p", "--prompt", help="one prompt: the answer on stdout, then exit")
-    ap.add_argument("-m", "--model", help="the model (a name from /models or its start: glm, deepseek)")
+    ap.add_argument("-m", "--model", help="the model (a name from /models or its start: glm, deepseek, qwen)")
     ap.add_argument("--url", default=os.environ.get("ALMOND_URL", "http://127.0.0.1:8150"))
     ap.add_argument("--api-key", default=os.environ.get("ALMOND_API_KEY", ""))
     t = ap.add_mutually_exclusive_group()

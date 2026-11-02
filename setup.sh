@@ -4,8 +4,9 @@
 #   1. the tools the build and the downloads need (ROCm, cmake, a C++ compiler, python3, aria2c, curl)
 #   2. .venv from requirements.txt
 #   3. the models: local/fetch.sh shows what is in models/ and asks what to download (and builds what derives from
-#      the downloads: DeepSeek's geometry overlay and pack map, its FP8 Engram rows, GLM's pack, its MTP block)
-#   4. ./build.sh: DeepSeek's engine, GLM's engine and GLM's image encoder
+#      the downloads: DeepSeek's geometry overlay and pack map, its FP8 Engram rows, GLM's and Qwen's packs and MTP
+#      blocks)
+#   4. ./build.sh: the engine (DeepSeek's, GLM's and Qwen's paths) and the image encoder GLM and Qwen use
 #   5. power-tune (optional, sudo once): NVMe and CPU idle states off while a server runs (local/install-power-tune.sh)
 #   6. each model's context, written into its configurations
 #
@@ -79,6 +80,7 @@ ram=$(awk '/MemTotal/ {printf "%d", $2 / 1048576}' /proc/meminfo)
 echo "  this machine: ${ram} GB of RAM; $(rocm-smi --showmeminfo vram 2>/dev/null | grep -c 'Total Memory (B)' || echo '?') GPU(s)"
 DS=(local/ds41-local.json local/ds41-local-1gpu.json local/ds41-local-vision.json local/ds41-local-1gpu-vision.json)
 GL=(local/glm-local.json local/glm-local-vision.json)
+QW=(local/qwen-local.json local/qwen-local-vision.json)
 cur=$(ctx_of local/ds41-local.json --ctx)
 echo "  DeepSeek-V4.1-Flash: $cur tokens now (trained for 1,048,576; KV in q8: ~the context costs little VRAM)"
 if [ "$CHECK" = 0 ]; then
@@ -91,6 +93,13 @@ if [ "$CHECK" = 0 ]; then
     read -r -p "  new context for GLM (empty = keep $cur): " v
     [ -n "$v" ] && set_ctx --max-context "$v" "${GL[@]}"
 fi
+cur=$(ctx_of local/qwen-local.json --max-context)
+echo "  Qwen3.8-Flash-Next: $cur tokens now (the model's 262,144; the KV past 32,768 cells streams from pinned RAM)"
+if [ "$CHECK" = 0 ]; then
+    read -r -p "  new context for Qwen (empty = keep $cur): " v
+    [ -n "$v" ] && set_ctx --max-context "$v" "${QW[@]}"
+fi
 
 echo
-echo "done. ./run.sh starts DeepSeek, ./run.sh --model glm GLM, ./run.sh --router both on demand; ./almond is the CLI."
+echo "done. ./run.sh starts DeepSeek, ./run.sh --model glm GLM, ./run.sh --model qwen Qwen, ./run.sh --router all of them on"
+echo "demand; ./almond is the CLI."

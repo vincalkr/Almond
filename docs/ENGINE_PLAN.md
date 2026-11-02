@@ -68,3 +68,11 @@ longer maps the configurations' names. Prose that says where code came from keep
 `src/glm/LICENSE` their copyright. GLM: PPL 10.2178, 10.3842, 10.4711 (mean 10.358); server tok/s 31.4 32.2 30.1 /
 32.8 33.4 31.0 (mean 31.8); pictures read, the terzine question closed and answered (2,795 tokens). DeepSeek: text
 19.0-23.8 tok/s, pictures as before.
+
+**Qwen3.8-Flash-Next (2026-11-02).** The Qwen path of the engine GLM's came from, brought in the same way: `src/qwen`
+(with its LICENSE, `qwen_*` libraries on the top level's prebuilt ggml), `qwen_program` linked into `almond-engine`,
+which runs it when the arguments name `--qwen`; the names `almond::qwen`, `ALMOND_*`. On Almond's ggml 0.26 its MMQ
+chooses the tile width as ggml does; its shim is weak; the window size is a PUBLIC definition. The previous binary and
+`almond-engine --qwen` on the same files: the same 64 greedy ids one-shot; through the server 88.4 and 87.4 tok/s
+(docs/MODELS.md, "Qwen3.8-Flash-Next"). Linked together, the three paths share no strong symbol but ggml's own
+quantize functions (the same source).

@@ -1,6 +1,6 @@
 <h1 align="center">Almond - MoE models on RX 7900 XTX</h1>
 
-<p align="center"><b>DeepSeek-V4.1-Flash-1017 and GLM-5.3-Flash on one or two RX 7900 XTX, their experts across VRAM, pinned RAM and NVMe</b><br>
+<p align="center"><b>DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash and Qwen3.8-Flash-Next on one or two RX 7900 XTX, their experts across VRAM, pinned RAM and NVMe</b><br>
 Linux - ROCm/HIP - MIT</p>
 
 A C++/HIP inference engine for large MoE models (one executable, `build-hip-fused/almond-engine`), an OpenAI- and
@@ -11,6 +11,8 @@ Anthropic-compatible server, a router that serves every model at one address, an
   GGUF carries llama.cpp metadata instead of this engine's `deepseek41.*` keys. Every expert the model routes to is
   computed (no route bias), wherever it is: card 0's VRAM, the second card, an 80 GiB pinned RAM arena, or the NVMe.
 - **GLM-5.3-Flash** as the GSQ-RCO 3.5bit pack (137 GB) with its MTP draft block (`src/glm`).
+- **Qwen3.8-Flash-Next** as the [ISTA-DASLab GSQ-RCO IQ3_S GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF)
+  (two shards, 83.6 GB) with its MTP draft block from the BF16 checkpoint (`src/qwen`).
 
 How each model is set up and measured: [docs/MODELS.md](docs/MODELS.md); the one-engine work:
 [docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md).
@@ -38,6 +40,9 @@ rounds): 33.8 tok/s decode with light misses left out of layers 23+ (`ALMOND_GLM
 configurations; 25.9 exact), PPL 13.51 over 4,080 tokens of `local/glm-ref/long-docs.txt` (13.44 exact; the 3.0bit
 build it replaced: 14.01) (docs/MODELS.md).
 
+Qwen3.8-Flash-Next (GSQ-RCO IQ3_S), one card, through the server (the same three prompts, two rounds): 87.4 tok/s
+decode with its MTP drafts, 79-100 per prompt (docs/MODELS.md, "Qwen3.8-Flash-Next").
+
 ## Requirements
 
 | | |
@@ -46,7 +51,7 @@ build it replaced: 14.01) (docs/MODELS.md).
 | GPU | RX 7900 XT / XTX (`gfx1100`); a second 24 GB card is used as an expert tier when present |
 | RAM | 128 GB class (the engine holds ~94 GB with the 80 GiB arena) |
 | CPU | x86-64 with AVX2 (AVX-512 used when present) |
-| disk | on an NVMe for `models/`: DeepSeek ~250 GB (138 GB pack in four shards + 111 GB Engram GGUF + 0.9 GiB image encoder; the checkpoint's own FP8 Engram rows instead of that GGUF are 203 GB), GLM ~142 GB (the 3.5bit GGUF, MTP block, image encoder) |
+| disk | on an NVMe for `models/`: DeepSeek ~250 GB (138 GB pack in four shards + 111 GB Engram GGUF + 0.9 GiB image encoder; the checkpoint's own FP8 Engram rows instead of that GGUF are 203 GB), GLM ~142 GB (the 3.5bit GGUF, MTP block, image encoder), Qwen ~87 GB (the IQ3_S GGUF, its 1.5 GB pack, MTP block, image encoder) |
 | tools | `cmake` >= 3.24, gcc, Python 3, curl, `aria2c` (faster downloads) |
 
 ## Quick start
@@ -90,8 +95,9 @@ local/fetch.sh                                                        # the mode
 
 ## Models, the router and the chat
 
-Almond serves DeepSeek-V4.1-Flash (`./run.sh`, the default) and GLM-5.3-Flash (`./run.sh --model glm`, its path of
-the same executable in `src/glm`, MIT: `src/glm/LICENSE`; `local/fetch.sh` downloads and prepares its files).
+Almond serves DeepSeek-V4.1-Flash (`./run.sh`, the default), GLM-5.3-Flash (`./run.sh --model glm`, its path of
+the same executable in `src/glm`, MIT: `src/glm/LICENSE`) and Qwen3.8-Flash-Next (`./run.sh --model qwen`, `src/qwen`,
+MIT: `src/qwen/LICENSE`); `local/fetch.sh` downloads and prepares their files.
 `./run.sh --router` puts every model of `local/router.json` behind one address, as llama-server's
 router mode does: `GET /v1/models` lists them with their status (loaded / loading / unloaded), context and thinking
 levels (`reasoning_levels`, `reasoning_default`); `POST /models/load` / `/models/unload {"model": NAME}`; a request that
@@ -116,6 +122,8 @@ instead.
   top_p is 0.95-1.0 (default 1.0); without thinking temperature 0-2 (default 1.0) and top_p 1.0; no top_k, min_p or
   penalties; an unset max_tokens is 8K without thinking, 64K with it, 128K at max effort.
   `ALMOND_DS41_FREE_SAMPLING=1` passes a request's values as they are.
+- Qwen3.8-Flash-Next: its template's levels, none (`enable_thinking` false) / low / medium / xhigh (its default;
+  high is xhigh); sampling from the GGUF (temperature 1.0, top_p 0.95, top_k 20).
 - GLM-5.3-Flash follows Z.ai's API: it always thinks, at low / high / max (default max; none, minimal and
   Anthropic's disabled are low, medium high, xhigh max); temperature 0-1 (default 1.0), top_p 0.01-1 (0.95), no
   penalties, top_k or min_p, at most 128K tokens out. `ALMOND_GLM_FREE_SAMPLING=1` and `ALMOND_GLM_THINK_OFF=1`
@@ -151,17 +159,22 @@ Through the API the level is `reasoning_effort`, `reasoning.effort` (OpenAI) or 
 the model answers (docs/MODELS.md, "Loops in the thinking").
 
 The API for another program (an agent harness, an IDE): `./run.sh --router` (or `./almond --keep`) and point it at
-`http://127.0.0.1:8150/v1`; `GET /v1/models` lists `deepseek-v4.1-flash-1017` and `glm-5.3-flash`. `--session-log DIR`
+`http://127.0.0.1:8150/v1`; `GET /v1/models` lists `deepseek-v4.1-flash-1017`, `glm-5.3-flash` and `qwen3.8-flash-next`. `--session-log DIR`
 (or `ALMOND_SESSION_LOG`) writes every request and its answer to `DIR/<date>.jsonl`, for debugging. A request whose `max_tokens` does not fit beside its prompt (a harness sending the
 model's 128K) gets the room left instead of a 400 (`"fit_max_tokens": true` in the configurations).
 
 ## Images
 
-Both models read images; each one's encoder is in VRAM only for a request with images.
+Every model reads images. GLM's and DeepSeek's encoders are in VRAM only for a request with images; Qwen's runs on the
+CPU.
 
 **GLM-5.3-Flash:** with its encoder in `models/glm53-vision`, `./run.sh --model glm` picks
 `local/glm-local-vision.json`; the encoder (`build-vision/build/bin/almond-vision`) runs in 2.7 GB of VRAM the engine
 lends it for the request and takes back after (docs/MODELS.md, "Images").
+
+**Qwen3.8-Flash-Next:** with its encoder (`local/fetch.sh qwen-vision`, 0.9 GB) and `almond-vision` built,
+`./run.sh --model qwen` picks `local/qwen-local-vision.json`; the encoder reads pictures on the CPU (12 threads, up to
+300 image tokens a picture), the engine's card keeps its expert cache.
 
 **DeepSeek-V4.1-Flash:** images need the model's image routing bias, `blk.N.exp_probs_b_vl.bias`, which the GSQ-RCO pack does not carry. It is
 in the repository as `local/rco-iq2xxs-meta/vl-bias.gguf` (61 KB): the checkpoint's `ffn.gate.bias_vl`, as
@@ -184,7 +197,9 @@ DeepSeek's engine keeps every conversation a request does not continue in a 4 Gi
 re-rendered tail a few tokens back included). They are also saved in `local/conv-cache-rco` (`--conversation-disk`,
 up to 32 GiB), so a restarted server resumes a session instead of reading it again
 ([docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md), "The conversation pool", "Conversations on disk"). GLM's
-keeps its conversations in `local/glm-slots` (`ALMOND_GLM_SLOT_KEEP`, docs/MODELS.md, "Sessions on disk").
+keeps its conversations in `local/glm-slots` (`ALMOND_GLM_SLOT_KEEP`, docs/MODELS.md, "Sessions on disk"). Qwen's
+parks up to 4 conversations in RAM (8 GiB at most, sized from the free RAM; `--conversation-cache-mib`) and resumes the
+one a request continues.
 `./almond --sessions` shows both folders and their size, `./almond --clear-sessions` moves them to the trash (with no
 engine running), and `--monitor` shows them too.
 

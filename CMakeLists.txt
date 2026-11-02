@@ -136,6 +136,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/src/ds41/v41_engine.cmake)
 
 # GLM-5.3-Flash (src/glm: docs/ENGINE_PLAN.md) -> almond-glm
 add_subdirectory(src/glm)
+add_subdirectory(src/qwen)
 
 # One executable (docs/ENGINE_PLAN.md, step 3): DeepSeek's engine target with GLM's path linked in (glm_program, its
 # usage requirements kept out: each tree force-includes its own hip_compat/cuda_runtime.h), src/engine_main.cpp picks
@@ -147,5 +148,11 @@ if(TARGET ds41_generate)
   target_link_libraries(glm_program PUBLIC glm_engine glm_prefill glm_spec glm_hip_runtime)
   target_sources(ds41_generate PRIVATE src/engine_main.cpp)
   target_link_libraries(ds41_generate PRIVATE "$<LINK_ONLY:glm_program>")
+  # Qwen3.8-Flash-Next's path (src/qwen), the same way: its own forced hip_compat/cuda_runtime.h, linked in only
+  add_library(qwen_program STATIC src/qwen/program/generate.cpp)
+  target_include_directories(qwen_program PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/qwen/include/almond/qwen/hip_compat)
+  target_compile_definitions(qwen_program PRIVATE ALMOND_VERSION="${PROJECT_VERSION}")
+  target_link_libraries(qwen_program PUBLIC qwen_engine qwen_prefill qwen_spec qwen_hip_runtime)
+  target_link_libraries(ds41_generate PRIVATE "$<LINK_ONLY:qwen_program>")
   set_target_properties(ds41_generate PROPERTIES OUTPUT_NAME almond-engine)
 endif()
