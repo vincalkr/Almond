@@ -68,19 +68,24 @@ fi
 SHIM="$R/tools/v41/serve/serve_ds41.py"
 case $MODEL in
     ds41|deepseek) ;;
-    glm)
+    glm|glm35)
         SHIM="$R/tools/glm/serve/serve_glm.py"
         if [ -z "$CFG" ]; then
-            CFG="$R/local/glm-local.json"
+            # glm35: the GSQ-RCO 3.5-bit GGUF (local/glm-pack.sh 3.5), its own expert profile and kept slots
+            V=; [ "$MODEL" = glm35 ] && V=-3.5
+            CFG="$R/local/glm-local$V.json"
             # with the image encoder (local/fetch.sh glm-vision) and almond-vision built: images on, loaded per picture
             [ -s "$R/models/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf" ] && [ -x "$R/build-vision/build/bin/almond-vision" ] &&
-                CFG="$R/local/glm-local-vision.json"
+                CFG="$R/local/glm-local$V-vision.json"
         fi
+        # the 3.5-bit model starts from the 3.0-bit one's learned expert profile (the same experts, other sizes)
+        [ "$MODEL" = glm35 ] && [ ! -s "$R/local/glm-expert-profile-3.5.bin" ] && [ -s "$R/local/glm-expert-profile.bin" ] &&
+            cp "$R/local/glm-expert-profile.bin" "$R/local/glm-expert-profile-3.5.bin"
         [ -x "$R/build-hip-fused/almond-engine" ] || { echo "run.sh: build-hip-fused/almond-engine is not built (./build.sh builds it)" >&2; exit 1; }
         # the expert profile the engine starts its VRAM pools from and saves what it learns into: its shipped
         # until this machine has its own
         [ -s "$R/local/glm-expert-profile.bin" ] || cp "$R/tools/glm/data/expert-profile-glm.bin" "$R/local/glm-expert-profile.bin" ;;
-    *) echo "run.sh: --model takes ds41 or glm (got '$MODEL')" >&2; exit 1 ;;
+    *) echo "run.sh: --model takes ds41, glm or glm35 (got '$MODEL')" >&2; exit 1 ;;
 esac
 cards=$(echo "${GPU:-0,1}" | tr ',' '\n' | wc -l)
 if [ -z "$CFG" ]; then

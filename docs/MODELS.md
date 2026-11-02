@@ -142,3 +142,21 @@ llama.cpp's on 7 files, ~300K tokens (README and docs, Python, C++), the prompt 
 --no-parse-special`) on each model's GGUF against the server's tokenizer: DeepSeek's (`joyai-llm`) gives the same ids
 on 7 texts, 305K tokens (README and docs, Python, C++, and a mixed text: accents, Chinese, Japanese, Korean, emoji,
 symbols, tabs and runs of spaces); GLM's (`glm4`) the same on those and on the mixed text.
+
+## GLM-5.3-Flash GSQ-RCO 3.5bit (2026-11-02)
+
+The same author's 3.5-bit build (`pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF`, 137.07 GB against 117.48; the card says
++4.49% PPL over Q8_0 against +9.07%, KL 0.071 against 0.142). `local/glm-pack.sh 3.5` makes its pack
+(`models/glm53-gsq-rco/pack-3.5`), `./run.sh --model glm35` runs it (`local/glm-local-3.5*.json`: its own expert
+profile, kept slots and log). On the two 7900 XTX, power-tune on: 35.5 GB of experts on the cards as with 3.0, 84.6 GB
+pinned in RAM (76 with 3.0), the rest read from the NVMe.
+
+| | 3.0 bit | 3.5 bit |
+| --- | ---: | ---: |
+| decode, thinking low, 600 tokens, 3 prompts x 2 (`local/glm-ref/speed.py`) | 31.8 tok/s | 27.5 (25.2-28.9) |
+| PPL, 16 windows of 512 of `long-docs.txt`, 4,080 tokens scored, 2 runs (`logp.py ... 512 2 CFG 16`) | 14.02, 14.01 | 13.43, 13.38 |
+| 40 sizes copied after ~10K tokens (`copytest.py`) | 0 of 200 | 0 of 120 |
+
+One window of 255 tokens (`doc512`) read 7.38-7.43 against 3.0's 7.02-7.14: one short document does not tell two
+builds this close apart. Open: an 8K-token `LOGP` on the 3.5-bit model stopped in "returning the expert pool's tail"
+(the engine's 180 s watchdog); a 12K prompt through the server read fine.
