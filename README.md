@@ -34,8 +34,9 @@ Quality on Lucebox's held-out set (8 x 1024 tokens, exact routing): ppl 10.37 wi
 number and how it was measured: [docs/ds4/V41_EXACT_FAST.md](docs/ds4/V41_EXACT_FAST.md).
 
 GLM-5.3-Flash (GSQ-RCO 3.5bit), the same machine, through the server (thinking low, 600 tokens, three prompts, two
-rounds): 27.5 tok/s decode; PPL 13.38-13.43 over 4,080 tokens of `local/glm-ref/long-docs.txt`, 4.3% under the 3.0bit
-build it replaced (docs/MODELS.md).
+rounds): 33.8 tok/s decode with light misses left out of layers 23+ (`ALMOND_GLM_MISS_SKIP_W` 0.16, on in the
+configurations; 25.9 exact), PPL 13.51 over 4,080 tokens of `local/glm-ref/long-docs.txt` (13.44 exact; the 3.0bit
+build it replaced: 14.01) (docs/MODELS.md).
 
 ## Requirements
 

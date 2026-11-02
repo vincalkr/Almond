@@ -22,7 +22,9 @@
     "ALMOND_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-glm-hipblaslt-100401-local.txt",
     "ALMOND_GLM_MTP_GGUF": "models/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf",
     "ALMOND_GLM_SLOT_KEEP": "1",
-    "ALMOND_GLM_SLOT_DIR": "local/glm-slots"
+    "ALMOND_GLM_SLOT_DIR": "local/glm-slots",
+    "ALMOND_GLM_MISS_SKIP_W": "0.16",
+    "ALMOND_GLM_MISS_SKIP_FROM": "23"
   },
   "cwd": ".",
   "tokenizer": "models/glm53-gsq-rco/pack/tokenizer",
