@@ -1,0 +1,11 @@
+base-r1                      sposi          diff=6    decode: 300 tokens in 15.96 s = 18.74 tok/s; experts 55428 hit / 10643 cpu / 0 pcie / 195 file (83.9% VRAM hits), cpu 1901 ms, file 936 ms; spec reads 0 issued / 0 used; 
+s15-r1                       sposi          diff=11   decode: 300 tokens in 11.82 s = 25.29 tok/s; experts 55391 hit / 3052 cpu / 0 pcie / 56 file (83.7% VRAM hits), cpu 548 ms, file 71 ms; spec reads 0 issued / 0 used; pref
+s15f20-r1                    sposi          diff=11   decode: 300 tokens in 13.29 s = 22.50 tok/s; experts 55421 hit / 7135 cpu / 0 pcie / 103 file (83.8% VRAM hits), cpu 1231 ms, file 280 ms; spec reads 0 issued / 0 used; p
+s25f20-r1                    sposi          diff=12   decode: 300 tokens in 13.48 s = 22.18 tok/s; experts 55309 hit / 6277 cpu / 0 pcie / 89 file (83.7% VRAM hits), cpu 1117 ms, file 287 ms; spec reads 0 issued / 0 used; pr
+s25f30-r1                    sposi          diff=11   decode: 300 tokens in 15.35 s = 19.48 tok/s; experts 55349 hit / 8396 cpu / 0 pcie / 128 file (83.8% VRAM hits), cpu 1487 ms, file 472 ms; spec reads 0 issued / 0 used; p
+base-r2                      sposi          diff=6    decode: 300 tokens in 15.86 s = 18.85 tok/s; experts 55428 hit / 10643 cpu / 0 pcie / 195 file (83.9% VRAM hits), cpu 1904 ms, file 732 ms; spec reads 0 issued / 0 used; 
+s15-r2                       sposi          diff=11   decode: 300 tokens in 11.82 s = 25.30 tok/s; experts 55391 hit / 3052 cpu / 0 pcie / 56 file (83.7% VRAM hits), cpu 556 ms, file 72 ms; spec reads 0 issued / 0 used; pref
+s15f20-r2                    sposi          diff=11   decode: 300 tokens in 14.07 s = 21.25 tok/s; experts 55421 hit / 7135 cpu / 0 pcie / 103 file (83.8% VRAM hits), cpu 1269 ms, file 391 ms; spec reads 0 issued / 0 used; p
+s25f20-r2                    sposi          diff=12   decode: 300 tokens in 13.09 s = 22.85 tok/s; experts 55309 hit / 6277 cpu / 0 pcie / 89 file (83.7% VRAM hits), cpu 1099 ms, file 234 ms; spec reads 0 issued / 0 used; pr
+s25f30-r2                    sposi          diff=12   decode: 300 tokens in 14.32 s = 20.87 tok/s; experts 55429 hit / 8398 cpu / 0 pcie / 127 file (83.8% VRAM hits), cpu 1497 ms, file 467 ms; spec reads 0 issued / 0 used; p
+ABSKIPDONE

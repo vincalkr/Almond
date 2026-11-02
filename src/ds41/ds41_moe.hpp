@@ -344,6 +344,9 @@ struct Ds41MoeConfig {
     /// Decode (run): a routed expert that is a VRAM miss and weighs less than `skip_miss` x the token's weight sum is
     /// dropped (not fetched, contributes 0).  Hits are never dropped.  0 = off.  A quality trade: measure ppl.
     float skip_miss = 0.0f;
+    /// skip_miss only on layers from this one on (the late layers take it far better than the early ones: GLM's
+    /// measure, 2026-11-02)
+    int64_t skip_from = 0;
     /// Decode (run): the same rule for the FILE TIER only (experts neither in VRAM nor in the RAM arena: an NVMe read
     /// each, ~2 ms).  0 = off.  A quality trade: measure ppl.
     float skip_file = 0.0f;

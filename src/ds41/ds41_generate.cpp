@@ -187,6 +187,7 @@ struct Args {
     int  enc_skip = -1;           // -1 = default (on for one-shot layer-major runs), 1 = --enc-skip, 0 = --no-enc-skip; only run the tokens before the replay window through layers 21-39
     int  enc_replay = 2560;       // --enc-replay N: the replay window (window_size * (n_layer - cand_layer) = 128*20)
     float skip_miss = 0.0f, skip_file = 0.0f;
+    int64_t skip_from = 0;
     double chunk_prefetch_gib = 0.0;
     /// --vision F (opt-in): image input through GENI, F = the vision GGUF (tools/v41/vision/make_vision_gguf.py).
     /// --vision-device N: the GPU that runs the encoder; default the --peer-device (its weights stay there from the
@@ -255,6 +256,7 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--no-chunk-prefetch") a.chunk_prefetch = false;
         else if (k == "--chunk-prefetch") a.chunk_prefetch_gib = std::atof(next().c_str());
         else if (k == "--skip-miss") a.skip_miss = (float) std::atof(next().c_str());
+        else if (k == "--skip-miss-from") a.skip_from = std::atoll(next().c_str());
         else if (k == "--skip-file") a.skip_file = (float) std::atof(next().c_str());
         else if (k == "--threads") a.threads = std::atoi(next().c_str());
         else if (k == "--ctx") a.ctx = std::atoll(next().c_str());
@@ -749,6 +751,7 @@ int ds41_main(int argc, char ** argv) {
     mc.chunk_prefetch = a.chunk_prefetch;
     mc.chunk_prefetch_gib = a.chunk_prefetch_gib;
     mc.skip_miss = a.skip_miss;
+    mc.skip_from = a.skip_from;
     mc.skip_file = a.skip_file;
     // soft / hard pruning: listed experts take no VRAM slot and no arena space;
     // with --prune-penalty X they keep a selection bias -X (still chosen when the router prefers them by more than X, then

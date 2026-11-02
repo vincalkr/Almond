@@ -1,0 +1,10 @@
+base-r1              sposi      decode nll: 300 forced tokens, mean 0.08913, ppl 1.0932
+s15-r1               sposi      decode nll: 300 forced tokens, mean 0.09493, ppl 1.0996
+s15f20-r1            sposi      decode nll: 300 forced tokens, mean 0.11060, ppl 1.1170
+s25f20-r1            sposi      decode nll: 300 forced tokens, mean 0.16825, ppl 1.1832
+s25f30-r1            sposi      decode nll: 300 forced tokens, mean 0.11597, ppl 1.1230
+base-r2              sposi      decode nll: 300 forced tokens, mean 0.08913, ppl 1.0932
+s15-r2               sposi      decode nll: 300 forced tokens, mean 0.09493, ppl 1.0996
+s15f20-r2            sposi      decode nll: 300 forced tokens, mean 0.11060, ppl 1.1170
+s25f20-r2            sposi      decode nll: 300 forced tokens, mean 0.16825, ppl 1.1832
+s25f30-r2            sposi      decode nll: 300 forced tokens, mean 0.12017, ppl 1.1277

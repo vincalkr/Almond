@@ -389,3 +389,17 @@ base run cold):
 
 +7% at 0.15 for +0.6-0.8% decode PPL and twice the changed argmaxes: with 84% of the picks in VRAM the CPU is a small
 part of a token here. Off, as before.
+
+`--skip-miss-from N` (2026-11-02) applies the skip only from layer N on, as GLM's option does. On DeepSeek the late
+layers take it worse, not better (`ARMS=... ab-skip-miss.sh`, `local/sweep-skip-from`, two rounds, same session):
+
+| | s, rounds 1 / 2 | decode PPL | argmax differs |
+| --- | ---: | ---: | ---: |
+| exact | 15.96 / 15.86 | 1.0932 | 6 |
+| 0.15, every layer | 11.82 / 11.82 | 1.0996 | 11 |
+| 0.15 from layer 20 | 13.29 / 14.07 | 1.1170 | 11 |
+| 0.25 from layer 20 | 13.48 / 13.09 | 1.1832 | 12 |
+| 0.25 from layer 30 | 15.35 / 14.32 | 1.1230-1.1277 | 11-12 |
+
+0.15 on every layer read 25.4 against 18.9 tok/s in this session and 22.6 against 21.2 in the one above: the forced
+one-shot runs vary too much between sessions to settle it; a server A/B was not run. Both stay off.

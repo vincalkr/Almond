@@ -2755,7 +2755,7 @@ bool gpu_run(Ds41MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w
         }
         nc = keep;
     }
-    if (im.cfg.skip_miss > 0.0f && nc > 0) {
+    if (im.cfg.skip_miss > 0.0f && nc > 0 && layer >= im.cfg.skip_from) {
         double ws = 0;
         for (int64_t k = 0; k < K; ++k) ws += (double) w6[k];
         int keep = 0;
