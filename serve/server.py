@@ -475,7 +475,7 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
                 if "PLE on" in line or "expert arena:" in line or "experts via mmap" in line:   # #505: mapped
                     say("arena", f"[almond] {loading}\n"
                                  "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.\n"
-                                 "         Please wait and don't close this window; the browser opens when it is ready.")
+                                 "         Please wait and don't close this window; it says ready when it is.")
                 elif " loaded " in line and "GiB at" in line:
                     say("loaded", "[almond] experts loaded: " + line.split(" loaded ", 1)[1].strip() +
                         f" ({time.time() - t0:.0f} s so far)")
@@ -5718,8 +5718,8 @@ def desktop_vram_note(backend, vram_free_mib, args: list, desktop: bool) -> str:
         return ""
     return (f"[almond] note: {vram_free_mib} MiB of VRAM free with the model loaded. If this AMD card also drives your "
             "desktop and the desktop or apps crash after the start (the driver moves the expert cache to RAM and "
-            "the OOM killer ends the session), keep more VRAM free: ./setup.sh --vram-reserve-mib "
-            f"{DESKTOP_RESERVE_MIB} (remembered; the expert cache gets "
+            "the OOM killer ends the session), keep more VRAM free: --vram-reserve-mib "
+            f"{DESKTOP_RESERVE_MIB} in the model's configuration (local/*-local*.json; the expert cache gets "
             f"{(DESKTOP_RESERVE_MIB - reserve) / 1024:.1f} GB less, a few % of speed)")
 
 
