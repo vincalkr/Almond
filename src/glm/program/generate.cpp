@@ -1643,11 +1643,15 @@ static int glm_pack_generate(const Options& o) {
     // snapshot's position - an edited or replaced last message, another chat with the same system prompt and tools, a
     // client that rewrote an older turn - restores the longest checkpoint it starts with and reads only the rest,
     // where it read everything from token 0.  One conversation at a time (not the several-conversation scheduler) and
-    // text prompts only; ALMOND_GLM_NO_REUSE turns it off with the rest of the reuse.
+    // text prompts only; ALMOND_GLM_NO_REUSE turns it off with the rest of the reuse.  ALMOND_GLM_CKPT_IMAGES=1
+    // (opt-in): prompts with pictures get them too, at the turn markers only (never inside a picture's tokens), each
+    // keeping img_hash() of the pictures before it and restored only by a prompt with the same pictures there.
     struct Ckpt {
         std::vector<int32_t> tokens;   // the conversation's first tokens the checkpoint holds the state after (empty: free)
         uint64_t used = 0;
+        uint64_t img = kNoImages;      // img_hash() of the pictures in `tokens`
     };
+    static const bool ckpt_img = env_num("ALMOND_GLM_CKPT_IMAGES", 0) != 0;
     std::vector<Ckpt> ckpts;
     uint64_t ckpt_clock = 0;
     const int ckpt_max = model.fast() && model.seq_count() <= 1 && getenv("ALMOND_GLM_NO_REUSE") == nullptr
@@ -1663,7 +1667,7 @@ static int glm_pack_generate(const Options& o) {
     const auto ckpt_marks = [&](const std::vector<int32_t>& prompt, size_t from, size_t end) {
         constexpr int32_t kUserTok = 154827, kObsTok = 154829;   // <|user|>, <|observation|>
         std::vector<size_t> at;
-        if (ckpt_max <= 0 || !cur_img_pos.empty() || end <= from + 512) return at;
+        if (ckpt_max <= 0 || (!cur_img_pos.empty() && !ckpt_img) || end <= from + 512) return at;
         size_t first = 0, last = 0;
         for (size_t i = 1; i < end; ++i)
             if (prompt[i] == kUserTok || prompt[i] == kObsTok) {
@@ -1675,7 +1679,7 @@ static int glm_pack_generate(const Options& o) {
             if (p >= from + 512 && p < end) turns.push_back(p);
         at = turns;
         // the periodic ones, but none within 512 tokens of a turn boundary (that one holds the same state, more useful)
-        if (ckpt_every > 0)
+        if (ckpt_every > 0 && cur_img_pos.empty())
             for (size_t p = from + (size_t) ckpt_every; p < end; p += (size_t) ckpt_every) {
                 bool by_turn = false;   // (not `near`: Windows' headers define it away)
                 for (const size_t t : turns) by_turn = by_turn || (p + 512 > t && t + 512 > p);
@@ -1724,6 +1728,7 @@ static int glm_pack_generate(const Options& o) {
             return;
         }
         ckpts[c].tokens.assign(prompt.begin(), prompt.begin() + (long) p);
+        ckpts[c].img = img_hash(p);
         ckpts[c].used = ++ckpt_clock;
     };
     // A route that found a non-finite score (or an expert id out of range) means a NaN or an infinity in the state the
@@ -1775,11 +1780,11 @@ static int glm_pack_generate(const Options& o) {
                              img_hash(snap_tokens.size()) == snap_img_hash && getenv("ALMOND_GLM_NO_REUSE") == nullptr;
         // the longest checkpoint this prompt starts with (it holds less than the snapshot when both match)
         int ck = -1;
-        if (ckpt_max > 0 && cur_img_pos.empty())
+        if (ckpt_max > 0 && (cur_img_pos.empty() || ckpt_img))
             for (int c = 0; c < (int) ckpts.size(); ++c) {
                 const auto& t = ckpts[(size_t) c].tokens;
                 if (!t.empty() && t.size() < prompt.size() && (ck < 0 || t.size() > ckpts[(size_t) ck].tokens.size()) &&
-                    std::equal(t.begin(), t.end(), prompt.begin()))
+                    std::equal(t.begin(), t.end(), prompt.begin()) && img_hash(t.size()) == ckpts[(size_t) c].img)
                     ck = c;
             }
         const size_t ck_len = ck >= 0 ? ckpts[(size_t) ck].tokens.size() : 0;
@@ -1791,7 +1796,7 @@ static int glm_pack_generate(const Options& o) {
             if (slot_max > 0)
                 for (const auto& sl : slots)
                     if (sl.tokens.size() > slot_len && sl.tokens.size() < prompt.size() &&
-                        std::equal(sl.tokens.begin(), sl.tokens.end(), prompt.begin()))
+                        std::equal(sl.tokens.begin(), sl.tokens.end(), prompt.begin()) && img_hash(sl.tokens.size()) == sl.img)
                         slot_len = sl.tokens.size();
             std::string ce;
             if (slot_len > ck_len) {
@@ -1831,7 +1836,7 @@ static int glm_pack_generate(const Options& o) {
         // restore and ckpt_drop_past: a conversation just taken back from a slot gets it too (before, the restore
         // dropped the checkpoint kept here, and an edited turn after A -> B -> A read all of A again: #400)
         if (reuse > 0 && !from_ckpt && reuse == snap_tokens.size() && reuse >= 512 && ckpt_max > 0 &&
-            cur_img_pos.empty()) {
+            (cur_img_pos.empty() || ckpt_img)) {
             static const bool turn_on = [] { const char* v = getenv("ALMOND_GLM_CKPT_TURN"); return !v || atoi(v) != 0; }();
             constexpr int32_t kUserTok = 154827, kObsTok = 154829;   // <|user|>, <|observation|>
             size_t last = 0;

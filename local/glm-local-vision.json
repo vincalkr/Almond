@@ -25,7 +25,8 @@
     "ALMOND_GLM_SLOT_KEEP": "1",
     "ALMOND_GLM_SLOT_DIR": "local/glm-slots",
     "ALMOND_GLM_MISS_SKIP_W": "0.16",
-    "ALMOND_GLM_MISS_SKIP_FROM": "23"
+    "ALMOND_GLM_MISS_SKIP_FROM": "23",
+    "ALMOND_GLM_CKPT_IMAGES": "1"
   },
   "cwd": ".",
   "tokenizer": "models/glm53-gsq-rco/pack/tokenizer",

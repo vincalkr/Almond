@@ -124,6 +124,18 @@ Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
   after a stop and a start the next turn (18,150 tokens) took 0.8 s with the resume (202 ms of it the RESTORE) against
   10.6 s read again.
 
+## GLM: checkpoints in conversations with pictures (`ALMOND_GLM_CKPT_IMAGES`, 2026-11-03)
+
+GLM kept its conversation checkpoints (the system prompt's end, the last turn's start, every 16K tokens) for text
+prompts only: in an agent's conversation with a screenshot, a turn that did not continue the previous prompt exactly
+went back to the system prompt's slot and read everything after it again. In a dsh session (GLM, tool screenshots)
+every turn took back 9,545 tokens and read 40,935 to 83,568 again. With `ALMOND_GLM_CKPT_IMAGES=1` a prompt with
+pictures gets checkpoints too, at the turn markers only, each keeping the hash of the pictures before it and taken
+back only by a prompt with the same pictures there. Measured (a 4,563-token system prompt, a picture, a turn edited
+after it, 6,113 tokens): 4,904 tokens from a checkpoint and 1,208 read in 5.1 s, where it took back 4,563 and read
+the picture again. DeepSeek (the longest common prefix, pictures compared by the hash of their bytes) and Qwen (its
+checkpoints keep the pictures' keys) had no such limit. On in `local/glm-local*.json`.
+
 ## GLM-5.3-Flash against llama.cpp (2026-10-30)
 
 Is the engine computing the model right, or are GLM's mistakes in an agent session ours? The same tokens through an
