@@ -119,6 +119,7 @@ core.[0-9]*
 !src/glm/**/core
 build-vision/
 local/glm-slots/
+local/qwen-slots/
 local/vision-memory.json
 local/.run-ctx-*
 local/session-log/

@@ -112,6 +112,12 @@ Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
 - GLM: `ALMOND_GLM_SLOT_KEEP=1`, `ALMOND_GLM_SLOT_DIR=local/glm-slots`: the conversation in the model is saved when
   the engine ends and taken back after a start. Measured: a 7,163-token prompt read in 13.6 s; after a stop and a
   start the same conversation plus a question was taken back from disk in 0.1 s and read 123 new tokens (2.3 s).
+- Qwen: `"conversation_dir": "local/qwen-slots"` in its configuration (`conversation_dir_gib`, default 16): the server
+  (`tools/qwen/serve/serve_qwen.py`) has the engine SAVE the conversation after each reply, drops that conversation's
+  earlier file, and RESTOREs the longest saved prompt a new one starts with when the engine has not read it since it
+  started. Measured on card 0 (an 18,071-token prompt, thinking off): the save is 489 MiB in 160-190 ms per reply;
+  after a stop and a start the next turn (18,150 tokens) took 0.8 s with the resume (202 ms of it the RESTORE) against
+  10.6 s read again.
 
 ## GLM-5.3-Flash against llama.cpp (2026-10-30)
 

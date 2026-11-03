@@ -1167,12 +1167,13 @@ def monitor_text(m: dict, model: dict | None = None) -> str:
 
 def session_dirs() -> list[tuple[str, Path]]:
     """Each model's folder of conversations kept on disk, from its configuration: DeepSeek's --conversation-disk,
-    GLM's ALMOND_GLM_SLOT_DIR."""
+    GLM's ALMOND_GLM_SLOT_DIR, Qwen's conversation_dir."""
     out = []
     for name, cfg, get in (("DeepSeek", "ds41-local.json",
                             lambda c: (c.get("args") or [])[c["args"].index("--conversation-disk") + 1]
                             if "--conversation-disk" in (c.get("args") or []) else None),
-                           ("GLM", "glm-local.json", lambda c: (c.get("env") or {}).get("ALMOND_GLM_SLOT_DIR"))):
+                           ("GLM", "glm-local.json", lambda c: (c.get("env") or {}).get("ALMOND_GLM_SLOT_DIR")),
+                           ("Qwen", "qwen-local.json", lambda c: c.get("conversation_dir"))):
         try:
             d = get(json.loads((ROOT / "local" / cfg).read_text()))
         except (OSError, ValueError):

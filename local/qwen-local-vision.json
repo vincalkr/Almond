@@ -66,5 +66,7 @@
     "gpu": false,
     "max_tokens": 300,
     "threads": 12
-  }
+  },
+  "conversation_dir": "local/qwen-slots",
+  "conversation_dir_gib": 16
 }

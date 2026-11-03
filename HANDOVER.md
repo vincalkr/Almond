@@ -26,7 +26,7 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 - **Images:** DeepSeek and GLM, each encoder in VRAM only for a request with pictures (DeepSeek's loaded and freed; GLM's
   in 2.78 GB the engine lends it, at up to 1,024 image tokens since its memory is measured without flash attention).
 - **Conversations:** each kept in RAM and on disk and resumed from the longest prefix (`local/conv-cache-rco`,
-  `local/glm-slots`); `./almond --sessions` / `--clear-sessions`. Qwen's in RAM only (up to 4, 8 GiB).
+  `local/glm-slots`, `local/qwen-slots`); `./almond --sessions` / `--clear-sessions`.
 
 ## Fixed in the last days
 
