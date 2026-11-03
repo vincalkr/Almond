@@ -484,6 +484,32 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
                     say("cache", f"[almond] filling the GPU's expert cache ({n}) ...")
                 elif "session is up" in line:
                     say("up", "[almond] almost ready ...")
+                # GLM's engine (src/glm): each card warms its expert tiers (VRAM pool + pinned RAM), then serves
+                elif "glm fast: " in line and " expert pool " in line and " slots/layer" in line:
+                    card, rest = line.split("glm fast: ", 1)[1].split(" ", 1)
+                    pool = rest.split(" expert pool ", 1)[1].split(",", 1)[0]
+                    say("cache" + card, f"[almond] {card}: the GPU's expert cache, {pool} ...")
+                elif "glm fast: " in line and "warming the expert tiers" in line:
+                    say("arena", "[almond] loading the experts into RAM (pinned, for both cards) and the GPUs' caches.\n"
+                                 "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR A MINUTE NOW - this is normal.\n"
+                                 "         Please wait and don't close this window; it says ready when it is.")
+                elif "glm fast: " in line and " tiers warm: " in line:
+                    card, rest = line.split("glm fast: ", 1)[1].split(" ", 1)
+                    say("loaded" + card, f"[almond] {card}: experts loaded: " + rest.split("tiers warm: ", 1)[1].strip() +
+                        f" ({time.time() - t0:.0f} s so far)")
+                elif line.startswith("glm slots: "):
+                    say("up", "[almond] almost ready ...")
+                # DeepSeek's engine (src/ds41): the RAM arena, its experts' tiers, then "loaded in"
+                elif line.startswith("arena: pinned"):
+                    say("arena", "[almond] loading the experts into the pinned RAM arena and the GPUs.\n"
+                                 "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR A MINUTE NOW - this is normal.\n"
+                                 "         Please wait and don't close this window; it says ready when it is.")
+                elif line.startswith("VRAM: ") and " of expert slots" in line:
+                    say("cache", "[almond] the GPU's expert cache: " + line.split("-> ", 1)[-1].split(" (", 1)[0] + " ...")
+                elif line.startswith("tier: ") and "seeded in" in line:
+                    say("loaded", "[almond] experts loaded: " + line[6:].strip() + f" ({time.time() - t0:.0f} s so far)")
+                elif line.startswith("loaded in ") and " layers" in line:
+                    say("up", "[almond] almost ready ...")
         if time.time() - last > heartbeat:
             last = time.time()
             print(f"[almond] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
