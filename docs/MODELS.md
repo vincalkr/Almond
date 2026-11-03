@@ -48,6 +48,11 @@ Source: Z.ai's API reference (docs.z.ai, chat completions, the GLM-5.3-Flash ser
 
 Client words: none / off / minimal / `enable_thinking: false` / Anthropic's `disabled` = low (the API's nearest);
 medium = high; xhigh = max.  An Anthropic `budget_tokens` under 2K asks for low, under 8K high, else max.
+
+Context: `--max-context 262144` since 2026-11-03 (the GGUF's `context_length` is 1,048,576; it was 131072).  Measured
+on both cards: the larger K/V leaves 3,452 expert slots in VRAM instead of 3,628; a 400-token reply at low with a short
+prompt runs at 30.4-31.2 tok/s (30.5-30.9 at 131072); a 162,393-token prompt (GLM's own sources) is read and answered
+in 289 s, decode 22.6 tok/s at that length, the answer on topic.
 `ALMOND_GLM_THINK_OFF=1` brings back an Off level (low with the thinking closed at once: not Z.ai's, not measured);
 `ALMOND_GLM_FREE_SAMPLING=1` passes a request's sampling through.
 

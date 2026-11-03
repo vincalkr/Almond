@@ -4,7 +4,7 @@
     "--glm-pack",
     "models/glm53-gsq-rco/pack",
     "--max-context",
-    "131072",
+    "262144",
     "--prefill",
     "auto",
     "--vram-reserve-mib",
