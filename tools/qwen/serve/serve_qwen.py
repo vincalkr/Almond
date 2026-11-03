@@ -17,5 +17,10 @@ sys.path.insert(0, str(ALMOND / "tools"))
 
 from serve import server as S  # noqa: E402
 
+# the template's own name for its top level: xhigh (a client's "high" or "max" is the same level)
+S.REASONING_LEVELS = [["none", "Off", "answers right away"], ["low", "Low", "short"], ["medium", "Medium", "medium"],
+                      ["xhigh", "XHigh", "thorough (the default; high and max are the same)"]]
+S.REASONING_DEFAULT = "xhigh"
+
 if __name__ == "__main__":
     sys.exit(S.main())
