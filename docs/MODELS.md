@@ -196,9 +196,17 @@ BF16 checkpoint's 31 `mtp.*` tensors (`tools/qwen/mtp_fetch.py`, `mtp_pack.py` w
 card 0 (`local/qwen-local.json`). The engine is `src/qwen`, the Qwen path of the engine this model ran on before,
 brought into `almond-engine` (`--qwen`) on Almond's ggml.
 
-Thinking and sampling are the model's own: its template's levels none (`enable_thinking` false) / low / medium /
-xhigh (the default; high is xhigh), the server's defaults; the GGUF's `general.sampling` temperature 1.0, top_p 0.95,
-top_k 20 in the configuration.
+Thinking and sampling as the model card (Qwen/Qwen3.8-Flash-Next) gives them, set by `tools/qwen/serve/serve_qwen.py`:
+
+| | thinking (default) | thinking off |
+| --- | --- | --- |
+| levels | xhigh (default), medium, low | `enable_thinking` false |
+| temperature / top_p / top_k | 1.0 / 0.95 / 20 | 0.7 / 0.8 / 20 |
+| presence penalty | 0 | 1.5 |
+
+Client words: high and max are xhigh; none / off are thinking off. A request's own sampling values win.  Measured
+(the same question, two runs a level, 6,000 tokens of room): thinking off 38-51 tokens with no reasoning, low 97-103
+characters of reasoning, medium 117-224, xhigh 276-315; low to xhigh answered right.
 
 What changed on the way in, beside the names (`almond::qwen`, `ALMOND_*`):
 

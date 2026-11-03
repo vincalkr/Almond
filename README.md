@@ -122,8 +122,9 @@ instead.
   top_p is 0.95-1.0 (default 1.0); without thinking temperature 0-2 (default 1.0) and top_p 1.0; no top_k, min_p or
   penalties; an unset max_tokens is 8K without thinking, 64K with it, 128K at max effort.
   `ALMOND_DS41_FREE_SAMPLING=1` passes a request's values as they are.
-- Qwen3.8-Flash-Next: its template's levels, none (`enable_thinking` false) / low / medium / xhigh (its default;
-  high is xhigh); sampling from the GGUF (temperature 1.0, top_p 0.95, top_k 20).
+- Qwen3.8-Flash-Next follows its model card: thinking xhigh (the default) / medium / low, or off (`enable_thinking`
+  false; a client's high or max is xhigh); sampling with thinking temperature 1.0, top_p 0.95, top_k 20, without it
+  0.7, 0.8, 20 and presence penalty 1.5 (a request's own values win).
 - GLM-5.3-Flash follows Z.ai's API: it always thinks, at low / high / max (default max; none, minimal and
   Anthropic's disabled are low, medium high, xhigh max); temperature 0-1 (default 1.0), top_p 0.01-1 (0.95), no
   penalties, top_k or min_p, at most 128K tokens out. `ALMOND_GLM_FREE_SAMPLING=1` and `ALMOND_GLM_THINK_OFF=1`
