@@ -200,7 +200,7 @@ Thinking and sampling as the model card (Qwen/Qwen3.8-Flash-Next) gives them, se
 
 | | thinking (default) | thinking off |
 | --- | --- | --- |
-| levels | xhigh (default), medium, low | `enable_thinking` false |
+| levels | xhigh (default), medium, low | off (`enable_thinking` false) |
 | temperature / top_p / top_k | 1.0 / 0.95 / 20 | 0.7 / 0.8 / 20 |
 | presence penalty | 0 | 1.5 |
 

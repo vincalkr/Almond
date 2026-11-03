@@ -115,8 +115,9 @@ instead.
 ```
 
 - thinking: each model's own levels, from the client's words. GLM-5.3-Flash: low / high / max (its default; an
-  Anthropic budget under 2K low, under 8K high, else max). DeepSeek-V4.1: off / low (50) /
-  high (75, default) / max (100) or a number 1-100 (`none` is taken as off). `--nothink`, `--think`, `--think-max`, `--think-level L`; `/think L`,
+  Anthropic budget under 2K low, under 8K high, else max). Qwen3.8-Flash-Next: off / low / medium / xhigh (its
+  default; high and max are xhigh). DeepSeek-V4.1: off / low (50) /
+  high (75, default) / max (100) or a number 1-100 (`none` is taken as off). `--nothink`, `--think`, `--think-max` (the model's most thorough level), `--think-level L`; `/think L`,
   `/nothink` in the chat. `/health` and `/v1/models` say which levels a model has.
 - DeepSeek's sampling follows its cloud API (deepseek-flash): with thinking the temperature has no effect (1.0) and
   top_p is 0.95-1.0 (default 1.0); without thinking temperature 0-2 (default 1.0) and top_p 1.0; no top_k, min_p or

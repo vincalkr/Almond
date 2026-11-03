@@ -7,7 +7,8 @@
   ./almond --ctx 65536           the context window of the models it starts (a running server keeps its own)
 
 Thinking: --nothink, --think (the model's default), --think-max, --think-level LEVEL - the levels are the model's own
-(GLM-5.3-Flash: low / high / max, it always thinks; DeepSeek-V4.1: off / low / high / max = 0 / 50 / 75 / 100).  In the conversation:
+(GLM-5.3-Flash: low / high / max, it always thinks; DeepSeek-V4.1: off / low / high / max = 0 / 50 / 75 / 100;
+Qwen3.8-Flash-Next: off / low / medium / xhigh).  In the conversation:
 
   /help  /quit  /models  /model NAME  /think [LEVEL]  /nothink  /read FILE  /system TEXT  /ctx  /status
   /new               a new conversation (the current one is saved first; /clear is the same)
@@ -593,6 +594,8 @@ class Chat:
         if w == "off" and "off" not in vals and vals:      # a model that always thinks (GLM-5.3): its lowest level
             say(f"{DIM}{self.model['id']} always thinks: {vals[0]}, its lowest level{RESET}")
             w = vals[0]
+        if w in ("high", "max") and w not in vals and vals and vals[-1] == "xhigh":   # Qwen: both are its xhigh
+            w = "xhigh"
         if w.isdigit() and vals == ["off", "low", "high", "max"]:   # 1-100: the nearest named level
             n = int(w)
             w = "off" if n == 0 else "low" if n <= 50 else "high" if n <= 75 else "max"
@@ -1353,7 +1356,7 @@ def main() -> int:
         if a.nothink:
             chat.set_level("off")
         elif a.think_max:
-            chat.set_level("max")
+            chat.set_level(chat.values()[-1] if chat.values() else "max")   # the model's most thorough level
         elif a.think_level and not chat.set_level(a.think_level):
             return 2
         if a.prompt is not None:
