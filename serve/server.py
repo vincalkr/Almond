@@ -437,6 +437,43 @@ def experts_loading_words(args: list, size: str) -> str:
     return f"loading the experts into RAM ({size}) and locking part of them for the GPU."
 
 
+def start_step(line: str):
+    """One line of an engine's start log -> the start's step it marks, the same steps whichever model runs: "arena"
+    (the experts start going into RAM), "loaded" (they are in, with what), "cache" (the GPU's expert cache, its size),
+    "up" (the engine is about to serve).  Each engine words its log its own way (Qwen's src/qwen, GLM's src/glm,
+    DeepSeek's src/ds41); None for every other line."""
+    # Qwen
+    if "PLE on" in line or "expert arena:" in line or "experts via mmap" in line:   # #505: mapped
+        return "arena", ""
+    if " loaded " in line and "GiB at" in line:
+        return "loaded", line.split(" loaded ", 1)[1].strip()
+    if "expert cache " in line and " slots, " in line and "auto" not in line:
+        return "cache", line.split("expert cache ", 1)[1].split(";")[0].replace(" slots,", " experts,").strip()
+    if "session is up" in line:
+        return "up", ""
+    # GLM: per card ("glm fast: CUDA0 ..."), its VRAM pool, then its RAM tier warmed
+    if line.startswith("glm fast: ") and " expert pool " in line and " slots/layer" in line:
+        card, rest = line[10:].split(" ", 1)
+        return "cache", f"{card}, " + rest.split(" expert pool ", 1)[1].split(",", 1)[0]
+    if line.startswith("glm fast: ") and "warming the expert tiers" in line:
+        return "arena", ""
+    if line.startswith("glm fast: ") and " tiers warm: " in line:
+        card, rest = line[10:].split(" ", 1)
+        return "loaded", f"{card}, " + rest.split("tiers warm: ", 1)[1].strip()
+    if line.startswith("glm slots: "):
+        return "up", ""
+    # DeepSeek
+    if line.startswith("VRAM: ") and " of expert slots" in line:
+        return "cache", line.split("-> ", 1)[-1].split(" (", 1)[0]
+    if line.startswith("arena: pinned"):
+        return "arena", ""
+    if line.startswith("tier: ") and "seeded in" in line:
+        return "loaded", line[6:].strip()
+    if line.startswith("loaded in ") and " layers" in line:
+        return "up", ""
+    return None
+
+
 def narrate_start(log_path: str, offset: int, args: list, done: threading.Event, heartbeat=20.0) -> None:
     """While the engine starts, say in the server window what it is doing, from its log: the start reads tens of GB
     into RAM and locks part of it for the GPU, and on many PCs everything is slow or frozen for a minute or more -
@@ -472,43 +509,19 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
             cut = chunk.rfind(b"\n") + 1
             pos += cut
             for line in chunk[:cut].decode("utf-8", "replace").splitlines():
-                if "PLE on" in line or "expert arena:" in line or "experts via mmap" in line:   # #505: mapped
+                step = start_step(line)
+                if step is None:
+                    continue
+                key, detail = step
+                if key == "arena":
                     say("arena", f"[almond] {loading}\n"
                                  "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.\n"
                                  "         Please wait and don't close this window; it says ready when it is.")
-                elif " loaded " in line and "GiB at" in line:
-                    say("loaded", "[almond] experts loaded: " + line.split(" loaded ", 1)[1].strip() +
-                        f" ({time.time() - t0:.0f} s so far)")
-                elif "expert cache " in line and " slots, " in line and "auto" not in line:
-                    n = line.split("expert cache ", 1)[1].split(";")[0].replace(" slots,", " experts,").strip()
-                    say("cache", f"[almond] filling the GPU's expert cache ({n}) ...")
-                elif "session is up" in line:
-                    say("up", "[almond] almost ready ...")
-                # GLM's engine (src/glm): each card warms its expert tiers (VRAM pool + pinned RAM), then serves
-                elif "glm fast: " in line and " expert pool " in line and " slots/layer" in line:
-                    card, rest = line.split("glm fast: ", 1)[1].split(" ", 1)
-                    pool = rest.split(" expert pool ", 1)[1].split(",", 1)[0]
-                    say("cache" + card, f"[almond] {card}: the GPU's expert cache, {pool} ...")
-                elif "glm fast: " in line and "warming the expert tiers" in line:
-                    say("arena", "[almond] loading the experts into RAM (pinned, for both cards) and the GPUs' caches.\n"
-                                 "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR A MINUTE NOW - this is normal.\n"
-                                 "         Please wait and don't close this window; it says ready when it is.")
-                elif "glm fast: " in line and " tiers warm: " in line:
-                    card, rest = line.split("glm fast: ", 1)[1].split(" ", 1)
-                    say("loaded" + card, f"[almond] {card}: experts loaded: " + rest.split("tiers warm: ", 1)[1].strip() +
-                        f" ({time.time() - t0:.0f} s so far)")
-                elif line.startswith("glm slots: "):
-                    say("up", "[almond] almost ready ...")
-                # DeepSeek's engine (src/ds41): the RAM arena, its experts' tiers, then "loaded in"
-                elif line.startswith("arena: pinned"):
-                    say("arena", "[almond] loading the experts into the pinned RAM arena and the GPUs.\n"
-                                 "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR A MINUTE NOW - this is normal.\n"
-                                 "         Please wait and don't close this window; it says ready when it is.")
-                elif line.startswith("VRAM: ") and " of expert slots" in line:
-                    say("cache", "[almond] the GPU's expert cache: " + line.split("-> ", 1)[-1].split(" (", 1)[0] + " ...")
-                elif line.startswith("tier: ") and "seeded in" in line:
-                    say("loaded", "[almond] experts loaded: " + line[6:].strip() + f" ({time.time() - t0:.0f} s so far)")
-                elif line.startswith("loaded in ") and " layers" in line:
+                elif key == "loaded":
+                    say("loaded" + detail, f"[almond] experts loaded: {detail} ({time.time() - t0:.0f} s so far)")
+                elif key == "cache":
+                    say("cache" + detail, f"[almond] filling the GPU's expert cache ({detail}) ...")
+                elif key == "up":
                     say("up", "[almond] almost ready ...")
         if time.time() - last > heartbeat:
             last = time.time()
