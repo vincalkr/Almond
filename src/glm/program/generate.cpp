@@ -1288,6 +1288,9 @@ static int glm_pack_generate(const Options& o) {
     // same tokens with another picture must not reuse it
     std::vector<int64_t> cur_img_pos;
     std::vector<float> cur_img_rows;
+    // ... and each image token's picture key (GENI key img_keys=<k>,<k>,..., one per record: the server's hash of the
+    // picture's bytes, so a state is found again after the encoder ran again; empty: the rows are hashed)
+    std::vector<uint64_t> cur_img_key;
     // the thinking budget (GEN keys think_budget=<n> think_end=<id>, the server's run config): a reasoning block still
     // open after n tokens is closed - the next token is </think> instead of the sampled one - and the answer follows
     // in the same decode
@@ -1299,7 +1302,13 @@ static int glm_pack_generate(const Options& o) {
     const auto img_hash = [&](size_t len) {
         uint64_t h = 1469598103934665603ull;   // FNV-1a over the positions and rows inside [0, len)
         const size_t E = (size_t) model.geometry().n_embd;
+        const bool by_key = cur_img_key.size() == cur_img_pos.size() && !cur_img_key.empty();
         for (size_t k = 0; k < cur_img_pos.size() && (size_t) cur_img_pos[k] < len; ++k) {
+            if (by_key) {
+                h = (h ^ cur_img_key[k]) * 1099511628211ull;
+                h = (h ^ (uint64_t) cur_img_pos[k]) * 1099511628211ull;
+                continue;
+            }
             const unsigned char* b = (const unsigned char*) (cur_img_rows.data() + k * E);
             for (size_t j = 0; j < E * sizeof(float); ++j) h = (h ^ b[j]) * 1099511628211ull;
             h = (h ^ (uint64_t) cur_img_pos[k]) * 1099511628211ull;
@@ -1650,8 +1659,13 @@ static int glm_pack_generate(const Options& o) {
         std::vector<int32_t> tokens;   // the conversation's first tokens the checkpoint holds the state after (empty: free)
         uint64_t used = 0;
         uint64_t img = kNoImages;      // img_hash() of the pictures in `tokens`
+        bool user = false;             // it ends just before a <|user|> marker (a user turn's start)
     };
     static const bool ckpt_img = env_num("ALMOND_GLM_CKPT_IMAGES", 0) != 0;
+    // ALMOND_GLM_CKPT_USER=1 (opt-in): a checkpoint at the last user turn's start too, kept while it is the latest one
+    // there - an agent's client drops the reasoning of its earlier steps from the turn, so its next prompt leaves the
+    // conversation right after that marker, behind the checkpoints its steps placed (which pushed that one out)
+    static const bool ckpt_user = env_num("ALMOND_GLM_CKPT_USER", 0) != 0;
     std::vector<Ckpt> ckpts;
     uint64_t ckpt_clock = 0;
     const int ckpt_max = model.fast() && model.seq_count() <= 1 && getenv("ALMOND_GLM_NO_REUSE") == nullptr
@@ -1668,14 +1682,15 @@ static int glm_pack_generate(const Options& o) {
         constexpr int32_t kUserTok = 154827, kObsTok = 154829;   // <|user|>, <|observation|>
         std::vector<size_t> at;
         if (ckpt_max <= 0 || (!cur_img_pos.empty() && !ckpt_img) || end <= from + 512) return at;
-        size_t first = 0, last = 0;
+        size_t first = 0, last = 0, last_user = 0;
         for (size_t i = 1; i < end; ++i)
             if (prompt[i] == kUserTok || prompt[i] == kObsTok) {
                 if (first == 0 && prompt[i] == kUserTok) first = i;
+                if (prompt[i] == kUserTok) last_user = i;
                 last = i;
             }
         std::vector<size_t> turns;
-        for (const size_t p : {first, last})
+        for (const size_t p : {first, ckpt_user ? last_user : first, last})
             if (p >= from + 512 && p < end) turns.push_back(p);
         at = turns;
         // the periodic ones, but none within 512 tokens of a turn boundary (that one holds the same state, more useful)
@@ -1716,11 +1731,19 @@ static int glm_pack_generate(const Options& o) {
     // the state now (after prompt[0, p)) into a free or the least recently used checkpoint
     const auto ckpt_keep = [&](const std::vector<int32_t>& prompt, size_t p, bool from_snapshot = false) {
         if ((int) ckpts.size() < ckpt_max) ckpts.emplace_back();
-        size_t c = 0;
+        // (ALMOND_GLM_CKPT_USER: the latest user turn's start is not pushed out)
+        size_t keep = SIZE_MAX;
+        if (ckpt_user)
+            for (size_t i = 0; i < ckpts.size(); ++i)
+                if (ckpts[i].user && !ckpts[i].tokens.empty() &&
+                    (keep == SIZE_MAX || ckpts[i].tokens.size() > ckpts[keep].tokens.size()))
+                    keep = i;
+        size_t c = SIZE_MAX;
         for (size_t i = 0; i < ckpts.size(); ++i) {
             if (ckpts[i].tokens.empty()) { c = i; break; }
-            if (ckpts[i].used < ckpts[c].used) c = i;
+            if (i != keep && (c == SIZE_MAX || ckpts[i].used < ckpts[c].used)) c = i;
         }
+        if (c == SIZE_MAX) c = 0;
         std::string e;
         ckpts[c].tokens.clear();
         if (!(from_snapshot ? model.ckpt_save_snapshot((int) c, e) : model.ckpt_save((int) c, e))) {
@@ -1729,6 +1752,7 @@ static int glm_pack_generate(const Options& o) {
         }
         ckpts[c].tokens.assign(prompt.begin(), prompt.begin() + (long) p);
         ckpts[c].img = img_hash(p);
+        ckpts[c].user = p < prompt.size() && prompt[p] == 154827;   // <|user|>
         ckpts[c].used = ++ckpt_clock;
     };
     // A route that found a non-finite score (or an expert id out of range) means a NaN or an infinity in the state the
@@ -1788,10 +1812,36 @@ static int glm_pack_generate(const Options& o) {
                     ck = c;
             }
         const size_t ck_len = ck >= 0 ? ckpts[(size_t) ck].tokens.size() : 0;
+        // ALMOND_GLM_CKPT_WHY=1: why each checkpoint was not taken (a diagnosis line on stderr)
+        static const bool ckpt_why = env_num("ALMOND_GLM_CKPT_WHY", 0) != 0;
+        if (ckpt_why && !snap_ok) {
+            std::fprintf(stderr, "glm checkpoints why: prompt %zu, %zu pictures, %zu checkpoints%s\n", prompt.size(),
+                         cur_img_pos.size(), ckpts.size(), ckpt_max > 0 ? "" : " (off)");
+            for (size_t c = 0; c < ckpts.size(); ++c) {
+                const auto& t = ckpts[c].tokens;
+                size_t n = 0;
+                while (n < t.size() && n < prompt.size() && t[n] == prompt[n]) ++n;
+                std::fprintf(stderr, "glm checkpoints why:   #%zu at %zu: tokens %s (common %zu), pictures %s\n", c,
+                             t.size(), t.empty() ? "free" : n == t.size() ? "match" : "differ", n,
+                             n == t.size() && !t.empty() ? (img_hash(t.size()) == ckpts[c].img ? "match" : "differ") : "-");
+            }
+        }
         bool from_ckpt = false;
         if (snap_ok && snap_tokens.size() >= ck_len && model.snapshot_restore()) reuse = snap_tokens.size();
         if (reuse == 0 && ck >= 0) {
-            slot_put("");              // the conversation in the model goes on differently past the checkpoint: kept
+            // ALMOND_GLM_SLOT_SKIP_TAIL=N: not kept when the checkpoint is the model's conversation but for its last
+            // N tokens or fewer (an agent's dropped reasoning, which does not come back): a 2 GB save costs 100+ s
+            // when the RAM is full
+            static const size_t skip_tail = (size_t) env_num("ALMOND_GLM_SLOT_SKIP_TAIL", 0);
+            const bool short_tail = skip_tail > 0 && snap_tokens.size() >= ck_len &&
+                                    snap_tokens.size() - ck_len <= skip_tail &&
+                                    std::equal(ckpts[(size_t) ck].tokens.begin(), ckpts[(size_t) ck].tokens.end(),
+                                               snap_tokens.begin());
+            if (short_tail)
+                std::fprintf(stderr, "glm slots: not kept - the checkpoint holds all but its last %zu tokens\n",
+                             snap_tokens.size() - ck_len);
+            else
+                slot_put("");          // the conversation in the model goes on differently past the checkpoint: kept
             size_t slot_len = 0;       // a slot that holds more of this prompt is taken instead (below)
             if (slot_max > 0)
                 for (const auto& sl : slots)
@@ -4108,7 +4158,7 @@ static int glm_pack_generate(const Options& o) {
             std::string bias_err;
             int pen_n = 0;
             float pen_repeat = 1.0f, pen_freq = 0.0f, pen_present = 0.0f;
-            std::string tok2, ids, emb_path;
+            std::string tok2, ids, emb_path, img_keys;
             while (ss >> tok2) {
                 const size_t eq = tok2.find('=');
                 if (eq == std::string::npos) {
@@ -4134,6 +4184,7 @@ static int glm_pack_generate(const Options& o) {
                 else if (k == "miss_skip_w") { req_msw = std::atof(v.c_str()); }
                 else if (k == "miss_skip_from") { req_msf = std::atoi(v.c_str()); }
                 else if (k == "rid") { req_rid = std::atoi(v.c_str()); }
+                else if (k == "img_keys") { img_keys = v; }
                 else if (k == "spec") { req_spec = std::atoi(v.c_str()); }
                 else if (k == "spec_min_p") { req_spec_min_p = std::atof(v.c_str()); }
                 else if (k == "spec_n_min") { req_spec_n_min = std::atoi(v.c_str()); }
@@ -4212,7 +4263,9 @@ static int glm_pack_generate(const Options& o) {
             lp_ctx.clear();   // a generation saves its own state over LOGP's
             cur_img_pos.clear();
             cur_img_rows.clear();
+            cur_img_key.clear();
             if (cmd == "GENI") {
+                std::vector<size_t> rec_rows;   // each record's rows (for img_keys)
                 const int64_t E = model.geometry().n_embd;
                 std::FILE* f = std::fopen(emb_path.c_str(), "rb");
                 std::string ge = f ? "" : "cannot open " + emb_path;
@@ -4228,6 +4281,7 @@ static int glm_pack_generate(const Options& o) {
                         break;
                     }
                     const size_t at = cur_img_rows.size();
+                    rec_rows.push_back((size_t) hdr[1]);
                     cur_img_rows.resize(at + (size_t) hdr[1] * (size_t) E);
                     if (std::fread(cur_img_rows.data() + at, sizeof(float) * (size_t) E, (size_t) hdr[1], f) !=
                         (size_t) hdr[1])
@@ -4239,6 +4293,19 @@ static int glm_pack_generate(const Options& o) {
                 if (ge.empty() && (int64_t) cur_img_pos.size() * E != (int64_t) cur_img_rows.size())
                     ge = std::to_string(cur_img_pos.size()) + " image tokens, " +
                          std::to_string(cur_img_rows.size() / (size_t) E) + " image rows";
+                if (ge.empty() && !img_keys.empty()) {   // one key a record, else the rows are hashed
+                    std::vector<uint64_t> keys;
+                    for (size_t at = 0; at <= img_keys.size();) {
+                        size_t end = img_keys.find(',', at);
+                        if (end == std::string::npos) end = img_keys.size();
+                        uint64_t kh = 1469598103934665603ull;
+                        for (size_t j = at; j < end; ++j) kh = (kh ^ (unsigned char) img_keys[j]) * 1099511628211ull;
+                        keys.push_back(kh);
+                        at = end + 1;
+                    }
+                    if (keys.size() == rec_rows.size())
+                        for (size_t r = 0; r < keys.size(); ++r) cur_img_key.insert(cur_img_key.end(), rec_rows[r], keys[r]);
+                }
                 if (!ge.empty()) {
                     cur_img_pos.clear();
                     cur_img_rows.clear();

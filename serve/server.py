@@ -3598,7 +3598,7 @@ class Service:
         ids = self.encode_prompt(messages, tools, kwargs)
         if force and kwargs.get("enable_thinking", True) is False:
             ids = ids + self.tok.encode(force, parse_special=True)
-        self.embeddings.path = None
+        self.embeddings.path = self.embeddings.keys = None
         images = images_of(messages)
         if images:
             if self.vision is None:
@@ -3647,6 +3647,9 @@ class Service:
             # one more for every retry of a 503.  run() deletes it; drop_embeddings() if run() never starts.
             combined = combined_embeddings_path(self.vision.dir, sum(Path(p).stat().st_size for p, _ in encoded))
             self.embeddings.path = combined             # first, so a half-written one is found as well
+            # each picture's identity (the sha256 of its bytes, its cached file's name), in prompt order: the GLM
+            # engine keys its conversation states on these (img_keys=), the same after a restart; other engines skip it
+            self.embeddings.keys = ",".join(Path(p).stem for p, _ in encoded)
             write_temporary(combined, [p for p, _ in encoded])
         if req is not None and req.get("almond_prefix") is not None:
             req["almond_prefix"] = self.resolve_prefix(req["almond_prefix"], messages, tools, kwargs, ids, bool(images))
@@ -3855,6 +3858,8 @@ class Service:
         guard = loop_guard.ToolSafeGuard(-1, False, piece=Detokenizer(self.tok).push) if self.loop_guard else None
         guard_seq, guard_act, guard_closed = [], None, None   # the ids it read; a loop to act on; the one closing
         emb, self.embeddings.path = getattr(self.embeddings, "path", None), None   # this run's to delete now
+        emb_keys, self.embeddings.keys = getattr(self.embeddings, "keys", None), None
+        emb_arg = f"img_keys={emb_keys} {emb}" if emb and emb_keys else emb   # (a key before the file: see prepare)
         # Only a DONE line replaces engine.last, so a request that died, errored or was disconnected must not have
         # the PREVIOUS request's decode figures recorded as its own: each pass keeps its own DONE (a segment) if
         # one arrived.  A reasoning-budget continuation is another native generation, not another API request,
@@ -3901,7 +3906,7 @@ class Service:
                         segment_before = getattr(self.engine, "last", None)
                         smp_call, n_call = guard.sampling(sampling, len(guard_seq), max_new - n) if guard is not None \
                             else (sampling, max_new - n)        # (the guard's penalty: a call of its own)
-                        gen = self.engine.generate(prompt, n_call, smp_call, cancel, embeddings=emb) if emb \
+                        gen = self.engine.generate(prompt, n_call, smp_call, cancel, embeddings=emb_arg) if emb \
                             else self.engine.generate(prompt, n_call, smp_call, cancel)
                         recover_prompt = None
                         seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed

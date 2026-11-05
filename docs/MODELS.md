@@ -136,6 +136,24 @@ after it, 6,113 tokens): 4,904 tokens from a checkpoint and 1,208 read in 5.1 s,
 the picture again. DeepSeek (the longest common prefix, pictures compared by the hash of their bytes) and Qwen (its
 checkpoints keep the pictures' keys) had no such limit. On in `local/glm-local*.json`.
 
+## GLM: long agent sessions (`ALMOND_GLM_CKPT_USER`, `ALMOND_GLM_SLOT_SKIP_TAIL`, 2026-11-05)
+
+In a dsh session at 131K-137K tokens with 9,000-28,000 picture tokens three things still sent turns back to the
+system prompt's slot or stalled them:
+- the pictures' hash was taken over their embeddings, which the encoder recomputes after a restart: the server now
+  sends each picture's file key (`img_keys=` in the GENI request) and the hash is taken over those;
+- dsh's template drops the earlier steps' reasoning, so a prompt departs right after the last user turn's start,
+  and the four checkpoints (least recently used out) all lay past it: `ALMOND_GLM_CKPT_USER=1` keeps a checkpoint at
+  the last user turn and never evicts the longest one of those;
+- before reading such a prompt the old conversation was saved to `local/glm-slots` (2.0-2.1 GB): 1.6-8 s at 94K-100K
+  tokens, 97-140 s at 133K-138K with the RAM full (112 of 122 GB used, the engine 104 GB), the cards idle meanwhile.
+  `ALMOND_GLM_SLOT_SKIP_TAIL=8192` skips that save when the checkpoint is the old conversation but for its last 8,192
+  tokens or fewer (the dropped reasoning, which does not come back).
+Measured in that session: 135,437 of 137,635 tokens from a checkpoint, 2,182 read in 10.1 s (216 tok/s); then turns
+at 176K-181K taking back all but 144-5,216 tokens (3-16 s). The skip is not measured yet (built, not run).
+`ALMOND_GLM_CKPT_WHY=1` prints, for a prompt that misses the snapshot, why each checkpoint was not taken. All on in
+`local/glm-local*.json`.
+
 ## GLM-5.3-Flash against llama.cpp (2026-10-30)
 
 Is the engine computing the model right, or are GLM's mistakes in an agent session ours? The same tokens through an
