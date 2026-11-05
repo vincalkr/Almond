@@ -206,6 +206,16 @@ class VisibleAnswer(unittest.TestCase):
         self.assertEqual(self.run_all(self.HEAD + "Ultimo check (simulo lo stato `show):" + CALL)[0], ("write",))
         self.assertEqual(self.run_all(self.HEAD + "a `b " + CALL + "\nthen")[0], ("write",))
 
+    def test_a_held_call_is_settled_under_a_wrapped_feed(self):
+        # serve_glm.py wraps feed() and skips an empty delta: finish() must still settle a call held after an open
+        # backtick (GLM-5.3, 2026-11-05: the whole call arrived in one delta, then the turn ended)
+        class Wrapped(OutputParser):
+            def feed(self, delta):
+                return super().feed(delta) if delta else []
+        p = Wrapped(thinking=True, tools=SCHEMA)
+        evs = p.feed(self.HEAD + "Errore (`default.jpg), recupero:" + CALL) + p.finish("stop")
+        self.assertEqual(calls(evs), ["write"])
+
     def test_a_call_on_the_fence_closing_line_fires(self):
         # GLM-5.3 (2026-10-31): "```bash\nbash install.sh\n```<tool_call>..." - the fence's end and the call on one
         # line; the call is not inside the code

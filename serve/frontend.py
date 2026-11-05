@@ -1167,6 +1167,11 @@ class OutputParser:
                 if batch and out[-1].kind == "tool_call":
                     self.state, self.lead = "call", False
 
+    _feed_orig = feed                   # the parser's own feed, whatever a model's wrapper puts in its place
+
+    def _feed_held(self) -> list[Event]:
+        return self._feed_orig("")
+
     def finish(self, reason: str | None = None) -> list[Event]:
         """End of generation: flush whatever is held (an unterminated tool call is returned as content; one that was
         already announced stays unfinished: its JSON is not closed and no "tool_call" follows it, #211).  `reason` is
@@ -1175,7 +1180,7 @@ class OutputParser:
         out = []
         if self.buf and self.state == "content":
             self.ending = True                  # a call held after an open backtick is decided now
-            out += self.feed("")
+            out += self._feed_held()   # (the class's own feed: a model's wrapper may skip an empty delta)
         if self.pending:
             out += self._release(reason in (None, "stop") and self.state == "reasoning" and not self.buf)
         if self.state == "call" and self.bare and function_end(self.buf) >= 0:
