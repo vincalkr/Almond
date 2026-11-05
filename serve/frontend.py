@@ -720,6 +720,7 @@ class OutputParser:
         self.rescued = 0             # calls delivered from the reasoning
         self.refused = 0             # declared calls kept as reasoning text (quoted, or the turn was cut)
         self.fence, self.line, self.ticks = "", "", 0
+        self.ending = False          # finish() is settling what is held
         # recover (opt-in, the config's "tool_call_recovery"): a declared tool's call written next to the template's
         # form is the call - `<parameter=NAME>` as the opener, JSON inside <tool_call>, a bare <function=NAME> at the
         # start of a line outside code, or a second call in the same <tool_call> (which otherwise merges into one).
@@ -1064,7 +1065,18 @@ class OutputParser:
                 snap = (self.fence, self.line, self.ticks)
                 self._track(self.buf[:i])
                 in_code = self._in_code()
+                inline = in_code and not self.fence      # inline code only (a backtick still open), not a fence
                 self.fence, self.line, self.ticks = snap
+                if inline:
+                    # GLM-5.3 (2026-11-05): "simulo lo stato `show):<tool_call>..." - a backtick never closed, then
+                    # a real call. A quoted call is closed by a backtick right after its </tool_call>; held until
+                    # that is known (the output's end decides too), so streamed and whole outputs agree.
+                    e = self.buf.find(CALL_END, i)
+                    tail = self.buf[e + len(CALL_END):].lstrip() if e >= 0 else ""
+                    if not self.ending and (e < 0 or not tail):
+                        return out
+                    if e >= 0 and not tail.startswith("`"):
+                        in_code = False
                 if in_code:
                     out.append(Event("content", self._track(self.buf[:i + len(CALL_START)])))
                     self.buf = self.buf[i + len(CALL_START):]
@@ -1161,6 +1173,9 @@ class OutputParser:
         how the turn ended: calls waiting from the reasoning become real calls only on a natural stop (None = stop);
         a turn cut by max tokens (or cancelled, or failed) keeps them as reasoning text (#1058)."""
         out = []
+        if self.buf and self.state == "content":
+            self.ending = True                  # a call held after an open backtick is decided now
+            out += self.feed("")
         if self.pending:
             out += self._release(reason in (None, "stop") and self.state == "reasoning" and not self.buf)
         if self.state == "call" and self.bare and function_end(self.buf) >= 0:

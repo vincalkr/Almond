@@ -201,6 +201,11 @@ class VisibleAnswer(unittest.TestCase):
                 self.assertEqual(self.run_all(self.HEAD + body)[0], ("write",))
         self.assertEqual(self.run_all(self.HEAD + CALL + "\n" + CALL)[0], ("write", "write"))
 
+    def test_a_call_after_a_backtick_left_open_fires(self):
+        # GLM-5.3 (2026-11-05): "simulo lo stato `show):<tool_call>..." - the backtick is never closed
+        self.assertEqual(self.run_all(self.HEAD + "Ultimo check (simulo lo stato `show):" + CALL)[0], ("write",))
+        self.assertEqual(self.run_all(self.HEAD + "a `b " + CALL + "\nthen")[0], ("write",))
+
     def test_a_call_on_the_fence_closing_line_fires(self):
         # GLM-5.3 (2026-10-31): "```bash\nbash install.sh\n```<tool_call>..." - the fence's end and the call on one
         # line; the call is not inside the code
