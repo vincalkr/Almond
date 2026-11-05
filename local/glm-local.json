@@ -46,5 +46,6 @@
   },
   "loop_guard": true,
   "reasoning_loop_recovery": "close",
-  "fit_max_tokens": true
+  "fit_max_tokens": true,
+  "min_max_tokens": 32768
 }

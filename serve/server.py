@@ -2866,6 +2866,7 @@ class Service:
         self.engine, self.tok, self.template, self.model, self.vision = engine, tokenizer, template, model_name, vision
         self.literals = literal_tags(getattr(tokenizer, "control_tokens", ()))   # texts that stay text inside a message
         self.fit_max_tokens = fit_max_tokens          # --fit-max-tokens: clamp the output cap instead of 400
+        self.min_max_tokens = 0                       # opt-in: a client's max_tokens raised to this while the context has room
         self.aliases: list[str] = []                  # #297: other names of the model (the config's `aliases`)
         self.reasoning_close_retry = False            # #1053 (opt-in): close the thinking once when a reply ends inside it
         self.codex_compaction_cache = False           # #924 (opt-in): a Codex compaction is rendered with its conversation's tools
@@ -3641,6 +3642,9 @@ class Service:
                                  f"max_tokens (at most {max(0, room)} here), or add \"fit_max_tokens\": true to the "
                                  "model's almond-<model>.json to shorten it to the room left (#545)")
             max_new = max(1, room)          # --fit-max-tokens: a shorter completion beats a 400
+        if self.min_max_tokens and max_new < self.min_max_tokens and room > max_new:
+            # a client that counts the prompt bigger than it is (pictures) asks for a few tokens near its own end
+            max_new = min(room, self.min_max_tokens)
         if images:
             # The request's images in one file for GENI (~10 MB a picture), written once nothing above refuses the
             # request: one refused after it (the engine starting, no room) left it in the vision directory for good,
@@ -6227,6 +6231,7 @@ def main() -> int:
                   model_name=cfg.get("model_name", "qwen3.8-flash-next"), vision=vision,
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
+    svc.min_max_tokens = int(cfg.get("min_max_tokens") or 0)    # opt-in, off by default
     svc.reasoning_close_retry = cfg.get("reasoning_close_retry") is True    # #1053: opt-in, off by default
     svc.codex_thread_titles = cfg.get("codex_thread_titles") is True    # #923: opt-in, off by default
     svc.codex_compaction_cache = cfg.get("codex_compaction_cache") is True   # #924: opt-in, off by default
