@@ -7098,6 +7098,7 @@ bool Glm5Model::ckpt_save(int slot, std::string& err) {
 }
 
 bool Glm5Model::ckpt_restore(int slot, std::string& err) {
+    if (getenv("ALMOND_GLM_CKPT_TRACE") != nullptr) std::fprintf(stderr, "glm ckpt trace: joining the save thread\n");
     ckpt_join();
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
         if (m->fast_ == nullptr || slot < 0 || (int) m->ckpt_pos_.size() <= slot || m->ckpt_pos_[(size_t) slot] < 0 ||
@@ -7113,12 +7114,42 @@ bool Glm5Model::ckpt_restore(int slot, std::string& err) {
         const std::vector<float>& b = m->ckpt_buf_[(size_t) slot];
         const int64_t pos = m->ckpt_pos_[(size_t) slot];
         cudaSetDevice(m->dev_);
+        // ALMOND_GLM_CKPT_TRACE=1: each step of the restore on stderr, and a wait that does not end reported every
+        // 10 s (a restore that hung 180 s with the cards idle, 2026-11-05)
+        static const bool trace = getenv("ALMOND_GLM_CKPT_TRACE") != nullptr;
+        if (trace) {
+            const cudaError_t q = cudaStreamQuery(m->fast_->cs);
+            std::fprintf(stderr, "glm ckpt trace: restore slot %d at %lld on device %d, layers %d-%d: the stream %s "
+                         "before it; %d state copies of %zu MB, buffer %zu MB\n", slot, (long long) pos, m->dev_, m->l0_,
+                         m->l1_, q == cudaSuccess ? "idle" : q == cudaErrorNotReady ? "STILL BUSY" : cudaGetErrorString(q),
+                         n_rec, run * sizeof(float) >> 20, b.size() * sizeof(float) >> 20);
+            if (q == cudaErrorNotReady) cudaGetLastError();
+        }
         int k = 0;
         for (int il = m->l0_; il < m->l1_; ++il)
             if (g.is_recr(il))
                 cudaMemcpyAsync(m->state_ + m->kda_S_[(size_t) il], b.data() + (size_t) k++ * run, run * sizeof(float),
                                 cudaMemcpyHostToDevice, m->fast_->cs);
+        if (trace) std::fprintf(stderr, "glm ckpt trace:   device %d: state copies queued\n", m->dev_);
         m->ckpt_pool_copy(pos, const_cast<float*>(b.data()) + (size_t) n_rec * run, true);
+        if (trace) {
+            std::fprintf(stderr, "glm ckpt trace:   device %d: pool copies queued, waiting\n", m->dev_);
+            const auto t0 = std::chrono::steady_clock::now();
+            auto next = t0 + std::chrono::seconds(10);
+            cudaError_t q;
+            while ((q = cudaStreamQuery(m->fast_->cs)) == cudaErrorNotReady) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if (std::chrono::steady_clock::now() >= next) {
+                    std::fprintf(stderr, "glm ckpt trace:   device %d: still waiting after %.0f s\n", m->dev_,
+                                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+                    next += std::chrono::seconds(10);
+                }
+            }
+            cudaGetLastError();
+            std::fprintf(stderr, "glm ckpt trace:   device %d: done in %.1f ms (%s)\n", m->dev_,
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                         q == cudaSuccess ? "ok" : cudaGetErrorString(q));
+        }
         if (cudaStreamSynchronize(m->fast_->cs) != cudaSuccess) {
             err = std::string("checkpoint restore: ") + cudaGetErrorString(cudaGetLastError());
             cudaSetDevice(dev_);

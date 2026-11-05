@@ -28,7 +28,8 @@
     "ALMOND_GLM_CKPT_IMAGES": "1",
     "ALMOND_GLM_CKPT_USER": "1",
     "ALMOND_GLM_CKPT_WHY": "1",
-    "ALMOND_GLM_SLOT_SKIP_TAIL": "8192"
+    "ALMOND_GLM_SLOT_SKIP_TAIL": "8192",
+    "ALMOND_GLM_CKPT_TRACE": "1"
   },
   "cwd": ".",
   "tokenizer": "models/glm53-gsq-rco/pack/tokenizer",
