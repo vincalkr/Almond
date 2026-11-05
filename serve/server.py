@@ -3803,6 +3803,17 @@ class Service:
             speed = f", {rate:,.0f} tok/s" if rate else ""
             reused = getattr(self.engine, "reused", 0) or 0       # from the conversation cache: not read again
             cache = f", {reused:,} from the cache" if reused else ""
+            if s.get("pictures") and not (pr and pr[0]):
+                # before the engine's first position: it takes the pictures in (their file, the encoder's GPU memory
+                # back in the expert pool) - one line, not one every 10 s
+                if not s.get("pictures_noted"):
+                    with self.status_lock:
+                        (self.status if st is None else st)["pictures_noted"] = True
+                    n = s["pictures"]
+                    print(f"[{s.get('effort') or 'almond'}] taking in {n} picture{'s' if n != 1 else ''} before reading "
+                          f"the prompt ({s.get('prompt_tokens', 0):,} tokens): the engine loads them and takes back the "
+                          "image encoder's GPU memory - this can take a minute", flush=True)
+                return now
             print(f"[{s.get('effort') or 'almond'}] reading the prompt: {done} tokens{cache}{speed}, {el:.0f} s so far",
                   flush=True)
         else:
@@ -3892,6 +3903,8 @@ class Service:
                     with (self.fifo if par else contextlib.nullcontext()):
                         self.ensure_loaded()
                     with self.status_lock:
+                        st.update(pictures=(len(set(emb_keys.split(","))) if emb_keys else 1) if emb else 0,
+                                  pictures_noted=False)
                         st.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
                                   generated=0, started=time.time(), first_token=None, tool=None, tail="",
                                   max_tokens=max_new, reasoning_recoveries=0,
