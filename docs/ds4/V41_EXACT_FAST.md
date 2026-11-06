@@ -126,6 +126,15 @@ tier's decision, the next graph). Neither is a kernel cost: fusing the dense hal
 Routing on the card would remove a round trip only where all six of a layer's experts are on the card - ~35% of
 layers on short prompts, ~6% at 17K (from the measured hit rates) - so it was not built.
 
+Card 0's idle time by gap length (2026-11-06, rocprofv3 on one 400-token answer to a 43-token prompt, 18.5 tok/s
+traced against 21.4-23.6 without the profiler - the trace itself costs ~10 ms a token, ~3 us on each of the 3,360
+kernels): idle 32.6 ms a token, of it 10.7 ms in 3,085 gaps of 2-10 us (mostly the profiler's own cost), 11.0 ms in
+250 gaps of 10-200 us (the host round trips) and 10.9 ms in 21 gaps of 0.2 ms or more (5.8 ms before the sum of the
+CPU's rows, 3.2 ms before a copy). Fewer launches would win at most the few ms of the small gaps the profiler does
+not add; the rest is the CPU's experts and the round trips, as above. GLM, traced the same way (29.7 tok/s): 508
+kernels a token on card 0 and 378 on card 1, about 60 of them under 5 us - its time is in the experts read from RAM
+(`moe_fetch`, 9.4 ms a token), the dense products (12.8 ms) and the wait for the CPU (5.4 ms), not in launches.
+
 Card 1's link: a hand-off moves a few KB each way, so it is latency-bound, not bandwidth-bound; a wider link would
 not change it.
 
