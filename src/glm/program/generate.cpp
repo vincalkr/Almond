@@ -1833,13 +1833,25 @@ static int glm_pack_generate(const Options& o) {
             // N tokens or fewer (an agent's dropped reasoning, which does not come back): a 2 GB save costs 100+ s
             // when the RAM is full
             static const size_t skip_tail = (size_t) env_num("ALMOND_GLM_SLOT_SKIP_TAIL", 0);
-            const bool short_tail = skip_tail > 0 && snap_tokens.size() >= ck_len &&
-                                    snap_tokens.size() - ck_len <= skip_tail &&
+            const bool ck_in_snap = snap_tokens.size() >= ck_len &&
                                     std::equal(ckpts[(size_t) ck].tokens.begin(), ckpts[(size_t) ck].tokens.end(),
                                                snap_tokens.begin());
+            const bool short_tail = skip_tail > 0 && ck_in_snap && snap_tokens.size() - ck_len <= skip_tail;
+            // ALMOND_GLM_SLOT_SKIP_SAME=F (0-1): not kept either when this prompt shares at least F of the model's
+            // conversation (the same conversation going on: an agent's run whose tail past its last user turn is
+            // longer than SKIP_TAIL); a new one (a compaction, another chat) shares little and is kept
+            static const double skip_same = env_num("ALMOND_GLM_SLOT_SKIP_SAME", 0);
+            size_t same = 0;
+            if (skip_same > 0 && ck_in_snap)
+                while (same < snap_tokens.size() && same < prompt.size() && snap_tokens[same] == prompt[same]) ++same;
+            const bool same_conv = !short_tail && skip_same > 0 && ck_in_snap && !snap_tokens.empty() &&
+                                   (double) same >= skip_same * (double) snap_tokens.size();
             if (short_tail)
                 std::fprintf(stderr, "glm slots: not kept - the checkpoint holds all but its last %zu tokens\n",
                              snap_tokens.size() - ck_len);
+            else if (same_conv)
+                std::fprintf(stderr, "glm slots: not kept - this prompt shares %zu of its %zu tokens\n", same,
+                             snap_tokens.size());
             else
                 slot_put("");          // the conversation in the model goes on differently past the checkpoint: kept
             size_t slot_len = 0;       // a slot that holds more of this prompt is taken instead (below)

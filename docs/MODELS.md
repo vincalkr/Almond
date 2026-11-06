@@ -150,7 +150,12 @@ system prompt's slot or stalled them:
   `ALMOND_GLM_SLOT_SKIP_TAIL=8192` skips that save when the checkpoint is the old conversation but for its last 8,192
   tokens or fewer (the dropped reasoning, which does not come back).
 Measured in that session: 135,437 of 137,635 tokens from a checkpoint, 2,182 read in 10.1 s (216 tok/s); then turns
-at 176K-181K taking back all but 144-5,216 tokens (3-16 s). The skip is not measured yet (built, not run).
+at 176K-181K taking back all but 144-5,216 tokens (3-16 s). The skip, measured in the same kind of sessions since:
+48 saves skipped (the tail lost 64-7,597 tokens), 16 still made, 0.2-98 s each (median about 25 s) - each a prompt
+departing more than 8,192 tokens before the old conversation's end at the end of an agent's run (113,162 of 128,882
+tokens in common, 136,007 of 147,263), or a new conversation (a compaction: 19,310 of 158,740).
+`ALMOND_GLM_SLOT_SKIP_SAME=0.85` skips those of the first kind too: a prompt sharing at least 85% of the old
+conversation's tokens is the same one going on, and its tail is not kept (built, not measured yet).
 `ALMOND_GLM_CKPT_WHY=1` prints, for a prompt that misses the snapshot, why each checkpoint was not taken. All on in
 `local/glm-local*.json`.
 

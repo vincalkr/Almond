@@ -32,7 +32,7 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 
 - GLM in long agent sessions with pictures (docs/MODELS.md, 2026-11-05): picture keys instead of embedding hashes,
   a checkpoint kept at the last user turn, the 2 GB slot save skipped when only dropped reasoning would be lost (that
-  skip is built, not yet measured).
+  skip measured: 48 saves skipped, 16 still made; `ALMOND_GLM_SLOT_SKIP_SAME` for those, built, not measured yet).
 - DeepSeek's and GLM's MMQ libraries made `ggml_backend_cuda_context` 64 bytes smaller than ggml-hip's own code reads
   it (`GGML_HIP_GRAPHS` missing): GLM's engine could stop at load with a corrupted heap; all three now use ggml's
   layout (docs/ENGINE_REVIEW.md).
