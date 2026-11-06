@@ -135,6 +135,24 @@ not add; the rest is the CPU's experts and the round trips, as above. GLM, trace
 kernels a token on card 0 and 378 on card 1, about 60 of them under 5 us - its time is in the experts read from RAM
 (`moe_fetch`, 9.4 ms a token), the dense products (12.8 ms) and the wait for the CPU (5.4 ms), not in launches.
 
+### A rotated-INT4 copy of the experts for prompts: not built (2026-11-06)
+
+RDNA3's `v_wmma_i32_16x16x16_iu4` runs at twice the rate of the INT8 instruction ggml's MMQ uses; a block-Hadamard
+rotation plus symmetric GPTQ INT4 (an fp16 scale per 32 weights, ~4.5 bits a weight) makes that path usable, and on
+dense models on one card it has been reported at about 2x the prefill of MMQ with a KL of 0.018 (activations in two
+INT4 passes) or 0.057 (activations in one) against BF16. Our prompts are not bound by that arithmetic:
+
+- GLM, every prompt chunk of 4,000 tokens or more in `local/serve-glm-engine.log` (5.9M tokens): card 0's copy lane
+  busy 88% of its wall time (31.5 TB over PCIe, 27.3 of it from RAM), card 1's 98% (17.7 TB) - card 1 is the slower
+  half (571 tok/s against 1,135) and its expert kernels already run under the copies.
+- DeepSeek, a 181,644-token prompt from scratch: 417 s, of it 255 s dense (attention and the dense products) and
+  159 s experts; the experts come from the RAM arena over PCIe, so only part of those 159 s is arithmetic.
+
+The most a faster expert kernel could win is the share not hidden under the copies: about 2% of a GLM prompt and well
+under the 38% expert phase of a DeepSeek one. A second copy in INT4 would make the copies larger, not smaller: ~4.5
+bits a weight against IQ2_XXS's ~2.06 (DeepSeek, 138.2 GB pack: x2.2) and GLM's 3.5-bit pack (141.7 GB: x1.3) -
+more than another 100 GB of RAM or disk, and more PCIe traffic a chunk. Its quality was therefore not measured.
+
 Card 1's link: a hand-off moves a few KB each way, so it is latency-bound, not bandwidth-bound; a wider link would
 not change it.
 
