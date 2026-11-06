@@ -228,6 +228,36 @@ trunk layers 6, 15, 25, 34, 43, block 8) in place of the MTP block, GSQ-RCO 3.5b
 2 rounds: MTP 34.5 tok/s (76.4% of drafts accepted), DFlash2 26.6 (78.3%). The drafts are as good; the longer verify
 windows cost more than they save with the experts across two cards and RAM. MTP stays; the drafter went to the trash.
 
+## Qwen3.8-Flash-Next against another engine for it (2026-11-06)
+
+An independent llama.cpp fork built for this model alone (its own GGUF, "IQ3_KS hybrid", 94.8 GB in 33 shards plus a
+1.5 GB MTP head) against `almond-engine --qwen` on our IQ3_S, both on card 0, the same day, `local/glm-ref/speed.py`
+(three prompts, temperature 0, 600 tokens, thinking low), two rounds each. It does not load our GGUF: its MoE path
+stops at load on our expert types (IQ2_S / Q2_0).
+
+| | the other engine, its GGUF | Almond, our GGUF |
+| --- | ---: | ---: |
+| MTP drafts (2 / 4) | 129.5 108.2 112.2 / 105.7 117.3 112.4, mean 114.2 | 99.1 84.1 87.1 / 94.4 88.2 89.7, mean 90.4 |
+| no MTP (Almond: `--spec 4` without `--mtp`, which it needs) | mean 63.1 | mean 51.8 |
+
+Drafts accepted are alike (about 350 of 600 tokens on either), so the difference is the time of a step: about 21.7 ms
+against 27 with drafts, 15.9 against 19.3 without. A kernel trace of one 400-token answer without drafts (rocprofv3,
+which slows both): 838 kernels a token against 2,130, the GPU busy 13.8 ms a token against 17.4. Where the 3.6 ms are:
+
+| ms / token on the GPU | other | Almond |
+| --- | ---: | ---: |
+| hyper-connections | 1.70 | 2.60 |
+| experts' matrix-vector products | 1.85 | 2.24 |
+| router, top-k and the wait for the CPU's experts | 3.59 | 3.94 |
+| experts copied into the cache while decoding (`fetch_blobs`) | - | 0.54 |
+
+The hyper-connections' gap is the weights, not the kernels: its file holds `hc_*_down`, `hc_*_up` and `hc_*_inject` as
+Q8_0, ours as BF16 (as the checkpoint): 0.67 against 1.26 GB a token, read at about 390 and 480 GB/s. Its attention
+weights are Q8_0 too. Not changed here: Q8_0 hyper-connections would change the model's numbers (KL not measured).
+
+Fewer promotions during decode (`--adapt-every 8`, or `--adapt-swaps 0`) did not help (with drafts, tok/s, two rounds
+alternated): base 87.6 / 89.2, every 8 86.8 / 87.7, no swaps 88.5 / 90.4. The defaults stay.
+
 ## Qwen3.8-Flash-Next (GSQ-RCO IQ3_S, 2026-11-02)
 
 The model (`qwen4exp`: 48 layers, Gated DeltaNet with sparse attention every fourth layer, hyper-connections, the PLE
