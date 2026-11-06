@@ -273,6 +273,14 @@ unchanged GGUF's logits:
 A KL of 0.07 is the size of a whole quantization step (IQ4_XS against Q8 on another model, 0.077): the
 hyper-connections stay BF16.
 
+Prefill, the same prompts to both (slices of `local/glm-ref/long-docs.txt`, a different start each run, max_tokens 1,
+client wall time), each engine fresh, two runs a size (tok/s):
+
+| prompt | other engine, its GGUF | Almond, our GGUF |
+| --- | ---: | ---: |
+| 11,626 / 11,161 tokens | 1,443 / 1,838 | 1,676 / 1,728 |
+| 45,780 / 44,940 tokens | 1,952 / 2,053 | 1,836 / 1,848 |
+
 Fewer promotions during decode (`--adapt-every 8`, or `--adapt-swaps 0`) did not help (with drafts, tok/s, two rounds
 alternated): base 87.6 / 89.2, every 8 86.8 / 87.7, no swaps 88.5 / 90.4. The defaults stay.
 
