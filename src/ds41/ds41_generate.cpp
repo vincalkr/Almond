@@ -2282,6 +2282,9 @@ int ds41_main(int argc, char ** argv) {
         // on it until the client closes the pipe - leave without the static destructors
         std::fflush(stdout);
         std::fflush(stderr);
+        // ALMOND_DS41_EXIT_NORMAL=1 (a diagnostic): std::exit instead, so a profiler's exit handlers write its trace
+        // (rocprofv3 writes nothing on _Exit); it needs the client to close stdin, which Almond's server does after QUIT
+        if (getenv("ALMOND_DS41_EXIT_NORMAL") != nullptr) std::exit(0);
         std::_Exit(0);
     }
 
