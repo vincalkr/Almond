@@ -4,7 +4,8 @@
   ./almond                       a conversation (starts the router if nothing answers at --url, stops it on /quit)
   ./almond -p "question"         one prompt, the answer on stdout, then exit
   ./almond -m glm                the model (a name from /models, or the start of one: glm, deepseek, qwen)
-  ./almond --ctx 65536           the context window of the models it starts (a running server keeps its own)
+  ./almond --ctx 1m              the context window of the models it starts (tokens, or 128k / 256k / 1m; a running
+                                 server keeps its own)
   ./almond serve [--router]      a server without the chat: one model (--model glm / qwen, DeepSeek by default) or
                                  the router; ./almond serve --help for its options (tools/cli/launch.py)
   ./almond stop [--force]        stop this folder's servers (./stop.sh)
@@ -1307,6 +1308,13 @@ def start_router(api: Api, port: int, ctx: int | None = None, session_log: str |
     raise SystemExit(f"almond: the router did not answer in 2 minutes (see {log})")
 
 
+def ctx_arg(text: str) -> int:
+    try:
+        return launch.parse_ctx(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
 def main() -> int:
     if sys.argv[1:2] == ["serve"]:
         if sys.argv[2:3] in (["-h"], ["--help"]):
@@ -1337,7 +1345,7 @@ def main() -> int:
     ap.add_argument("--session-log", nargs="?", const="local/session-log", default=None, metavar="DIR",
                     help="the servers this starts write every request and its answer to DIR/<date>.jsonl "
                          "(default DIR: local/session-log), for debugging")
-    ap.add_argument("--ctx", type=int, default=None, metavar="TOKENS",
+    ap.add_argument("--ctx", type=ctx_arg, default=None, metavar="TOKENS",
                     help="the context window of the models this starts (default: each configuration's); a server "
                          "already running keeps its own")
     ap.add_argument("--monitor", action="store_true", help="what the server's monitor shows, refreshed every second")

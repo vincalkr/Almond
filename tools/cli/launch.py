@@ -11,8 +11,8 @@
                                  both cards: local/glm-local.json, tools/glm/serve/serve_glm.py
   ./almond serve --model qwen    Qwen3.8-Flash-Next (GSQ-RCO IQ3_S) on Almond's engine (src/qwen, --qwen):
                                  local/qwen-local.json, tools/qwen/serve/serve_qwen.py
-  ./almond serve --ctx 65536     the context window, in a copy of the configuration (ALMOND_CTX the same; the router's
-                                 models inherit it)
+  ./almond serve --ctx 1m        the context window (tokens, or 128k / 256k / 1m), in a copy of the configuration
+                                 (ALMOND_CTX the same; the router's models inherit it)
 
 --gpu picks DeepSeek's configuration: local/ds41-local-vision.json for two cards, local/ds41-local-1gpu-vision.json for
 one; without the vision encoder in models/vision-1017 (or the image routing bias local/rco-iq2xxs-meta/vl-bias.gguf)
@@ -126,11 +126,28 @@ def pick_config(o: dict) -> str:
     return str(ROOT / f"local/{base}.json")
 
 
+def parse_ctx(text: str) -> int:
+    """A number of tokens, or with k / m: 128k = 131072, 256k = 262144, 1m = 1048576 (powers of two, as the
+    configurations' 262144)."""
+    t = str(text).strip().lower()
+    mult = {"k": 1 << 10, "m": 1 << 20}.get(t[-1:], 1)
+    num = t[:-1] if mult > 1 else t
+    try:
+        n = float(num) * mult
+    except ValueError:
+        n = 0
+    if n < 1 or n != int(n):
+        raise ValueError(f"--ctx takes a number of tokens, or with k / m (128k, 256k, 1m), got '{text}'")
+    return int(n)
+
+
 def with_ctx(cfg: str, ctx: str) -> str:
     """The context window in a copy of the configuration (DeepSeek's --ctx, GLM's and Qwen's --max-context); the
     configuration itself is not changed."""
-    if not ctx.isdigit():
-        fail(f"--ctx takes a number of tokens (got '{ctx}')")
+    try:
+        ctx = str(parse_ctx(ctx))
+    except ValueError as e:
+        fail(str(e))
     c = json.load(open(cfg))
     a = c["args"]
     flag = "--max-context" if "--glm-pack" in a or "--qwen" in a else "--ctx"
@@ -191,7 +208,8 @@ def serve(argv: list) -> int:
     cfg = pick_config(o)
     if o["ctx"]:
         cfg = with_ctx(cfg, o["ctx"])
-    say(f"config {cfg}, cards {o['gpu'] or 'as the config says'}" + (f", context {o['ctx']}" if o["ctx"] else ""))
+    say(f"config {cfg}, cards {o['gpu'] or 'as the config says'}" +
+        (f", context {parse_ctx(o['ctx'])}" if o["ctx"] else ""))
     gone = missing(cfg)
     if gone:
         fail(f"missing for {cfg}:\n" + "\n".join("  " + p for p in gone) +
