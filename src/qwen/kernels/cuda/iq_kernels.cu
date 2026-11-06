@@ -4130,19 +4130,19 @@ void expdec_note(const NativeExpertLayout& L, bool gu, bool taken, cudaStream_t 
     int dev = -1;
     cudaGetDevice(&dev);
     if (!taken) {
-        std::fprintf(stderr, "qwen expdec: CUDA%d %s type %d (n_embd %lld, n_ff %lld) not covered: the default kernel runs\n", dev,
+        std::fprintf(stderr, "qwen expdec: ROCm%d %s type %d (n_embd %lld, n_ff %lld) not covered: the default kernel runs\n", dev,
                      gu ? "gate/up" : "down", ty, (long long) L.n_embd, (long long) L.n_ff);
         return;
     }
     if (gu) {
         const int R = expdec_r(), rb = expdec_rows_per_block(2 * (int) L.n_ff, 16 * R, cap_groups, g_expdec_rb);
-        std::fprintf(stderr, "qwen expdec: CUDA%d gate/up type %d: expdec_gu_kernel R %d MINB %d, %d rows per block, grid %d x %lld "
+        std::fprintf(stderr, "qwen expdec: ROCm%d gate/up type %d: expdec_gu_kernel R %d MINB %d, %d rows per block, grid %d x %lld "
                              "(cap %lld groups)%s\n", dev, ty, R, g_expdec_minb >= 4 ? 4 : 2, rb, (2 * (int) L.n_ff + rb - 1) / rb,
                      (long long) gy, (long long) cap_groups, cs != cudaStreamCaptureStatusNone ? ", captured into a graph" : "");
     } else {
         const int R = expdec_dr(), lanes = ty == 20 ? 8 : 16;
         const int rb = expdec_rows_per_block((int) L.n_embd, (256 / lanes) * R, cap_groups, g_expdec_drb);
-        std::fprintf(stderr, "qwen expdec: CUDA%d down type %d: expdec_down_kernel R %d, %d rows per block, grid %d x %lld "
+        std::fprintf(stderr, "qwen expdec: ROCm%d down type %d: expdec_down_kernel R %d, %d rows per block, grid %d x %lld "
                              "(cap %lld groups)%s\n", dev, ty, R, rb, ((int) L.n_embd + rb - 1) / rb, (long long) gy,
                      (long long) cap_groups, cs != cudaStreamCaptureStatusNone ? ", captured into a graph" : "");
     }

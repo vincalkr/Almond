@@ -173,7 +173,7 @@ bool Glm5Model::rows_alloc(std::string& err) {
     at = 0;
     carve();   // the pointers
     if (attn)
-        std::fprintf(stderr, "glm rows: CUDA%d the DSA attention of up to %d rows a launch (ALMOND_GLM_ROWS_ATTN), %zu MB of "
+        std::fprintf(stderr, "glm rows: ROCm%d the DSA attention of up to %d rows a launch (ALMOND_GLM_ROWS_ATTN), %zu MB of "
                              "the rows' %zu MB\n", dev_, attn_tokens,
                      (size_t) ((2 * R * g.n_head * g.kv_lora * sizeof(float) + 2 * R * g.n_sel_max() * sizeof(int) +
                                 gf::mla_rows_part_floats(g.n_head, g.kv_lora) * attn_tokens * sizeof(float) +
@@ -700,7 +700,7 @@ bool Glm5Model::rows_moe_grouped(int il, int n, std::string& err) {
         (Ly.exl3 && (W.wh == nullptr || !x3::several_ok()))) {
         static std::atomic<bool> told{false};   // (a run with the setting on that never groups should say so; both
         if (!told.exchange(true)) {            //  parts' threads get here)
-            std::fprintf(stderr, "glm rows: CUDA%d a group of %d rows runs its experts row by row (grouping set up for "
+            std::fprintf(stderr, "glm rows: ROCm%d a group of %d rows runs its experts row by row (grouping set up for "
                                  "%d rows%s) - said once\n", dev_, n, F->rows_group,
                          Ly.exl3 && W.wh == nullptr ? ", no EXL3 rows" : "");
         }

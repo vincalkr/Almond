@@ -451,7 +451,7 @@ def start_step(line: str):
         return "cache", line.split("expert cache ", 1)[1].split(";")[0].replace(" slots,", " experts,").strip()
     if "session is up" in line:
         return "up", ""
-    # GLM: per card ("glm fast: CUDA0 ..."), its VRAM pool, then its RAM tier warmed
+    # GLM: per card ("glm fast: ROCm0 ..."), its VRAM pool, then its RAM tier warmed
     if line.startswith("glm fast: ") and " expert pool " in line and " slots/layer" in line:
         card, rest = line[10:].split(" ", 1)
         return "cache", f"{card}, " + rest.split(" expert pool ", 1)[1].split(",", 1)[0]

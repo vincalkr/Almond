@@ -761,7 +761,7 @@ std::string GlmDflash::describe() const {
     for (size_t i = 0; i < m.tl.size(); ++i) t += (i ? "," : "") + std::to_string(m.tl[i]);
     char b[320];
     std::snprintf(b, sizeof b, "%d layers, hidden %d, %d heads (%d kv), block %d, window %d, selector top-%d rank %d, "
-                               "reads trunk layers %s; %.0f MB on CUDA%d",
+                               "reads trunk layers %s; %.0f MB on ROCm%d",
                   m.n_layer, m.E, m.n_head, m.n_kv, m.block, m.window, m.top_k, m.rank, t.c_str(),
                   (double) bytes() / 1048576.0, m.dev);
     return b;
@@ -1491,7 +1491,7 @@ bool GlmDflash::split_head(const WSlot* lo, const WSlot* hi, int c0, int hdev, c
     h.cand = hcand;
     h.cand_bytes = cand_bytes;
     h.rows = rows;
-    std::fprintf(stderr, "glm dflash: a draft's head reads columns [0, %d) on CUDA%d and the rest on CUDA%d at once\n", c0,
+    std::fprintf(stderr, "glm dflash: a draft's head reads columns [0, %d) on ROCm%d and the rest on ROCm%d at once\n", c0,
                  m.dev, hdev);
     return true;
 }
@@ -1653,7 +1653,7 @@ bool Glm5Model::dflash_bind(std::string& err) {
         fast_->cpu_pool != pb->fast_->cpu_pool && fast_->win_lane[0] == nullptr && pb->fast_->win_lane[0] == nullptr) {
         win_lanes_make(fast_->cpu_pool, pb->fast_->cpu_pool, fast_->cpu_pin, pb->fast_->cpu_pin);
         pb->win_lanes_make(pb->fast_->cpu_pool, fast_->cpu_pool, pb->fast_->cpu_pin, fast_->cpu_pin);
-        std::fprintf(stderr, "glm dflash: a batched window's layer on both parts' CPU pools (CUDA%d + CUDA%d)\n", dev_,
+        std::fprintf(stderr, "glm dflash: a batched window's layer on both parts' CPU pools (ROCm%d + ROCm%d)\n", dev_,
                      pb->dev_);
     }
     cudaSetDevice(dev_);

@@ -281,17 +281,17 @@ void Glm5Model::mtp_draft_setup(bool chain) {
             F->mtp_emb = nullptr;
             F->mtp_emb_h = nullptr;
             F->ev_mtp_emb = nullptr;
-            std::fprintf(stderr, "glm mtp: CUDA%d token_embd did not set up on the device - the drafts go step by step\n",
+            std::fprintf(stderr, "glm mtp: ROCm%d token_embd did not set up on the device - the drafts go step by step\n",
                          dev_);
         }
     }
     const int n = F->mtp_dv + F->mtp_dx;
     if (F->mtp_dv > 0)
-        std::fprintf(stderr, "glm mtp: CUDA%d the MTP decode drafts over %d of %lld tokens (the ids below %d and %d "
+        std::fprintf(stderr, "glm mtp: ROCm%d the MTP decode drafts over %d of %lld tokens (the ids below %d and %d "
                              "more: %.0f of %.0f MB a draft)", dev_, n, (long long) g.n_vocab, F->mtp_dv, F->mtp_dx,
                      (double) n * (double) hb / 1048576.0, (double) g.n_vocab * (double) hb / 1048576.0);
     else
-        std::fprintf(stderr, "glm mtp: CUDA%d the MTP decode drafts over the whole vocabulary", dev_);
+        std::fprintf(stderr, "glm mtp: ROCm%d the MTP decode drafts over the whole vocabulary", dev_);
     if (F->mtp_emb)
         std::fprintf(stderr, ", chained on the device (token_embd there, %.0f MB)\n", (double) tb / 1048576.0);
     else

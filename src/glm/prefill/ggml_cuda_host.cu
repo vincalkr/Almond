@@ -154,7 +154,7 @@ struct CachingPool : ggml_cuda_pool {
             return std::atomic<int>(v ? std::atoi(v) : 0);
         }();
         if (fail_left.load() > 0 && fail_left.fetch_sub(1) > 0) {
-            std::fprintf(stderr, "ggml-cuda (glm mmq): CUDA%d wanted %.1f MB of scratch and cannot have it "
+            std::fprintf(stderr, "ggml-cuda (glm mmq): ROCm%d wanted %.1f MB of scratch and cannot have it "
                                  "(ALMOND_MMQ_POOL_FAIL)\n", dev, (double) cls / 1048576.0);
             almond::glm::prefill::fail("prefill mmq: the scratch pool wanted " +
                                   std::to_string((unsigned long long) (cls >> 20)) + " MB and could not have it: "
@@ -188,7 +188,7 @@ struct CachingPool : ggml_cuda_pool {
             // request ends with an error now (the reason is thrown and the caller reports it); the engine lives and
             // the next request runs.
             std::fprintf(stderr,
-                         "ggml-cuda (glm mmq): CUDA%d wanted %.1f MB of scratch (the prompt path's pool held %.1f MB "
+                         "ggml-cuda (glm mmq): ROCm%d wanted %.1f MB of scratch (the prompt path's pool held %.1f MB "
                          "of its %zu buffers) and only %.1f MB of %.1f MB was free: %s\n",
                          dev, (double) cls / 1048576.0, (double) held() / 1048576.0, bufs.size(),
                          (double) free_b / 1048576.0, (double) total_b / 1048576.0, cudaGetErrorString(e));
@@ -199,7 +199,7 @@ struct CachingPool : ggml_cuda_pool {
                                   cudaGetErrorString(e));
         }
         if (cls >= ((size_t) 4 << 20))
-            std::fprintf(stderr, "glm prefill mmq: CUDA%d the scratch pool takes a new %.1f MB buffer (%.1f MB free of "
+            std::fprintf(stderr, "glm prefill mmq: ROCm%d the scratch pool takes a new %.1f MB buffer (%.1f MB free of "
                                  "%.1f MB, %.1f MB held)\n",
                          dev, (double) cls / 1048576.0, (double) free_b / 1048576.0, (double) total_b / 1048576.0,
                          (double) held() / 1048576.0);

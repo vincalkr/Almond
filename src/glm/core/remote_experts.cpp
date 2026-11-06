@@ -48,7 +48,7 @@ struct DeviceScope {
     }
     ~DeviceScope() { if (previous >= 0) cudaSetDevice(previous); }
     std::string error(int device) const {
-        return std::string("CUDA") + std::to_string(device) + " experts: " +
+        return std::string("ROCm") + std::to_string(device) + " experts: " +
                (failed_step ? failed_step : "device switch") +
                "(" + std::to_string(device) + ") failed: " + cudaGetErrorString(status) +
                " (CUDA error " + std::to_string((int) status) + ")";
@@ -57,7 +57,7 @@ struct DeviceScope {
 
 bool check(cudaError_t result, const char* what, std::string& err, int device) {
     if (result == cudaSuccess) return true;
-    err = "CUDA" + std::to_string(device) + " experts: " + what + ": " + cudaGetErrorString(result);
+    err = "ROCm" + std::to_string(device) + " experts: " + what + ": " + cudaGetErrorString(result);
     return false;
 }
 } // namespace
@@ -306,7 +306,7 @@ void GlmExpertHelper::close() {
     if (device_ < 0) return;
     if (prof_ && calls_ > 0) {
         const double n = (double) calls_, kernels_ms = stage_ms_[2] + stage_ms_[3];
-        std::fprintf(stderr, "glm helper prof CUDA%d: %llu calls, %.2f experts a call, zero-copy %s: host %.3f ms a call "
+        std::fprintf(stderr, "glm helper prof ROCm%d: %llu calls, %.2f experts a call, zero-copy %s: host %.3f ms a call "
                              "(enqueue %.3f, wait %.3f, result copy %.3f); GPU copy-in %.3f, quantize %.3f, gate_up %.3f, down "
                              "%.3f, copy-out %.3f ms a call; the experts' bytes over gate_up + down at %.1f GB/s\n",
                      device_, calls_, (double) experts_ / n, zero_copy_ ? "on" : "off", (enqueue_ms_ + wait_ms_ + out_ms_) / n,
@@ -349,7 +349,7 @@ bool RemoteExperts::preflight(int device, double& free_gib, std::string& err) {
     int count = 0;
     if (!check(cudaGetDeviceCount(&count), "cudaGetDeviceCount", err, device)) return false;
     if (device < 1 || device >= count) {
-        err = "CUDA" + std::to_string(device) + " experts: CUDA device is not visible";
+        err = "ROCm" + std::to_string(device) + " experts: CUDA device is not visible";
         return false;
     }
     // The layer waits for this GPU on the CPU pool's critical path: spin instead of sleeping, whose wake-up
@@ -408,7 +408,7 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
     if (!check(cudaGetDeviceCount(&count), "cudaGetDeviceCount", err, device)) return false;
     if (device < 1 || device >= count || slots <= 0 || ranked.empty() ||
         layers <= 0 || experts <= 0 || claimed.size() != (size_t) layers * (size_t) experts) {
-        err = "CUDA" + std::to_string(device) + " experts: need the device, ranked experts and positive slot count";
+        err = "ROCm" + std::to_string(device) + " experts: need the device, ranked experts and positive slot count";
         return false;
     }
     DeviceScope scope(device);
@@ -428,7 +428,7 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
             if ((int) selected.size() >= slots) break;
         }
     }
-    if (selected.empty()) { err = "CUDA" + std::to_string(device) + " experts: no unclaimed experts remain"; close(); return false; }
+    if (selected.empty()) { err = "ROCm" + std::to_string(device) + " experts: no unclaimed experts remain"; close(); return false; }
     std::vector<int64_t> sizes;
     if (lay.native) {
         sizes.reserve(selected.size());
@@ -441,18 +441,18 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         needed += lay.native ? (lay.blob_bytes(pair.first) + 255) / 256 * 256 : lay.max_blob;
     // Leave room for the CUDA context, staging and later driver allocations, especially under WDDM.
     if (needed + (512ull << 20) > free_bytes) {
-        err = "CUDA" + std::to_string(device) + " experts: slots leave less than 512 MiB free; reduce --expert-cache-device" + std::to_string(device);
+        err = "ROCm" + std::to_string(device) + " experts: slots leave less than 512 MiB free; reduce --expert-cache-device" + std::to_string(device);
         close(); return false;
     }
     const bool cache_ok = lay.native ? cache_.open_sized(sizes, layers, experts, err)
                                      : cache_.open((int64_t) selected.size(), layers, experts,
                                                    (int64_t) lay.max_blob, err);
-    if (!cache_ok) { err = "CUDA" + std::to_string(device) + " experts: " + err; close(); return false; }
+    if (!cache_ok) { err = "ROCm" + std::to_string(device) + " experts: " + err; close(); return false; }
     for (const auto& pair : selected) {
         const int32_t slot = cache_.admit(pair.first, pair.second);
         const uint8_t* blob = source.blob(pair.first, pair.second);
         if (slot < 0 || !blob || !cache_.fill_slot_blocking(slot, blob, err, (int64_t) lay.blob_bytes(pair.first))) {
-            err = "CUDA" + std::to_string(device) + " experts: " +
+            err = "ROCm" + std::to_string(device) + " experts: " +
                   (err.empty() ? "cache fill failed" : err);
             close(); return false;
         }
@@ -460,7 +460,7 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
     const auto& first = selected.front();
     if (!cache_.verify_slot(cache_.slot_of(first.first, first.second), source.blob(first.first, first.second),
                             err, (int64_t) lay.blob_bytes(first.first))) {
-        err = "CUDA" + std::to_string(device) + " experts: " + err;
+        err = "ROCm" + std::to_string(device) + " experts: " + err;
         close(); return false;
     }
 
@@ -520,7 +520,7 @@ bool RemoteExperts::begin(int64_t layer, const float* x, const int32_t* ids, int
     const int64_t n = n_tok * k;
     if (n <= 0 || n > CAP || n_tok > almond::glm::kernels::cpu::MAXT || k != 10 || layer < 0 ||
         (size_t) layer >= layers_present_.size() || device_ < 0) {
-        err = "CUDA" + std::to_string(device_) + " experts: invalid layer, routing width or window size";
+        err = "ROCm" + std::to_string(device_) + " experts: invalid layer, routing width or window size";
         return false;
     }
     std::fill(owned_.begin(), owned_.begin() + n, 0);

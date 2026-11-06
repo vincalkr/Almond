@@ -2650,7 +2650,7 @@ struct NibbleCache {
         for (int64_t i = 0; i < n; ++i)
             if (ref[(size_t) i] != now[(size_t) i]) {
                 char b[224];
-                std::snprintf(b, sizeof b, "CUDA%d: layer %d expert %d (slot %d) hashes %016llx, %016llx at load", dev,
+                std::snprintf(b, sizeof b, "ROCm%d: layer %d expert %d (slot %d) hashes %016llx, %016llx at load", dev,
                               (int) pairs[(size_t) i].first, (int) pairs[(size_t) i].second, (int) slots[(size_t) i],
                               now[(size_t) i], ref[(size_t) i]);
                 err = b;
@@ -2698,7 +2698,7 @@ std::string nibble_refusal(const Options& o) {
             return "cannot read CUDA" + std::to_string(d) + "'s properties";
         }
         if (p.major != 6 || p.minor != 0)
-            return "CUDA" + std::to_string(d) + " (" + p.name + ") is compute capability " + std::to_string(p.major) + "." +
+            return "ROCm" + std::to_string(d) + " (" + p.name + ") is compute capability " + std::to_string(p.major) + "." +
                    std::to_string(p.minor) + ": the 4-bit slots are for compute capability 6.0 (GP100) only";
     }
     if (std::string e = nib::env_conflicts(); !e.empty()) return e;
@@ -3696,7 +3696,7 @@ int qwen_main(int argc, char** argv) {
                     const int64_t total_mib = (int64_t) (prop.totalGlobalMem >> 20);
                     if (reserve_mib * 100 > 12 * total_mib) {
                         own = false;
-                        why = "CUDA" + std::to_string(d) + " has " + std::to_string(total_mib) + " MiB";
+                        why = "ROCm" + std::to_string(d) + " has " + std::to_string(total_mib) + " MiB";
                         break;
                     }
                 }
@@ -4134,7 +4134,7 @@ int qwen_main(int argc, char** argv) {
                          primary_device, cudaGetErrorString(cudaGetLastError()));
             return 1;
         }
-        std::fprintf(stderr, "qwen generate: primary device from ALMOND_PRIMARY_DEVICE: CUDA%d\n", primary_device);
+        std::fprintf(stderr, "qwen generate: primary device from ALMOND_PRIMARY_DEVICE: ROCm%d\n", primary_device);
     }
     // ---- ALMOND_EXPERT_NIBBLE=1 keeps the gate/up experts of IQ2_S / IQ3_XXS / IQ3_S layers as 4-bit codes in their VRAM
     // slots (almond/qwen/core/expert_nibble.hpp).  Unset or 0: nothing here runs, no table is set, and every slot size below is
@@ -4192,7 +4192,7 @@ int qwen_main(int argc, char** argv) {
             std::fprintf(stderr, "qwen generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "qwen generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
+        std::fprintf(stderr, "qwen generate: ROCm%d context ready, %.2f GiB free before expert arena registration\n",
                      remote_dev[r], free_gib);
     }
     // plan v0.3 P6: the PCIe share of the missed experts, measured per kind of pack (the paper, finding on PCIe).
@@ -5026,7 +5026,7 @@ int qwen_main(int argc, char** argv) {
                 std::fprintf(stderr, "qwen generate: %s\n", err.c_str());
                 return false;
             }
-            std::fprintf(stderr, "qwen generate: layer split: CUDA%d loads the dense weights of layers %lld-%lld only\n",
+            std::fprintf(stderr, "qwen generate: layer split: ROCm%d loads the dense weights of layers %lld-%lld only\n",
                          st.dev, (long long) lb, (long long) le - 1);
         } else {
             skip_s = skip;
@@ -5037,7 +5037,7 @@ int qwen_main(int argc, char** argv) {
             cudaGetLastError();
             size_t free_b = 0, total_b = 0;   // #486: what that card had free
             cudaMemGetInfo(&free_b, &total_b);
-            std::fprintf(stderr, "qwen generate: layer split, CUDA%d weights: %s (%llu MiB needed, %llu MiB of %llu "
+            std::fprintf(stderr, "qwen generate: layer split, ROCm%d weights: %s (%llu MiB needed, %llu MiB of %llu "
                                  "MiB free on that card)\n", st.dev,
                          err.empty() ? "the weight arena does not fit" : err.c_str(),
                          (unsigned long long) (pool_s >> 20), (unsigned long long) (free_b >> 20),
@@ -5052,7 +5052,7 @@ int qwen_main(int argc, char** argv) {
             return false;
         }
         if (!o.native_dense_gguf.empty() && !st.dense.load(o.native_dense_gguf, st.wt, err, o.native_ple_key)) {
-            std::fprintf(stderr, "qwen generate: layer split, CUDA%d native dense projections: %s\n", st.dev,
+            std::fprintf(stderr, "qwen generate: layer split, ROCm%d native dense projections: %s\n", st.dev,
                          err.c_str());
             return false;
         }
@@ -5081,12 +5081,12 @@ int qwen_main(int argc, char** argv) {
         if (cudaStreamCreateWithFlags(&st.stream, cudaStreamNonBlocking) != cudaSuccess ||
             cudaStreamCreateWithFlags(&st.adapt_stream, cudaStreamNonBlocking) != cudaSuccess ||
             cudaEventCreateWithFlags(&st.adapt_ev, cudaEventDisableTiming) != cudaSuccess) {
-            std::fprintf(stderr, "qwen generate: layer split, CUDA%d: its streams failed\n", st.dev);
+            std::fprintf(stderr, "qwen generate: layer split, ROCm%d: its streams failed\n", st.dev);
             return 1;
         }
         // a control vector (the speed projection): its tables on this device too - the stage's layers apply it here
         if (!almond::qwen::kernels::cvec_replicate(err)) {
-            std::fprintf(stderr, "qwen generate: layer split, CUDA%d: %s\n", st.dev, err.c_str());
+            std::fprintf(stderr, "qwen generate: layer split, ROCm%d: %s\n", st.dev, err.c_str());
             return 1;
         }
         // --vision: this device's image-position table (the identity until a picture request), read by every rope
@@ -5095,7 +5095,7 @@ int qwen_main(int argc, char** argv) {
             if (cudaMalloc(&st.mrope, mrope_host.size() * sizeof(int32_t)) != cudaSuccess ||
                 cudaMemcpy(st.mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
                     cudaSuccess) {
-                std::fprintf(stderr, "qwen generate: layer split, CUDA%d: the image position table failed\n", st.dev);
+                std::fprintf(stderr, "qwen generate: layer split, ROCm%d: the image position table failed\n", st.dev);
                 return 1;
             }
             almond::qwen::kernels::mrope_table_set(st.mrope);
@@ -5108,13 +5108,13 @@ int qwen_main(int argc, char** argv) {
             const double bw = probe_pcie_h2d_gbps(&bursts);
             if (bw > 0.0) st.pcie_frac = pcie_frac_for_gbps(bw, 0.55);
             st.link_gbps = bw;
-            std::fprintf(stderr, "qwen generate: layer split: CUDA%d PCIe probe %.1f GB/s (best of %s) -> pcie_frac "
+            std::fprintf(stderr, "qwen generate: layer split: ROCm%d PCIe probe %.1f GB/s (best of %s) -> pcie_frac "
                                  "%.2f\n", st.dev, bw, bursts.c_str(), st.pcie_frac);
         }
         if (!late_weights) {
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
-            std::fprintf(stderr, "qwen generate: layer split: CUDA%d holds its weights; %.2f GiB free (its session "
+            std::fprintf(stderr, "qwen generate: layer split: ROCm%d holds its weights; %.2f GiB free (its session "
                                  "follows the split search)\n", st.dev, (double) fb / 1073741824.0);
         }
     }
@@ -5280,7 +5280,7 @@ int qwen_main(int argc, char** argv) {
         const almond::qwen::core::OnDevice on(dev);
         size_t fb = 0, tb = 0;
         if (const cudaError_t e = cudaMemGetInfo(&fb, &tb); e != cudaSuccess)
-            std::fprintf(stderr, "qwen generate: layer split: CUDA%d free memory: %s\n", dev < 0 ? 0 : dev,
+            std::fprintf(stderr, "qwen generate: layer split: ROCm%d free memory: %s\n", dev < 0 ? 0 : dev,
                          cudaGetErrorString(e));
         const int64_t pf = search && split_own_auto && !place_with_reserve ? 0 : split_pf_mib;
         const int64_t base_reserve =
@@ -5321,7 +5321,7 @@ int qwen_main(int argc, char** argv) {
                 if (f > 0.0) speed = std::max(1.0, speed * f);
             }
             layer_ms[(size_t) i] = 0.33 * (84.0 * 2.617) / speed;
-            std::fprintf(stderr, "qwen generate: layer split auto: CUDA%d %d SMs at %.2f GHz -> %.2f ms per layer, "
+            std::fprintf(stderr, "qwen generate: layer split auto: ROCm%d %d SMs at %.2f GHz -> %.2f ms per layer, "
                                  "%.2f GiB free before its session carve\n", dev, sms, khz / 1e6, layer_ms[(size_t) i],
                          (double) cap[(size_t) i] / 1073741824.0);
         }
@@ -5345,7 +5345,7 @@ int qwen_main(int argc, char** argv) {
             const double bw = link_gbps[(size_t) i];
             if (split_uniform) link_scale[(size_t) i] = 1.0;
             else if (link_abs) link_scale[(size_t) i] = bw > 0.0 ? std::clamp(20.0 / bw, 1.0, 64.0) : 1.0;
-            std::fprintf(stderr, "qwen generate: layer split auto: CUDA%d link %.1f GB/s -> miss cost x%.2f\n",
+            std::fprintf(stderr, "qwen generate: layer split auto: ROCm%d link %.1f GB/s -> miss cost x%.2f\n",
                          i == 0 ? 0 : stages[(size_t) i - 1]->dev, bw, link_scale[(size_t) i]);
         }
         const double miss_ms = std::getenv("ALMOND_SPLIT_MISS_MS") ? std::atof(std::getenv("ALMOND_SPLIT_MISS_MS")) : 190.0;
@@ -5543,7 +5543,7 @@ int qwen_main(int argc, char** argv) {
                 std::fprintf(stderr, "gate: K=%lld chunk=%lld", (long long) (ns == 2 ? parts[1].lb : 0), (long long) chunk);
                 for (int i = 0; i < ns; ++i) {
                     const uint64_t cn = chunk_bytes(parts[i].lb, chunk > 0 ? chunk : 256);
-                    std::fprintf(stderr, " | CUDA%d lb=%lld cnt=%lld used=%lldMiB cap=%lldMiB room=%lldMiB need=%lldMiB slots=%lld",
+                    std::fprintf(stderr, " | ROCm%d lb=%lld cnt=%lld used=%lldMiB cap=%lldMiB room=%lldMiB need=%lldMiB slots=%lld",
                                  i == 0 ? 0 : (int) stages[(size_t) i - 1]->dev, (long long) parts[i].lb,
                                  (long long) parts[i].cnt, (long long) (parts[i].used >> 20),
                                  (long long) (parts[i].cap >> 20), (long long) room_mib(i),
@@ -5788,7 +5788,7 @@ int qwen_main(int argc, char** argv) {
                 const int64_t le = i + 1 < ns ? at[(size_t) i] : g.n_layers;
                 const uint64_t cn = chunk_bytes(lb, c);
                 const int64_t room_mib = (int64_t) (stage_left(i, lb, le) >> 20);
-                std::fprintf(stderr, "qwen generate:   CUDA%d: a 512-token prompt needs %lld MiB of its own buffers "
+                std::fprintf(stderr, "qwen generate:   ROCm%d: a 512-token prompt needs %lld MiB of its own buffers "
                                      "(+512 MiB headroom); %lld MiB is left for them after its session and cache\n",
                              dev, (long long) (cn >> 20), (long long) room_mib);
             }
@@ -5902,11 +5902,11 @@ int qwen_main(int argc, char** argv) {
                 const uint64_t took = before > fb ? (uint64_t) (before - fb) : 0;
                 const uint64_t priced = carve_bytes(st.lb, st.le);
                 if (priced < took || priced - took > took / 20)
-                    std::fprintf(stderr, "qwen generate: layer split, CUDA%d: WARNING the split search priced this "
+                    std::fprintf(stderr, "qwen generate: layer split, ROCm%d: WARNING the split search priced this "
                                          "stage's weights at %llu MiB, it took %llu MiB\n", st.dev,
                                  (unsigned long long) (priced >> 20), (unsigned long long) (took >> 20));
             }
-            std::fprintf(stderr, "qwen generate: layer split: CUDA%d holds its weights; %.2f GiB free (its session "
+            std::fprintf(stderr, "qwen generate: layer split: ROCm%d holds its weights; %.2f GiB free (its session "
                                  "follows)\n", st.dev, (double) fb / 1073741824.0);
         }
 
@@ -5974,21 +5974,21 @@ int qwen_main(int argc, char** argv) {
         void* sbuf_s = nullptr;
         if (cudaMalloc(&sbuf_s, almond::qwen::core::session_bytes(g, o.max_context, K, st.lb, st.le)) != cudaSuccess ||
             almond::qwen::core::session_init(g, o.max_context, K, sbuf_s, st.ss, st.lb, st.le) == 0) {
-            std::fprintf(stderr, "qwen generate: layer split, CUDA%d: the session state failed\n", st.dev);
+            std::fprintf(stderr, "qwen generate: layer split, ROCm%d: the session state failed\n", st.dev);
             return 1;
         }
         const bool last = i + 1 == stages.size();
         const almond::qwen::core::WeightRef* wo_s = st.wt.find("output.weight");
         if (wo_s == nullptr ||
             (last && !o.native_head_gguf.empty() && !st.head.load(o.native_head_shards, g.n_embd, wo_s->ne1, err))) {
-            std::fprintf(stderr, "qwen generate: layer split, CUDA%d head: %s%s\n", st.dev,
+            std::fprintf(stderr, "qwen generate: layer split, ROCm%d head: %s%s\n", st.dev,
                          wo_s == nullptr ? "output.weight is missing" : err.c_str(),
                          wo_s == nullptr ? "" : vram_free_note().c_str());
             return 1;
         }
         size_t fb = 0, tb = 0;
         cudaMemGetInfo(&fb, &tb);
-        std::fprintf(stderr, "qwen generate: layer split: CUDA%d holds its weights, session [%lld, %lld)%s; "
+        std::fprintf(stderr, "qwen generate: layer split: ROCm%d holds its weights, session [%lld, %lld)%s; "
                              "%.2f GiB free\n", st.dev, (long long) st.lb, (long long) st.le,
                      last ? " and the head" : "", (double) fb / 1073741824.0);
     }
@@ -6156,7 +6156,7 @@ int qwen_main(int argc, char** argv) {
                     if (buf != nullptr) cudaFree(buf);
                     size_t fb = 0, tb = 0;
                     cudaMemGetInfo(&fb, &tb);
-                    std::fprintf(stderr, "qwen generate: WARNING: --batch %d: slot %d's session does not fit on CUDA%d "
+                    std::fprintf(stderr, "qwen generate: WARNING: --batch %d: slot %d's session does not fit on ROCm%d "
                                          "(%.2f GiB each, %.2f GiB free); %d slot%s\n", o.batch, b, dev,
                                  (double) bytes / 1073741824.0, (double) fb / 1073741824.0, b, b == 1 ? "" : "s");
                     fit = b;
@@ -6168,7 +6168,7 @@ int qwen_main(int argc, char** argv) {
             cudaDeviceSynchronize();
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
-            std::fprintf(stderr, "qwen generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each); %.2f GiB free\n",
+            std::fprintf(stderr, "qwen generate: --batch: %d slot sessions on ROCm%d (%.2f GiB each); %.2f GiB free\n",
                          (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0, (double) fb / 1073741824.0);
         }
         for (auto& v : bslot_ss) if ((int) v.size() > fit) v.resize((size_t) fit);   // the same count on every stage
@@ -6345,7 +6345,7 @@ int qwen_main(int argc, char** argv) {
             if (!slot_mtp.empty()) {
                 size_t fb = 0, tb = 0;
                 cudaMemGetInfo(&fb, &tb);
-                std::fprintf(stderr, "qwen generate: --batch-mtp: %d slot drafters on CUDA%d (%.0f MiB of private K/V "
+                std::fprintf(stderr, "qwen generate: --batch-mtp: %d slot drafters on ROCm%d (%.0f MiB of private K/V "
                                      "state and buffers each, sharing the solo drafter's weights); %.2f GiB free there\n",
                              (int) slot_mtp.size(), mtp.device(), (double) slot_mtp.front()->vram_bytes() / 1048576.0,
                              (double) fb / 1073741824.0);
@@ -6413,7 +6413,7 @@ int qwen_main(int argc, char** argv) {
             std::fprintf(stderr, "qwen generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "qwen generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
+        std::fprintf(stderr, "qwen generate: ROCm%d context ready, %.2f GiB free before expert arena registration\n",
                      remote_dev[r], free_gib);
     }
 
@@ -7400,7 +7400,7 @@ int qwen_main(int argc, char** argv) {
         {
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
-            std::fprintf(stderr, "qwen generate: layer split, CUDA%d: %.2f GiB free of %.2f, room for experts %.2f GiB\n",
+            std::fprintf(stderr, "qwen generate: layer split, ROCm%d: %.2f GiB free of %.2f, room for experts %.2f GiB\n",
                          st.dev, (double) fb / 1073741824.0, (double) tb / 1073741824.0, (double) room / 1073741824.0);
         }
         std::vector<int64_t> sized;
@@ -7423,14 +7423,14 @@ int qwen_main(int argc, char** argv) {
             if (stage_open || attempt >= 3) break;
             (void) cudaGetLastError();
             const size_t keep = sized.size() * 9 / 10;
-            std::fprintf(stderr, "qwen generate: layer split, CUDA%d expert cache: %s; trying %zu of %zu slots "
+            std::fprintf(stderr, "qwen generate: layer split, ROCm%d expert cache: %s; trying %zu of %zu slots "
                                  "(try %d of 3)\n", st.dev, err.c_str(), keep, sized.size(), attempt + 1);
             if (keep == 0) break;
             st.cache.close();
             sized.resize(keep);
         }
         if (!stage_open) {
-            std::fprintf(stderr, "qwen generate: layer split, CUDA%d expert cache: %s\n", st.dev,
+            std::fprintf(stderr, "qwen generate: layer split, ROCm%d expert cache: %s\n", st.dev,
                          sized.empty() ? "no room" : err.c_str());
             return 1;
         }
@@ -7440,7 +7440,7 @@ int qwen_main(int argc, char** argv) {
             int64_t conv = 0;
             for (const auto& pr : st.profile) conv += nib::layer(pr.first).on ? 1 : 0;
             if (conv > 0 && !nib_c.begin(st.cache, conv, err)) {
-                std::fprintf(stderr, "qwen generate: ALMOND_EXPERT_NIBBLE: CUDA%d: %s\n", st.dev, err.c_str());
+                std::fprintf(stderr, "qwen generate: ALMOND_EXPERT_NIBBLE: ROCm%d: %s\n", st.dev, err.c_str());
                 return 1;
             }
         }
@@ -7452,14 +7452,14 @@ int qwen_main(int argc, char** argv) {
             const bool nib_pair = nib_c.active() && nib::layer(pr.first).on;   // ALMOND_EXPERT_NIBBLE
             if (b == nullptr || !(nib_pair ? nib_c.add(pr.first, pr.second, slot, b, err)
                                            : st.cache.fill_slot_blocking(slot, b, err, (int64_t) lay.blob_bytes(pr.first)))) {
-                std::fprintf(stderr, "qwen generate: layer split, CUDA%d profile fill failed at pair %lld: %s\n",
+                std::fprintf(stderr, "qwen generate: layer split, ROCm%d profile fill failed at pair %lld: %s\n",
                              st.dev, (long long) filled, err.c_str());
                 return 1;
             }
             ++filled;
         }
         if (nib_c.active() && !nib_c.finish(err)) {
-            std::fprintf(stderr, "qwen generate: ALMOND_EXPERT_NIBBLE: CUDA%d: %s\n", st.dev, err.c_str());
+            std::fprintf(stderr, "qwen generate: ALMOND_EXPERT_NIBBLE: ROCm%d: %s\n", st.dev, err.c_str());
             return 1;
         }
         // (ALMOND_EXPERT_NIBBLE: a converted slot holds 4-bit codes, not the blob's bytes - the 4-bit check below is its check)
@@ -7467,7 +7467,7 @@ int qwen_main(int argc, char** argv) {
                             !st.cache.verify_slot(st.cache.slot_of(st.profile[0].first, st.profile[0].second),
                                                   srcp->blob_stable(st.profile[0].first, st.profile[0].second), err,
                                                   (int64_t) lay.blob_bytes(st.profile[0].first)))) {
-            std::fprintf(stderr, "qwen generate: layer split, CUDA%d expert cache: %s\n", st.dev,
+            std::fprintf(stderr, "qwen generate: layer split, ROCm%d expert cache: %s\n", st.dev,
                          filled == 0 ? "nothing filled" : err.c_str());
             return 1;
         }
@@ -7476,17 +7476,17 @@ int qwen_main(int argc, char** argv) {
             while (c < st.profile.size() && !nib::layer(st.profile[c].first).on) ++c;
             const auto& pc = st.profile[c];
             if (!nib_c.check(pc.first, pc.second, srcp->blob_stable(pc.first, pc.second), err)) {
-                std::fprintf(stderr, "qwen generate: ALMOND_EXPERT_NIBBLE: CUDA%d: %s\n", st.dev, err.c_str());
+                std::fprintf(stderr, "qwen generate: ALMOND_EXPERT_NIBBLE: ROCm%d: %s\n", st.dev, err.c_str());
                 return 1;
             }
             std::set<int32_t> ls;
             for (const auto& pr : nib_c.pairs) ls.insert(pr.first);
-            std::fprintf(stderr, "qwen generate: ALMOND_EXPERT_NIBBLE: CUDA%d: %lld slots of %zu layers transcoded to 4-bit "
+            std::fprintf(stderr, "qwen generate: ALMOND_EXPERT_NIBBLE: ROCm%d: %lld slots of %zu layers transcoded to 4-bit "
                                  "codes (%.2f s; every item round-tripped, every slot's GGUF blocks rebuilt and compared, "
                                  "slot hashes recorded); layer %d expert %d read back\n", st.dev, (long long) nib_c.n,
                          ls.size(), nib_c.seconds, (int) pc.first, (int) pc.second);
         }
-        std::fprintf(stderr, "qwen generate: layer split: CUDA%d runs layers %lld-%lld, expert cache %lld slots "
+        std::fprintf(stderr, "qwen generate: layer split: ROCm%d runs layers %lld-%lld, expert cache %lld slots "
                              "(%.2f GiB), %lld of its %zu profiled pairs; slot 0 verified\n",
                      st.dev, (long long) st.lb, (long long) (st.le - 1), (long long) st.cache.slots(), st.cache.gib(),
                      (long long) filled, st.profile.size());
@@ -7514,7 +7514,7 @@ int qwen_main(int argc, char** argv) {
                 }
             if (missing > 0) {
                 std::fprintf(stderr, "qwen generate: ALMOND_EXPERT_NIBBLE refuses the start: layer %lld has %lld of its %lld "
-                                     "experts out of CUDA%d's VRAM (expert %lld the first) - every expert must be resident "
+                                     "experts out of ROCm%d's VRAM (expert %lld the first) - every expert must be resident "
                                      "(a profile that ranks every pair and room on the card; ALMOND_EXPERT_NIBBLE_SKIP="
                                      "<layers> keeps some layers' smaller GGUF slots)\n", (long long) l, (long long) missing,
                              (long long) g.n_expert, owner_dev, (long long) first);
@@ -7570,7 +7570,7 @@ int qwen_main(int argc, char** argv) {
         if (probe_ok) {
             std::fprintf(stderr, "qwen generate: layer split auto: L2 probe: the split is startable on the live free figures\n");
         } else {
-            std::fprintf(stderr, "qwen generate: layer split auto: L2 probe: CUDA%d cannot start the prompt path: "
+            std::fprintf(stderr, "qwen generate: layer split auto: L2 probe: ROCm%d cannot start the prompt path: "
                                  "a 512-token chunk needs %lld MiB of its own buffers (+512 MiB headroom) with %lld MiB "
                                  "free, and its %lld-slot cache cannot lend it (needs %lld slots)\n",
                          probe_dev, (long long) (probe_need >> 20), (long long) (probe_fb >> 20),
@@ -7662,7 +7662,7 @@ int qwen_main(int argc, char** argv) {
                 std::fprintf(stderr, "qwen generate: %s\n", err.c_str());
                 return 1;
             }
-            std::fprintf(stderr, "qwen generate: CUDA%d: %lld additional experts, %.2f GiB; "
+            std::fprintf(stderr, "qwen generate: ROCm%d: %lld additional experts, %.2f GiB; "
                                  "results return through pinned host rows\n", remote_dev[r],
                          (long long) remote_experts[(size_t) r].resident(), remote_experts[(size_t) r].gib());
         }
@@ -8372,7 +8372,7 @@ int qwen_main(int argc, char** argv) {
             if (cudaMalloc((void**) &st->d_res, host_res.size() * sizeof(int32_t)) != cudaSuccess ||
                 res_put(st->d_res) !=
                     cudaSuccess) {
-                std::fprintf(stderr, "qwen generate: layer split: CUDA%d residency table failed\n", st->dev);
+                std::fprintf(stderr, "qwen generate: layer split: ROCm%d residency table failed\n", st->dev);
                 return 1;
             }
         }
@@ -9586,7 +9586,7 @@ int qwen_main(int argc, char** argv) {
                     }
                     const std::string pct =
                         o.prefill_auto ? ", and lend at most " + std::to_string(kAutoLendPct) + "%" : "";
-                    std::fprintf(stderr, "qwen serve: WARNING: prompt chunk %lld tokens, not %lld: CUDA%d (%s) "
+                    std::fprintf(stderr, "qwen serve: WARNING: prompt chunk %lld tokens, not %lld: ROCm%d (%s) "
                                          "has %lld expert-cache slots, and a %lld-token chunk borrows %lld of them "
                                          "(it must keep 128%s) - prompts read slower than on CUDA0 alone (#448)\n",
                                  (long long) chunk_vram, (long long) alone, dev, prop.name,
@@ -9638,7 +9638,7 @@ int qwen_main(int argc, char** argv) {
                         if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { (void) cudaGetLastError(); continue; }
                         const uint64_t need = almond::qwen::prefill::Prefill::bytes_needed(g, *p.ses, chunk, srcp != nullptr);
                         if ((uint64_t) fb >= need + (3ull << 29)) {
-                            std::fprintf(stderr, "qwen serve:   CUDA%d keeps its own prompt buffers (%.2f GiB of "
+                            std::fprintf(stderr, "qwen serve:   ROCm%d keeps its own prompt buffers (%.2f GiB of "
                                                  "%.2f GiB free): no loan\n", p.dev < 0 ? 0 : p.dev,
                                          (double) need / 1073741824.0, (double) fb / 1073741824.0);
                             p.first = -1;
@@ -9659,7 +9659,7 @@ int qwen_main(int argc, char** argv) {
                 std::fprintf(stderr, "qwen serve: no stage can lend the prompt path its %lld-token buffers, so "
                                      "each stage allocates its own:\n", (long long) o.prefill_chunk);
                 for (const PfPart& p : pf_parts)
-                    std::fprintf(stderr, "qwen serve:   CUDA%d has %lld slots, and a %lld-token chunk needs "
+                    std::fprintf(stderr, "qwen serve:   ROCm%d has %lld slots, and a %lld-token chunk needs "
                                          "the last %lld of them\n", p.dev < 0 ? 0 : p.dev,
                                  (long long) p.cache->slots(), (long long) o.prefill_chunk,
                                  (long long) part_slots(p, o.prefill_chunk));
@@ -9719,7 +9719,7 @@ int qwen_main(int argc, char** argv) {
                 size_t fb = 0, tb = 0;
                 if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { (void) cudaGetLastError(); continue; }
                 char b[64];
-                std::snprintf(b, sizeof b, "CUDA%d %.2f GiB", dev < 0 ? 0 : dev, (double) fb / 1073741824.0);
+                std::snprintf(b, sizeof b, "ROCm%d %.2f GiB", dev < 0 ? 0 : dev, (double) fb / 1073741824.0);
                 room += (room.empty() ? "" : ", ") + std::string(b);
             }
             if (!why.empty()) {
@@ -9735,7 +9735,7 @@ int qwen_main(int argc, char** argv) {
                 std::fprintf(stderr, "qwen serve: the prompt path borrows %lld CUDA0 cache slots (%.2f GiB)\n",
                              (long long) (xcache.slots() - lend_first), (double) borrow_bytes / 1073741824.0);
             for (size_t i = 1; i < pf_parts.size(); ++i)   // one loan per stage, from that stage's own cache
-                if (pf_parts[i].first >= 0) std::fprintf(stderr, "qwen serve:   CUDA%d prompt path borrows %lld of its %lld slots (%.2f GiB)\n",
+                if (pf_parts[i].first >= 0) std::fprintf(stderr, "qwen serve:   ROCm%d prompt path borrows %lld of its %lld slots (%.2f GiB)\n",
                              pf_parts[i].dev, (long long) (pf_parts[i].cache->slots() - pf_parts[i].first),
                              (long long) pf_parts[i].cache->slots(),
                              (double) part_bytes(pf_parts[i], pf_parts[i].first) / 1073741824.0);
@@ -9825,7 +9825,7 @@ int qwen_main(int argc, char** argv) {
                     if (s < o.prefill_chunk && own_fits(s, d2, n2, f2)) { c = s; break; }
                 }
                 if (c > 0) {
-                    std::fprintf(stderr, "qwen serve: a %lld-token chunk's prompt buffers need %lld MiB on CUDA%d, "
+                    std::fprintf(stderr, "qwen serve: a %lld-token chunk's prompt buffers need %lld MiB on ROCm%d, "
                                          "%lld MiB free: %lld-token chunks\n", (long long) o.prefill_chunk,
                                  (long long) (need >> 20), dev, (long long) (fb >> 20), (long long) c);
                     o.prefill_chunk = c;
@@ -9918,7 +9918,7 @@ int qwen_main(int argc, char** argv) {
                         if (r >= first_s) { r = almond::qwen::core::kNotResident; ++n; }
                     }
                 evicted += n;
-                std::fprintf(stderr, "qwen serve:   CUDA%d keeps %lld slots for %lld-token prompts (%lld experts "
+                std::fprintf(stderr, "qwen serve:   ROCm%d keeps %lld slots for %lld-token prompts (%lld experts "
                                      "no longer resident)\n", p.dev < 0 ? 0 : p.dev,
                              (long long) (p.cache->slots() - first_s), (long long) S, (long long) n);
             }
@@ -10134,7 +10134,7 @@ int qwen_main(int argc, char** argv) {
                 vs.slot_off = gs.cache.slot_offsets();
                 vs.n_slots = gs.cache.slots();
                 if (!gs.ver_b.init(gs.wt, g, gs.ss, vs, gs.head.loaded() ? &gs.head : nullptr, o.spec, err)) {
-                    std::fprintf(stderr, "qwen serve: --pipeline-windows: the second verifier on CUDA%d (stage %d): %s "
+                    std::fprintf(stderr, "qwen serve: --pipeline-windows: the second verifier on ROCm%d (stage %d): %s "
                                          "(raise --vram-reserve-mib by ~200, or --pipeline-windows 0)\n",
                                  gs.dev, st + 1, err.c_str());
                     return 1;
@@ -10595,7 +10595,7 @@ int qwen_main(int argc, char** argv) {
                 const almond::qwen::core::ConversationView view_k{src.ids, src.imgs, cs.parts[k], src.cvec};
                 size_t b = 0;
                 if (!almond::qwen::core::conversation_snapshot_bytes(view_k, *src.stage_sessions[k], g, draft_of(k), b, err)) {
-                    std::fprintf(stderr, "qwen serve: conversation cache: skip parking (stage CUDA%d: %s)\n",
+                    std::fprintf(stderr, "qwen serve: conversation cache: skip parking (stage ROCm%d: %s)\n",
                                  st->dev, err.c_str());
                     err.clear();
                     return true;
@@ -10996,7 +10996,7 @@ int qwen_main(int argc, char** argv) {
                     if (!said && (batched || (e.empty() && why != nullptr))) {
                         said = true;
                         if (batched)
-                            std::fprintf(stderr, "qwen serve: draft layer prompt K/V batched on CUDA%d (E-9 on the layer "
+                            std::fprintf(stderr, "qwen serve: draft layer prompt K/V batched on ROCm%d (E-9 on the layer "
                                                  "split, K/V mode %d)\n", stages.back()->dev, mtp.kv_state().kv_mode);
                         else
                             std::fprintf(stderr, "qwen serve: ALMOND_SPLIT_MTP_BATCH=1 declined, the drafter's own pass "
@@ -11756,7 +11756,7 @@ int qwen_main(int argc, char** argv) {
                     if (const cudaError_t e = cudaMemcpyAsync(src.exchange_buffer(w.j, w.layer), h.cache->device_slot(w.slot),
                                                               (size_t) almond::qwen::kernels::cpu::expert_layout().blob_bytes(w.layer),
                                                               cudaMemcpyDeviceToHost, h.stream); e != cudaSuccess) {
-                        std::fprintf(stderr, "qwen serve: adaptive tier: copy back of layer %d slot %d (CUDA%d) failed: %s\n",
+                        std::fprintf(stderr, "qwen serve: adaptive tier: copy back of layer %d slot %d (ROCm%d) failed: %s\n",
                                      (int) w.layer, (int) w.slot, h.dev, cudaGetErrorString(e));
                         a_err = true;
                     }
@@ -11794,7 +11794,7 @@ int qwen_main(int argc, char** argv) {
             if (const cudaError_t e = cudaMemcpyAsync(h.cache->device_slot(w.slot), b,
                                                       (size_t) almond::qwen::kernels::cpu::expert_layout().blob_bytes(w.layer),
                                                       cudaMemcpyHostToDevice, h.stream); e != cudaSuccess) {
-                std::fprintf(stderr, "qwen serve: adaptive tier: copy of layer %d into slot %d (CUDA%d) failed: %s\n",
+                std::fprintf(stderr, "qwen serve: adaptive tier: copy of layer %d into slot %d (ROCm%d) failed: %s\n",
                              (int) w.layer, (int) w.slot, h.dev, cudaGetErrorString(e));
                 a_err = true;
             }
@@ -12192,10 +12192,10 @@ int qwen_main(int argc, char** argv) {
                 const int64_t sf_mib = (int64_t) (sf >> 20);
                 const int later_reserve = o.vram_reserve_later_mib >= 0 ? o.vram_reserve_later_mib : o.vram_reserve_mib;
                 if (sf_mib >= 512)
-                    std::fprintf(stderr, "qwen serve: CUDA%d: %lld MiB of VRAM free with everything loaded\n", stp->dev,
+                    std::fprintf(stderr, "qwen serve: ROCm%d: %lld MiB of VRAM free with everything loaded\n", stp->dev,
                                  (long long) sf_mib);
                 else
-                    std::fprintf(stderr, "qwen serve: CUDA%d: %lld MiB of VRAM free with everything loaded - LOW: its window "
+                    std::fprintf(stderr, "qwen serve: ROCm%d: %lld MiB of VRAM free with everything loaded - LOW: its window "
                                          "graphs are captured on first use and need room too, and %s; add "
                                          "--vram-reserve-later-mib %lld to the config's args (or lower --max-context)\n",
                                  stp->dev, (long long) sf_mib,
@@ -12213,7 +12213,7 @@ int qwen_main(int argc, char** argv) {
                     rin.pipe_window_mib = kPipeWindowMib;
                     const std::string why = almond::qwen::program::gpu_report::planned_vs_free_text(
                         almond::qwen::program::stage_reserve::reserve_mib(rin), sf_mib);
-                    if (!why.empty()) std::fprintf(stderr, "qwen serve: CUDA%d: %s\n", stp->dev, why.c_str());
+                    if (!why.empty()) std::fprintf(stderr, "qwen serve: ROCm%d: %s\n", stp->dev, why.c_str());
                 }
             }
         }
@@ -12951,7 +12951,7 @@ int qwen_main(int argc, char** argv) {
                 std::string per_stage;   // every stage's own host wait for its GPU and its pool time (run_slot_rows recurses)
                 for (size_t k = 0; k <= stages.size(); ++k) {
                     char sb[96];
-                    std::snprintf(sb, sizeof sb, "%sCUDA%d wait %.2f + pool %.2f", k == 0 ? "" : ", ", k == 0 ? 0 : stages[k - 1]->dev,
+                    std::snprintf(sb, sizeof sb, "%sROCm%d wait %.2f + pool %.2f", k == 0 ? "" : ", ", k == 0 ? 0 : stages[k - 1]->dev,
                                   (stage_verifier((int) k).ms_wait - bt_stage_wait0[k]) / w,
                                   (stage_verifier((int) k).ms_pool - bt_stage_pool0[k]) / w);
                     per_stage += sb;
@@ -14327,7 +14327,7 @@ int qwen_main(int argc, char** argv) {
                         if (!restore_ready[k] && restore_free[k] < (almond::qwen::program::conv_cache::kRestoreFirstUseMib << 20)) tight = (int) k;
                     std::fprintf(stderr, "qwen serve: conversation cache: skip restore (%s has %lld MiB free and no copy stream "
                                          "yet, which needs up to %lld MiB); rereading the prompt\n",
-                                 tight <= 0 ? "CUDA0" : ("stage " + std::to_string(tight)).c_str(),
+                                 tight <= 0 ? "ROCm0" : ("stage " + std::to_string(tight)).c_str(),
                                  (long long) (tight >= 0 ? restore_free[(size_t) tight] >> 20 : 0),
                                  (long long) almond::qwen::program::conv_cache::kRestoreFirstUseMib);
                     auto retry = std::move(*incoming);
@@ -14548,7 +14548,7 @@ int qwen_main(int argc, char** argv) {
                     if (almond::qwen::core::conversation_snapshot_restore(incoming->stage_images[i], stages[i]->ss, g,
                             use_mtp && !mtp_first && i + 1 == stages.size() ? &mtp.kv_state() : nullptr, err) !=
                         almond::qwen::core::ConversationRestore::restored) {
-                        std::printf("ERR restoring parked conversation (stage CUDA%d): %s\n", stages[i]->dev,
+                        std::printf("ERR restoring parked conversation (stage ROCm%d): %s\n", stages[i]->dev,
                                     err.c_str());
                         return 1;
                     }
@@ -16701,7 +16701,7 @@ int qwen_main(int argc, char** argv) {
                                  cls_n[0], avg(cls_ms[0], cls_n[0]), avg(cls_tok[0], cls_n[0]), cls_n[1],
                                  avg(cls_ms[1], cls_n[1]), avg(cls_tok[1], cls_n[1]), (long long) pl_disagree,
                                  (long long) pl_late);
-                    std::fprintf(stderr, "qwen pipeline: drafter on CUDA%d: %.3f ms of host time per chain launch (%.3f ms of it "
+                    std::fprintf(stderr, "qwen pipeline: drafter on ROCm%d: %.3f ms of host time per chain launch (%.3f ms of it "
                                          "staging the source rows, %lld times so far)\n", mtp.device(),
                                  avg(mtp.ms_draft, (double) mtp.rounds), avg(mtp.ms_src, (double) mtp.n_src), (long long) mtp.n_src);
                     std::string cal;
@@ -17617,7 +17617,7 @@ int qwen_main(int argc, char** argv) {
                              (long long) t2_hit[1], (long long) t2_rej[2], (long long) t2_hit[2], (long long) t2_rej[3],
                              (long long) t2_hit[3], (long long) dec_windows);
             for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
-                std::fprintf(stderr, "qwen serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
+                std::fprintf(stderr, "qwen serve: ROCm%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
                                      "(%.1f MiB with full rows) in this request; host %.0f ms staging+launching, %.0f ms "
                                      "waiting for it in this request\n", r + 1,
                              (long long) (remote_experts[(size_t) r].computed() - remote_before[(size_t) r]),
@@ -18963,7 +18963,7 @@ int qwen_main(int argc, char** argv) {
         }
         std::printf("%-24s %lld blobs read\n", "  expert blobs", (long long) srcp->reads());
         for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
-            std::printf("  CUDA%d experts           %lld routed entries computed\n",
+            std::printf("  ROCm%d experts           %lld routed entries computed\n",
                         r + 1, (long long) remote_experts[(size_t) r].computed());
         // ---- **R4's DISPATCH MEASUREMENT: h, ON THE ENGINE'S OWN ROUTING.**  No offline trace, no corpus
         // question, no k-fold - these are the ids the router actually produced on this run.  Reported as

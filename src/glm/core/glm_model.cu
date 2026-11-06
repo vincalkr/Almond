@@ -940,7 +940,7 @@ Glm5Model::KvStream* Glm5Model::kv_stream_make(int64_t cells, int64_t ctx, std::
         k::kv_stream_reset(m, nullptr);
     }
     if (cudaDeviceSynchronize() != cudaSuccess) return fail("KV streaming: the residency maps did not reset");
-    std::fprintf(stderr, "glm pack: CUDA%d KV streaming: %lld of %lld positions of each of %zu DSA layers in VRAM (%.2f "
+    std::fprintf(stderr, "glm pack: ROCm%d KV streaming: %lld of %lld positions of each of %zu DSA layers in VRAM (%.2f "
                          "GB), the latent cache in %.2f GB of pinned RAM\n", dev_, (long long) cells, (long long) ctx,
                  ls.size(), (double) cells * K->row_bytes * ls.size() / 1e9, (double) K->host_bytes / 1e9);
     return K;
@@ -1222,7 +1222,7 @@ bool Glm5Model::head_split_link(Glm5Model* helper, std::string& err) {
     ws_map_["output.weight.lo"] = almond::glm::core::WSlot{nullptr, x3::kTypeEXL3, &slot, lo.k, lo.n};
     head_helper_ = helper;
     head_c0_ = helper->head_c0_;
-    std::fprintf(stderr, "glm split: the head's columns [0, %d) on CUDA%d, [%d, %d) on CUDA%d at once (a pipelined "
+    std::fprintf(stderr, "glm split: the head's columns [0, %d) on ROCm%d, [%d, %d) on ROCm%d at once (a pipelined "
                          "window's pick)\n", head_c0_, dev_, head_c0_, (int) g_.n_vocab, helper->dev_);
     return true;
 }
@@ -1347,8 +1347,8 @@ bool Glm5Model::load_pack_split(const std::string& pack_dir, int64_t max_ctx, co
                     cudaGetLastError();
                     prop.name[0] = 0;
                 }
-                std::fprintf(stderr, "glm prefill: WARNING: prompt chunk %d tokens, not %d: CUDA%d (%s) can lend only "
-                                     "that much of its expert pool - prompts read slower than on CUDA%d alone\n",
+                std::fprintf(stderr, "glm prefill: WARNING: prompt chunk %d tokens, not %d: ROCm%d (%s) can lend only "
+                                     "that much of its expert pool - prompts read slower than on ROCm%d alone\n",
                              tmin, alone, p->dev_, prop.name, dev_);
             }
         for (Glm5Model* p = this; p != nullptr; p = p->split_next_.get()) p->prefill_cap(tmin, "the split's smallest");
@@ -1897,7 +1897,7 @@ static std::vector<int> glm_search_bounds(const std::string& pack_dir, int64_t m
         return {};
     }
     for (const auto& c : cards)
-        std::fprintf(stderr, "glm split auto: CUDA%d (%s) memory %.0f GB/s, %.2f GB free\n", c.dev, c.name.c_str(),
+        std::fprintf(stderr, "glm split auto: ROCm%d (%s) memory %.0f GB/s, %.2f GB free\n", c.dev, c.name.c_str(),
                      c.bw / 1e9, c.free / 1073741824.0);
     std::fprintf(stderr, "glm split auto: the host reads RAM at %.0f GB/s (a part's CPU lane: %.0f); the routes from %s; "
                          "%s\n", host_bps / 1e9, miss_bps / 1e9,
@@ -1918,9 +1918,9 @@ static std::vector<int> glm_search_bounds(const std::string& pack_dir, int64_t m
     for (int i = 0; i < n; ++i) {
         const int lb = i == 0 ? 0 : best[(size_t) i - 1], le = i + 1 < n ? best[(size_t) i] : L;
         char buf[160];
-        std::snprintf(buf, sizeof buf, "%s[%d, %d) on CUDA%d", i ? ", " : "", lb, le, cards[(size_t) i].dev);
+        std::snprintf(buf, sizeof buf, "%s[%d, %d) on ROCm%d", i ? ", " : "", lb, le, cards[(size_t) i].dev);
         where += buf;
-        std::snprintf(buf, sizeof buf, "%sCUDA%d %.1f ms, %lld slots a layer", i ? " | " : "", cards[(size_t) i].dev,
+        std::snprintf(buf, sizeof buf, "%sROCm%d %.1f ms, %lld slots a layer", i ? " | " : "", cards[(size_t) i].dev,
                       ev[(size_t) i].ms, (long long) ev[(size_t) i].per);
         parts += buf;
         hits += ev[(size_t) i].hits;
@@ -2998,7 +2998,7 @@ bool almond::glm::core::Glm5Model::load_pack(const std::string& pack_dir, int64_
                 }
                 pack_layers_[(size_t) il] = std::move(nl);
             }
-            std::fprintf(stderr, "glm pack: CUDA%d EXL3: %zu safetensors, %zu matrices, %zu expert layers\n", dev_,
+            std::fprintf(stderr, "glm pack: ROCm%d EXL3: %zu safetensors, %zu matrices, %zu expert layers\n", dev_,
                          xt.files.size(), xt.mats.size(), xt.layers.size());
         } else if (!xe.empty()) {
             err = "pack: " + xe;
@@ -3095,7 +3095,7 @@ bool almond::glm::core::Glm5Model::load_pack(const std::string& pack_dir, int64_
         std::sort(v.rbegin(), v.rend());
         std::string s;
         for (auto& e : v) s += " | " + e.second + " " + std::to_string((int) (e.first >> 20)) + " MB";
-        std::fprintf(stderr, "glm pack: CUDA%d dense weights %.2f GB:%s\n", dev_, (double) bytes / 1073741824.0, s.c_str());
+        std::fprintf(stderr, "glm pack: ROCm%d dense weights %.2f GB:%s\n", dev_, (double) bytes / 1073741824.0, s.c_str());
     }
     // the head split's helper: its copy of the head's columns [head_c0_, n_vocab), then the rows its picks use
     const auto al = [](uint64_t b) { return (b + 255u) & ~(uint64_t) 255u; };
@@ -3326,7 +3326,7 @@ bool almond::glm::core::Glm5Model::load_pack(const std::string& pack_dir, int64_
             return false;
         }
         for (int i = 0; i < kPipeSlots; ++i) cudaEventCreateWithFlags(&hh_ev_[i], cudaEventDisableTiming);
-        std::fprintf(stderr, "glm pack: CUDA%d holds the head's columns [%d, %d) (%.0f MB): a pipelined window's pick "
+        std::fprintf(stderr, "glm pack: ROCm%d holds the head's columns [%d, %d) (%.0f MB): a pipelined window's pick "
                              "reads both halves at once\n", dev_, c0, m.n, (double) (run_b * (m.k / 16)) / 1048576.0);
     }
 
@@ -3354,7 +3354,7 @@ bool almond::glm::core::Glm5Model::load_pack(const std::string& pack_dir, int64_
         gfs.push_back(std::move(extra));   // after the model's own shards: only the draft block is looked up in it
         pack_shards_.push_back(s);
         mtp_extra = true;
-        std::fprintf(stderr, "glm mtp: CUDA%d the draft block from %s%s\n", dev_, mtp_gguf,
+        std::fprintf(stderr, "glm mtp: ROCm%d the draft block from %s%s\n", dev_, mtp_gguf,
                      own ? " (instead of the model's own)" : "");
     }
     // (the pipelined speculative decode is a two-part one: a longer split leaves the block unloaded; one GPU loads it
@@ -3394,7 +3394,7 @@ bool almond::glm::core::Glm5Model::load_pack(const std::string& pack_dir, int64_
     const int64_t lat_floats = lat_q8_      ? (int64_t) almond::glm::kernels::glmf::lat8_rec_bytes(g_.kv_lora) / 4 * lat_rows
                                : fast_mode_ ? (int64_t) g_.kv_lora * lat_rows / 2
                                             : (int64_t) g_.kv_lora * lat_rows;
-    if (lat_q8_) std::fprintf(stderr, "glm pack: CUDA%d latent cache INT8 (%d bytes a position and layer)\n", dev_,
+    if (lat_q8_) std::fprintf(stderr, "glm pack: ROCm%d latent cache INT8 (%d bytes a position and layer)\n", dev_,
                               almond::glm::kernels::glmf::lat8_rec_bytes(g_.kv_lora));
     // (one entry past the trunk: the NextN block's DSA caches, when this half carries it)
     kda_S_.assign((size_t) g_.n_layers + 1, 0);
@@ -3824,7 +3824,7 @@ bool almond::glm::core::Glm5Model::load_mtp(const std::vector<std::unique_ptr<al
             pack_emb_type_ = (int) te->type;
         }
         mtp_il_ = il;
-        std::fprintf(stderr, "glm mtp: CUDA%d the NextN block (blk.%d) loaded: %.0f MB dense, EXL3 experts K %s/%s/%s\n",
+        std::fprintf(stderr, "glm mtp: ROCm%d the NextN block (blk.%d) loaded: %.0f MB dense, EXL3 experts K %s/%s/%s\n",
                      dev_, il, (double) bytes / 1048576.0, exl3_k_name(X.k2[0]).c_str(), exl3_k_name(X.k2[1]).c_str(),
                      exl3_k_name(X.k2[2]).c_str());
         return true;
@@ -3855,7 +3855,7 @@ bool almond::glm::core::Glm5Model::load_mtp(const std::vector<std::unique_ptr<al
         pack_emb_type_ = (int) te->type;
     }
     mtp_il_ = il;
-    std::fprintf(stderr, "glm mtp: CUDA%d the NextN block (blk.%d) loaded: %.0f MB dense, experts %s/%s\n", dev_, il,
+    std::fprintf(stderr, "glm mtp: ROCm%d the NextN block (blk.%d) loaded: %.0f MB dense, experts %s/%s\n", dev_, il,
                  (double) bytes / 1048576.0, ggml_type_name((ggml_type) tg->type), ggml_type_name((ggml_type) td->type));
     return true;
 }

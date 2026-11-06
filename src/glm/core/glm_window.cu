@@ -1726,13 +1726,13 @@ void Glm5Model::win_prof_report() {
                 std::snprintf(b, sizeof b, " %s %.2f", kv.first.c_str(), kv.second / W.n_prof);
                 line += b;
             }
-            std::fprintf(stderr, "glm window prof CUDA%d (%lld windows, layers [%d, %d)): %.2f ms a window -%s\n", m->dev_,
+            std::fprintf(stderr, "glm window prof ROCm%d (%lld windows, layers [%d, %d)): %.2f ms a window -%s\n", m->dev_,
                          (long long) W.n_prof, m->l0_, m->l1_, tot / W.n_prof, line.c_str());
         }
         W.ev_ms.clear();
         W.n_prof = 0;
         if (W.u_layers > 0)
-            std::fprintf(stderr, "glm window union CUDA%d: %.2f distinct experts of %.2f routed a window layer (%.0f%%)\n",
+            std::fprintf(stderr, "glm window union ROCm%d: %.2f distinct experts of %.2f routed a window layer (%.0f%%)\n",
                          m->dev_, (double) W.u_distinct / W.u_layers, (double) W.u_picks / W.u_layers,
                          100.0 * (double) W.u_distinct / (double) std::max<int64_t>(1, W.u_picks));
         W.u_layers = W.u_distinct = W.u_picks = 0;

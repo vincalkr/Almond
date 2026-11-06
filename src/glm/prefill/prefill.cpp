@@ -482,7 +482,7 @@ bool wmma_buffers() {
             cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device) != cudaSuccess) return false;
         volta = major == 7 && minor == 0;
         cached_device = device;
-        if (volta) std::fprintf(stderr, "prefill: Volta grouped-WMMA prompt experts on (CUDA%d)\n", device);
+        if (volta) std::fprintf(stderr, "prefill: Volta grouped-WMMA prompt experts on (ROCm%d)\n", device);
     }
     return volta;
 #endif

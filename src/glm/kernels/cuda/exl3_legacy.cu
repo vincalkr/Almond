@@ -870,7 +870,7 @@ bool allow_smem_n() {
         ok = cudaGetLastError() == cudaSuccess;
     }
     if (!ok)
-        std::fprintf(stderr, "exl3: CUDA%d gives a block %d bytes of shared memory, the several-activation kernels "
+        std::fprintf(stderr, "exl3: ROCm%d gives a block %d bytes of shared memory, the several-activation kernels "
                              "need %zu - a verify window's tokens run one at a time there\n", dev, optin,
                      smem_n_bytes(16));
     g_smem_n[dev].store(ok ? 1 : 2, std::memory_order_release);

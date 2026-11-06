@@ -650,7 +650,7 @@ bool Glm5Model::fast_setup(std::string& err) {
             const char* at = getenv("ALMOND_GLM_PREFETCH_AT");
             const char* bl = getenv("ALMOND_GLM_PREFETCH_BLOCKS");
             const char* rk = getenv("ALMOND_GLM_PREFETCH_RANK");
-            std::fprintf(stderr, "glm fast: CUDA%d prefetch on: up to %d of the next layer's predicted experts a layer%s, "
+            std::fprintf(stderr, "glm fast: ROCm%d prefetch on: up to %d of the next layer's predicted experts a layer%s, "
                                  "the copy at %s, %s blocks, %s\n", dev_, F->max_pf,
                          std::atoi(pn) > F->max_pf ? " (ALMOND_GLM_PREFETCH_N is at most 2)" : "",
                          at != nullptr && (std::strcmp(at, "fetch") == 0 || std::strcmp(at, "cpu") == 0) ? at : "route",
@@ -965,7 +965,7 @@ bool Glm5Model::fast_setup(std::string& err) {
             mtp_dec_ = true;
             mtp_draft_setup();
         } else {
-            std::fprintf(stderr, "glm mtp: CUDA%d %s - decoding token by token\n", dev_, werr.c_str());
+            std::fprintf(stderr, "glm mtp: ROCm%d %s - decoding token by token\n", dev_, werr.c_str());
         }
     }
     // several conversations drafting with the NextN block (ALMOND_GLM_MULTI_MTP, glm_mtp_rows.cu): the commit's replay
@@ -1050,7 +1050,7 @@ bool Glm5Model::fast_setup(std::string& err) {
                 cpu_win_alloc(F, g, exl3_);   // the merged CPU lane's rows (win_cpu_merged)
                 F->rows_group = R;
                 F->rows_scr_rows = RT;
-                std::fprintf(stderr, "glm fast: CUDA%d grouped rows' experts (ALMOND_GLM_GROUP_EXPERTS): up to %d rows, "
+                std::fprintf(stderr, "glm fast: ROCm%d grouped rows' experts (ALMOND_GLM_GROUP_EXPERTS): up to %d rows, "
                              "%.0f MB of scratch slots and %.0f MB of route state\n", dev_, R, (double) extra / 1e6,
                              (double) (f0 > f1 ? f0 - f1 : 0) / 1e6);
             }
@@ -1085,7 +1085,7 @@ bool Glm5Model::fast_setup(std::string& err) {
         {
             const double G = 1073741824.0, used = (double) (total_b - free_b);
             const double known = (double) (w_arena_bytes_ + state_bytes_ + sc_bytes_ + F->arena_bytes + 8 * sstride);
-            std::fprintf(stderr, "glm fast: CUDA%d VRAM before the expert pool: %.2f of %.2f GB in use - dense weights %.2f, "
+            std::fprintf(stderr, "glm fast: ROCm%d VRAM before the expert pool: %.2f of %.2f GB in use - dense weights %.2f, "
                                  "state/KV (%lld ctx) %.2f, activations %.2f, other (context, MTP, scratch, prompt path) "
                                  "%.2f\n", dev_, used / G, (double) total_b / G, (double) w_arena_bytes_ / G,
                          (long long) max_ctx_, (double) state_bytes_ / G,
@@ -1096,10 +1096,10 @@ bool Glm5Model::fast_setup(std::string& err) {
         const size_t reserve = pool_b_.reserve;
         size_t avail = pool_b_.avail;
         if (pool_b_.adapted)
-            std::fprintf(stderr, "glm fast: CUDA%d the default %d MiB VRAM reserve leaves the expert pool too few slots "
+            std::fprintf(stderr, "glm fast: ROCm%d the default %d MiB VRAM reserve leaves the expert pool too few slots "
                                  "on this card: a %zu MiB reserve instead\n", dev_, 700, reserve >> 20);
         if (pool_b_.fixed > 0)
-            std::fprintf(stderr, "glm fast: CUDA%d --expert-cache %lld: at most %.2f GB for the expert pool\n", dev_,
+            std::fprintf(stderr, "glm fast: ROCm%d --expert-cache %lld: at most %.2f GB for the expert pool\n", dev_,
                          (long long) pool_b_.fixed, (double) pool_b_.fixed * (double) stride_max / 1073741824.0);
         // the prompt path's MMQ context keeps a scratch pool (llama.cpp's stream-k fixup tiles) that it fills lazily,
         // out of free VRAM, on the first product of a chunk - so what the pool leaves free must cover it (the prompt
@@ -1108,7 +1108,7 @@ bool Glm5Model::fast_setup(std::string& err) {
             const size_t sc = mmq_scratch_reserve();
             if (sc > 0) {
                 avail -= std::min(avail, sc);
-                std::fprintf(stderr, "glm fast: CUDA%d the prompt path's MMQ scratch pool keeps %.0f MB of the free VRAM "
+                std::fprintf(stderr, "glm fast: ROCm%d the prompt path's MMQ scratch pool keeps %.0f MB of the free VRAM "
                                      "(ALMOND_GLM_MMQ_RESERVE_MB): the expert pool is sized without it\n",
                              dev_, (double) sc / 1048576.0);
             }
@@ -1138,7 +1138,7 @@ bool Glm5Model::fast_setup(std::string& err) {
             if (avail_kb > 0 && expert_bytes > 0) {
                 avail = glmfast::expert_pool_budget(true, free_b, (size_t) avail_kb * 1024, reserve,
                                                     (size_t) (head_gb * 1073741824.0), expert_bytes);
-                std::fprintf(stderr, "glm fast: CUDA%d unified memory: MemAvailable %.2f GB, headroom %.2f GB + "
+                std::fprintf(stderr, "glm fast: ROCm%d unified memory: MemAvailable %.2f GB, headroom %.2f GB + "
                                      "%zu MB reserve, experts need %.2f GB, pool budget %.2f GB\n", dev_,
                              (double) avail_kb / 1048576.0, head_gb, reserve >> 20,
                              (double) expert_bytes / 1073741824.0, (double) avail / 1073741824.0);
@@ -1153,7 +1153,7 @@ bool Glm5Model::fast_setup(std::string& err) {
             const size_t cap = (size_t) (std::atof(vc) * 1073741824.0);
             const size_t used = total_b - free_b;
             const size_t room = cap > used + reserve ? cap - used - reserve : 0;
-            std::fprintf(stderr, "glm fast: CUDA%d VRAM cap %.1f GB: %.2f GB already in use, %.2f GB left for experts\n",
+            std::fprintf(stderr, "glm fast: ROCm%d VRAM cap %.1f GB: %.2f GB already in use, %.2f GB left for experts\n",
                          dev_, (double) cap / 1073741824.0, (double) used / 1073741824.0, (double) room / 1073741824.0);
             avail = std::min(avail, room);
         }
@@ -1227,7 +1227,7 @@ bool Glm5Model::fast_setup(std::string& err) {
             // (a prompt runs alone - no decode beside it, unlike the vision encoder's lending below - so its main
             // slots need little more than one route's experts and the spares)
             if (per - k_extra < k_keep) {
-                std::fprintf(stderr, "glm prefill: CUDA%d the pool (%d slots/layer) cannot lend %zu MB - token by token\n",
+                std::fprintf(stderr, "glm prefill: ROCm%d the pool (%d slots/layer) cannot lend %zu MB - token by token\n",
                              dev_, per, prefill_borrow_bytes() >> 20);
                 prefill_destroy();
                 k_extra = 0;
@@ -1242,7 +1242,7 @@ bool Glm5Model::fast_setup(std::string& err) {
                 k_extra = std::max(k_extra, tail_slots(vb));
                 vis_lend_ok_ = true;
             } else if (vb > 0) {
-                std::fprintf(stderr, "glm fast: CUDA%d the pool (%d slots/layer) cannot lend %zu MB to the vision "
+                std::fprintf(stderr, "glm fast: ROCm%d the pool (%d slots/layer) cannot lend %zu MB to the vision "
                                      "encoder\n", dev_, per, vb >> 20);
             }
         }
@@ -1404,7 +1404,7 @@ bool Glm5Model::fast_setup(std::string& err) {
                 }
             }
             if (!segs.empty())
-                std::fprintf(stderr, "glm fast: CUDA%d one allocation of %.2f GB did not allocate: the expert pool is in "
+                std::fprintf(stderr, "glm fast: ROCm%d one allocation of %.2f GB did not allocate: the expert pool is in "
                                      "%zu\n", dev_, (double) main_bytes / 1073741824.0, segs.size());
         }
         if (segs.empty() || (xtot > 0 && cudaMalloc(&F->xpool, xtot) != cudaSuccess)) {
@@ -1443,7 +1443,7 @@ bool Glm5Model::fast_setup(std::string& err) {
         }
         if (pf_ != nullptr && !prefill_bind(xregion, xtot, err)) return false;
         if (vis_lend_ok_)
-            std::fprintf(stderr, "glm fast: CUDA%d the vision encoder borrows the pool's tail (%.2f GB) while it "
+            std::fprintf(stderr, "glm fast: ROCm%d the vision encoder borrows the pool's tail (%.2f GB) while it "
                                  "encodes\n", dev_, (double) xtot / 1073741824.0);
         F->cnt.assign((size_t) NL * g.n_expert, 0);
         F->usage.assign((size_t) NL * g.n_expert, 0);
@@ -1451,7 +1451,7 @@ bool Glm5Model::fast_setup(std::string& err) {
         const std::string draft_sl = mtp_il_ >= l0_ && mtp_il_ < lt_ && F->L[(size_t) mtp_il_].moe
                                          ? ", the draft layer " + std::to_string(nsl[(size_t) mtp_il_])
                                          : std::string();
-        std::fprintf(stderr, "glm fast: CUDA%d layers [%d,%d) expert pool %.2f GB, %d-%d slots/layer%s (%lld total)%s\n",
+        std::fprintf(stderr, "glm fast: ROCm%d layers [%d,%d) expert pool %.2f GB, %d-%d slots/layer%s (%lld total)%s\n",
                      dev_, l0_, l1_, (double) tot / 1073741824.0, nmin, nmax, draft_sl.c_str(),
                      (long long) F->pool_slots,
                      F->complete ? (" - complete: every expert, " + std::to_string(gf::kSpares) + " spares and " +
@@ -1461,7 +1461,7 @@ bool Glm5Model::fast_setup(std::string& err) {
             std::string sl;
             for (int il = l0_; il < lt_; ++il)
                 if (F->L[(size_t) il].moe) sl += std::to_string(il) + ":" + std::to_string(nsl[(size_t) il]) + " ";
-            std::fprintf(stderr, "glm fast: CUDA%d slots per layer %s\n", dev_, sl.c_str());
+            std::fprintf(stderr, "glm fast: ROCm%d slots per layer %s\n", dev_, sl.c_str());
         }
 
         // the model's clean page cache goes first (once): the experts are read with O_DIRECT, so it never serves the
@@ -1512,7 +1512,7 @@ bool Glm5Model::fast_setup(std::string& err) {
             // Decode misses and pool-tail lending still need landing slots. Keep
             // only the existing per-class floor; do not duplicate the expert cache.
             budget = 0;
-            std::fprintf(stderr, "glm fast: CUDA%d all experts fit in the GPU pool; RAM tier is staging only\n", dev_);
+            std::fprintf(stderr, "glm fast: ROCm%d all experts fit in the GPU pool; RAM tier is staging only\n", dev_);
         }
         // the whole machine's budget is measured ONCE (the first half's pinning would shrink what the second
         // half sees): MemAvailable minus headroom for the OS, the server and the page cache the disk reads go
@@ -1719,7 +1719,7 @@ bool Glm5Model::fast_setup(std::string& err) {
                     for (size_t k = c; k < cls_n.size(); ++k) planned += cls_n[k] * (int64_t) cls_stride[k];
                     pin_left = pin_room(planned + (int64_t) kPinRoom);
                     const int64_t fit = share(c);
-                    std::fprintf(stderr, "glm fast: CUDA%d a pinning cap: %.2f GB more pin, the RAM tier sized to it\n",
+                    std::fprintf(stderr, "glm fast: ROCm%d a pinning cap: %.2f GB more pin, the RAM tier sized to it\n",
                                  dev_, (double) pin_left / 1073741824.0);
                     if (fit < n) {
                         n = std::max(least, fit);
@@ -1760,17 +1760,17 @@ bool Glm5Model::fast_setup(std::string& err) {
         } else if (!staging_only && !fixed_ram && ram_budget_ < 0) {
             const int64_t left = avail_ram_now();
             if (left > 0 && left - unseen_pf < head_b / 2)
-                std::fprintf(stderr, "glm fast: WARNING - CUDA%d: %.1f GB of RAM free after its RAM tier, and the prompt "
+                std::fprintf(stderr, "glm fast: WARNING - ROCm%d: %.1f GB of RAM free after its RAM tier, and the prompt "
                                      "path still pins up to %.1f GB: if the system swaps or stalls, set "
                                      "ALMOND_GLM_RAM_GB lower\n", dev_, (double) left / 1073741824.0,
                              (double) unseen_pf / 1073741824.0);
         }
         int64_t ram_slots = 0;
         for (auto& R : F->rc) ram_slots += R.n;
-        std::fprintf(stderr, "glm fast: CUDA%d RAM tier %.2f GB pinned, %lld slots\n", dev_,
+        std::fprintf(stderr, "glm fast: ROCm%d RAM tier %.2f GB pinned, %lld slots\n", dev_,
                      (double) F->ram_bytes / 1073741824.0, (long long) ram_slots);
         if (F->ram_resident)
-            std::fprintf(stderr, "glm fast: CUDA%d RAM-resident mode: every non-VRAM expert gets a slot (+%d slack/layer); disk evictions are OFF\n",
+            std::fprintf(stderr, "glm fast: ROCm%d RAM-resident mode: every non-VRAM expert gets a slot (+%d slack/layer); disk evictions are OFF\n",
                          dev_, F->ram_slack);
         // the prompt path's lend cap (Almond's, from the share of the expert bytes held pinned), now that it is known
         if (pf_ != nullptr) {
@@ -1803,7 +1803,7 @@ bool Glm5Model::fast_setup(std::string& err) {
         if (const char* v = getenv("ALMOND_GLM_MISS_SKIP_W")) F->miss_w = (float) std::max(0.0, std::min(1.0, std::atof(v)));
         if (const char* v = getenv("ALMOND_GLM_MISS_SKIP_FROM")) F->miss_from = std::max(0, std::atoi(v));
         if (F->miss_w > 0.0f)
-            std::fprintf(stderr, "glm fast: CUDA%d light misses left out: weight share < %.3f on layers %d+ (changes the "
+            std::fprintf(stderr, "glm fast: ROCm%d light misses left out: weight share < %.3f on layers %d+ (changes the "
                                  "answers)\n", dev_, F->miss_w, F->miss_from);
         // LOOKAHEAD: the predictions per layer, a load state per RAM slot, and the reader threads
         if (const char* ah = getenv("ALMOND_GLM_AHEAD")) F->n_ahead = std::max(0, std::min(gf::kAhead, std::atoi(ah)));
@@ -1845,7 +1845,7 @@ bool Glm5Model::fast_setup(std::string& err) {
                     (void) cudaGetLastError();   // the failed query's error must not reach a later launch check
                 }
 #endif
-                std::fprintf(stderr, "glm fast: CUDA%d the RAM tier sits on node %d of %d seen%s\n",
+                std::fprintf(stderr, "glm fast: ROCm%d the RAM tier sits on node %d of %d seen%s\n",
                              dev_, tier_node, seen,
                              host_node >= 0 && host_node != tier_node
                                  ? (std::string(" (the GPU's host node is ") + std::to_string(host_node) +
@@ -1871,7 +1871,7 @@ bool Glm5Model::fast_setup(std::string& err) {
                       " experts fit neither tier after the warm - raise ALMOND_GLM_RAM_GB or lower --max-context";
                 return false;
             }
-            std::fprintf(stderr, "glm fast: CUDA%d RAM-resident verified: all %d experts are in VRAM or pinned RAM\n",
+            std::fprintf(stderr, "glm fast: ROCm%d RAM-resident verified: all %d experts are in VRAM or pinned RAM\n",
                          dev_, total);
         }
         F->lane_pending = true;
@@ -1984,14 +1984,14 @@ bool Glm5Model::fast_helper_setup(std::string& err) {
     F->cpu_retime = false;
     F->cal_key.clear();   // the CPU's decode timing must not re-plan the GPU helper's lane
     if (n_parts_ > 1)
-        std::fprintf(stderr, "glm helper: CUDA%d owns %d complementary experts in %.2f GiB of %s for part %d's layers "
-                             "[%d, %d); CUDA%d keeps that part's trunk layers; prefill unchanged\n",
+        std::fprintf(stderr, "glm helper: ROCm%d owns %d complementary experts in %.2f GiB of %s for part %d's layers "
+                             "[%d, %d); ROCm%d keeps that part's trunk layers; prefill unchanged\n",
                      device, resident, (double) F->helper.used() / 1073741824.0,
                      F->helper.integrated() ? "mapped RAM (no extra weight copy)" : "VRAM (auto, 512 MiB headroom)",
                      part_, l0_, lt_, dev_);
     else
-        std::fprintf(stderr, "glm helper: CUDA%d owns %d complementary experts in %.2f GiB of %s; "
-                             "CUDA%d keeps all trunk layers and MTP; prefill unchanged\n",
+        std::fprintf(stderr, "glm helper: ROCm%d owns %d complementary experts in %.2f GiB of %s; "
+                             "ROCm%d keeps all trunk layers and MTP; prefill unchanged\n",
                      device, resident, (double) F->helper.used() / 1073741824.0,
                      F->helper.integrated() ? "mapped RAM (no extra weight copy)" : "VRAM (auto, 512 MiB headroom)", dev_);
     return true;
@@ -2015,7 +2015,7 @@ bool Glm5Model::fast_helper_check(std::string& err) {
     int moe_layers = 0;
     for (int il = l0_; il < lt_; ++il) moe_layers += F->L[(size_t) il].moe && !F->L[(size_t) il].exl3;
     if (F->helper.device() < 0) {
-        std::fprintf(stderr, "glm helper check: CUDA%d part %d layers [%d, %d): NO helper (%d MoE layers) - nothing checked\n",
+        std::fprintf(stderr, "glm helper check: ROCm%d part %d layers [%d, %d): NO helper (%d MoE layers) - nothing checked\n",
                      dev_, part_, l0_, lt_, moe_layers);
         return true;
     }
@@ -2129,12 +2129,12 @@ bool Glm5Model::fast_helper_check(std::string& err) {
     }
     release();
     if (layers == 0)
-        std::fprintf(stderr, "glm helper check: CUDA%d part %d layers [%d, %d): the helper on CUDA%d owns NO expert (%d MoE "
+        std::fprintf(stderr, "glm helper check: ROCm%d part %d layers [%d, %d): the helper on ROCm%d owns NO expert (%d MoE "
                              "layers) - nothing checked\n", dev_, part_, l0_, lt_, F->helper.device(), moe_layers);
     else
-        std::fprintf(stderr, "glm helper check: CUDA%d part %d layers [%d, %d): %d of %d MoE layers hold helper experts, %d "
-                             "checked, a sample of %d experts (up to %d a layer): the pack's bytes, and the helper on CUDA%d "
-                             "vs CUDA%d's own kernels max rel_L2 %.3g (limit 1e-5)\n",
+        std::fprintf(stderr, "glm helper check: ROCm%d part %d layers [%d, %d): %d of %d MoE layers hold helper experts, %d "
+                             "checked, a sample of %d experts (up to %d a layer): the pack's bytes, and the helper on ROCm%d "
+                             "vs ROCm%d's own kernels max rel_L2 %.3g (limit 1e-5)\n",
                      dev_, part_, l0_, lt_, held, moe_layers, layers, experts, per_layer, F->helper.device(), dev_, worst);
     return true;
 }
@@ -3077,7 +3077,7 @@ bool Glm5Model::fast_cpu_lane_setup(std::string& err) {
         if (R.st[(size_t) s] == FastState::kRHold && R.key[(size_t) s] / g.n_expert == il_cal)
             cal_all.push_back(R.slot((size_t) s));
     if (cal_all.empty()) {   // nothing in RAM: the lane would never run (a complete pool: every expert in VRAM)
-        std::fprintf(stderr, "glm fast: CUDA%d CPU lane off: the RAM tier holds no expert\n", dev_);
+        std::fprintf(stderr, "glm fast: ROCm%d CPU lane off: the RAM tier holds no expert\n", dev_);
         return true;
     }
     const uint8_t* cal = cal_all[0];
@@ -3162,10 +3162,10 @@ bool Glm5Model::fast_cpu_lane_setup(std::string& err) {
                            std::make_shared<glmfast::Workers>(tb - 1, 20000, lane_pin ? cb : std::vector<int>{}),
                            lane_pin ? ca : std::vector<int>{}, lane_pin ? cb : std::vector<int>{});
             if (lane_pin)
-                std::fprintf(stderr, "glm fast: CUDA%d a verify window's tokens on two CPU lanes: %d threads on NUMA node "
+                std::fprintf(stderr, "glm fast: ROCm%d a verify window's tokens on two CPU lanes: %d threads on NUMA node "
                                      "%d, %d on node %d\n", dev_, ta, groups[a].first, tb, groups[b].first);
             else
-                std::fprintf(stderr, "glm fast: CUDA%d a verify window's tokens on two CPU lanes of %d and %d threads, "
+                std::fprintf(stderr, "glm fast: ROCm%d a verify window's tokens on two CPU lanes of %d and %d threads, "
                                      "unpinned\n", dev_, F->cpu_pool->active(), tb);
         }
     }
@@ -3302,7 +3302,7 @@ bool Glm5Model::fast_cpu_lane_setup(std::string& err) {
         }
     }
     if (plan == 0ull) {
-        std::fprintf(stderr, "glm fast: CUDA%d CPU lane off: an expert %.3f ms on the CPU vs %.3f ms over PCIe\n", dev_,
+        std::fprintf(stderr, "glm fast: ROCm%d CPU lane off: an expert %.3f ms on the CPU vs %.3f ms over PCIe\n", dev_,
                      c_ms, p_ms);
         win_lanes_stop();
         F->cpu_pool.reset();
@@ -3325,14 +3325,14 @@ bool Glm5Model::fast_cpu_lane_setup(std::string& err) {
                       (size_t) F->n_keys * sizeof(unsigned int));
         F->md.dcnt = F->dcnt_d;
     }
-    std::fprintf(stderr, "glm fast: CUDA%d CPU lane: %d threads%s, an expert %.3f ms on the CPU vs %.3f ms over PCIe -> "
+    std::fprintf(stderr, "glm fast: ROCm%d CPU lane: %d threads%s, an expert %.3f ms on the CPU vs %.3f ms over PCIe -> "
                          "of 0..8 RAM-tier experts the CPU takes%s\n", dev_, threads,
                  shared ? " (one pool, shared by the split's GPUs)"
                  : pin_cpus.empty() ? ""
                  : (" on " + std::to_string(pin_cpus.size()) + " CPUs of its own" +
                     (pin_node >= 0 ? " (NUMA node " + std::to_string(pin_node) + ")" : std::string())).c_str(),
                  c_ms, p_ms, tab.c_str());
-    if (cached) std::fprintf(stderr, "glm fast: CUDA%d CPU lane: those times from %s (not timed)\n", dev_, calf);
+    if (cached) std::fprintf(stderr, "glm fast: ROCm%d CPU lane: those times from %s (not timed)\n", dev_, calf);
     // ALMOND_GLM_CPU_LANE_CHECK=1: the calibration expert on one normalised input three ways - the device's decode
     // kernels, the CPU lane, and a double-precision reference from ggml's dequantised rows - and their distances
     if (getenv("ALMOND_GLM_CPU_LANE_CHECK") != nullptr && F->L[(size_t) il_cal].exl3) {
@@ -3683,7 +3683,7 @@ bool Glm5Model::fast_warm(std::string& err) {
             ++n_prof;
         }
         if (n_prof > 0)
-            std::fprintf(stderr, "glm fast: CUDA%d the tiers follow this machine's usage profile (%s, %d layers%s)\n", dev_,
+            std::fprintf(stderr, "glm fast: ROCm%d the tiers follow this machine's usage profile (%s, %d layers%s)\n", dev_,
                          up.c_str(), n_prof, n_blend > 0 ? ", blended with the pack's routing profile" : "");
     }
     for (int il = 0; il < NL; ++il) {
@@ -3796,7 +3796,7 @@ bool Glm5Model::fast_warm(std::string& err) {
         if (pct / 10 != last_pct / 10) {
             last_pct = pct;
             const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-            std::fprintf(stderr, "glm fast: CUDA%d warming the expert tiers %d%% (%.1f of %.1f GB, %.0f s)\n", dev_, pct,
+            std::fprintf(stderr, "glm fast: ROCm%d warming the expert tiers %d%% (%.1f of %.1f GB, %.0f s)\n", dev_, pct,
                          (double) done_bytes / 1e9, (double) total_bytes / 1e9, s);
         }
     }
@@ -3807,7 +3807,7 @@ bool Glm5Model::fast_warm(std::string& err) {
         return false;
     }
     const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::fprintf(stderr, "glm fast: CUDA%d tiers warm: %zu experts (%.1f GB) in %.0f s (%.2f GB/s)\n", dev_, jobs.size(),
+    std::fprintf(stderr, "glm fast: ROCm%d tiers warm: %zu experts (%.1f GB) in %.0f s (%.2f GB/s)\n", dev_, jobs.size(),
                  (double) total_bytes / 1e9, s, (double) total_bytes / 1e9 / std::max(1e-9, s));
     return true;
 }
@@ -3831,7 +3831,7 @@ void Glm5Model::fast_destroy() {
     win_lanes_stop();   // (after the service thread: it hands them their routes)
     F->cpu_pool.reset();
     if (F->helper.device() >= 0) {
-        std::fprintf(stderr, "glm helper: CUDA%d computed %llu experts in %llu routes, %.1f ms, %llu cache swaps\n", F->helper.device(),
+        std::fprintf(stderr, "glm helper: ROCm%d computed %llu experts in %llu routes, %.1f ms, %llu cache swaps\n", F->helper.device(),
                      (unsigned long long) F->helper_experts.load(), (unsigned long long) F->helper_routes.load(),
                      (double) F->helper_us.load() / 1000.0, (unsigned long long) F->helper_swaps);
         F->helper.close();
@@ -3854,7 +3854,7 @@ void Glm5Model::fast_destroy() {
                    std::to_string(100.0 * (double) F->ah_disk_cov[d] / (double) std::max<uint64_t>(1, F->ah_disk))
                        .substr(0, 4) + "%";
         std::fprintf(stderr,
-                     "glm fast ahead CUDA%d: of 8 experts predicted d layers early%s | disk misses %llu, named d early%s, "
+                     "glm fast ahead ROCm%d: of 8 experts predicted d layers early%s | disk misses %llu, named d early%s, "
                      "by any %.1f%% | reads issued %llu, used %llu (waited %llu, %.1f ms; taken over %llu), queue full %llu, "
                      "no free slot %llu\n",
                      dev_, ov.c_str(), (unsigned long long) F->ah_disk, cov.c_str(),
@@ -3869,7 +3869,7 @@ void Glm5Model::fast_destroy() {
                      F->ms / (double) F->tokens);
     if (F->timing && F->hits.load() + F->misses.load() > 0)
         std::fprintf(stderr,
-                     "glm fast tiers CUDA%d: vram hits %llu, ram fetches %llu, disk reads %llu (%.2f%% vram hit) | "
+                     "glm fast tiers ROCm%d: vram hits %llu, ram fetches %llu, disk reads %llu (%.2f%% vram hit) | "
                      "promotions %llu (scratch %llu) demotions %llu drops %llu prefetches %llu | disk waits %llu, %.1f ms\n",
                      dev_, (unsigned long long) F->hits.load(), (unsigned long long) F->ram_hits.load(),
                      (unsigned long long) F->disk_reads.load(),
@@ -3879,7 +3879,7 @@ void Glm5Model::fast_destroy() {
                      (unsigned long long) F->prefetches.load(), (unsigned long long) F->miss_layers.load(),
                      (double) F->miss_us.load() / 1000.0);
     if (F->timing && F->pred_n.load() > 0)
-        std::fprintf(stderr, "glm fast predict CUDA%d: %.2f of 8 experts predicted one layer early; %.1f%% of the "
+        std::fprintf(stderr, "glm fast predict ROCm%d: %.2f of 8 experts predicted one layer early; %.1f%% of the "
                              "non-resident ones (%llu)\n",
                      dev_, (double) F->pred_overlap.load() / (double) F->pred_n.load(),
                      100.0 * (double) F->pred_miss_hit.load() / (double) std::max<uint64_t>(1, F->pred_miss.load()),
@@ -3892,7 +3892,7 @@ void Glm5Model::fast_destroy() {
             tot += kv.second;
         }
         std::sort(v.rbegin(), v.rend());
-        std::fprintf(stderr, "glm fast prof CUDA%d (%llu tokens, %.2f ms/token of GPU stream time):\n", dev_,
+        std::fprintf(stderr, "glm fast prof ROCm%d (%llu tokens, %.2f ms/token of GPU stream time):\n", dev_,
                      (unsigned long long) F->ptokens, tot / (double) F->ptokens);
         for (auto& e : v)
             std::fprintf(stderr, "  %-18s %7.3f ms/token  %5.1f%%\n", e.second.c_str(), e.first / (double) F->ptokens,
@@ -4004,7 +4004,7 @@ void Glm5Model::lane_drift_check() {
         F->drift_n = dir != 0 && dir == F->drift_dir ? F->drift_n + 1 : dir != 0;
         F->drift_dir = dir;
         if (F->drift_n >= 5) {   // 5 requests in a row: the calibration is off, the next start times it
-            std::fprintf(stderr, "glm fast: CUDA%d CPU lane: decode %.3f ms an expert vs %.3f at calibration - dropped from "
+            std::fprintf(stderr, "glm fast: ROCm%d CPU lane: decode %.3f ms an expert vs %.3f at calibration - dropped from "
                                  "%s\n", m->dev_, ms, F->cal_ref, F->cal_file.c_str());
             cal_put(F->cal_file, F->cal_key, "");
             F->cal_key.clear();
@@ -4061,7 +4061,7 @@ void Glm5Model::lane_retime() {
         if (plan == 0ull || plan == F->cpu_plan_start) continue;   // (a lane that would stop stays: the CPU may recover)
         F->cpu_plan = F->cpu_plan_start = plan;   // (the next route reads it; set_pcie_share(-1) restores this one)
         ++F->rt_changes;
-        std::fprintf(stderr, "glm fast: CUDA%d CPU lane timed again in decode: an expert %.3f ms (planned with %.3f) "
+        std::fprintf(stderr, "glm fast: ROCm%d CPU lane timed again in decode: an expert %.3f ms (planned with %.3f) "
                              "-> RAM-tier experts to the CPU, of 0..8:%s (PCIe share %.2f)\n",
                      m->dev_, c_ms, was, tab.c_str(), plan_share(plan));
     }
@@ -4533,7 +4533,7 @@ void Glm5Model::fast_service() {
                 F->miss_layers.fetch_add(1, std::memory_order_relaxed);
                 static const bool trace = getenv("ALMOND_GLM_SVC_TRACE") != nullptr;
                 if (trace)
-                    std::fprintf(stderr, "svc CUDA%d seq %u layer %d disk %d %.2f ms\n", dev_, next, il, nm,
+                    std::fprintf(stderr, "svc ROCm%d seq %u layer %d disk %d %.2f ms\n", dev_, next, il, nm,
                                  (double) us / 1000.0);
             }
         }
@@ -5271,7 +5271,7 @@ bool Glm5Model::fast_boundary(std::string& err) {
     static const bool diag = getenv("ALMOND_GLM_TIER_DIAG") != nullptr;
     static const int diag_every = getenv("ALMOND_GLM_TIER_DIAG_EVERY") ? std::max(1, std::atoi(getenv("ALMOND_GLM_TIER_DIAG_EVERY"))) : 64;
     if (diag && ++F->diag_b % diag_every == 0)
-        std::fprintf(stderr, "glm tier diag CUDA%d (%llu boundaries): VRAM drops %llu, RAM evictions %llu, lend drops %llu (to RAM %llu, evicting %llu), background promotions %llu / demotions %llu, resident skips %llu | "
+        std::fprintf(stderr, "glm tier diag ROCm%d (%llu boundaries): VRAM drops %llu, RAM evictions %llu, lend drops %llu (to RAM %llu, evicting %llu), background promotions %llu / demotions %llu, resident skips %llu | "
                              "disk reads of: never held %llu, dropped from VRAM %llu, evicted from RAM %llu, lend-dropped %llu, lend-evicted %llu\n",
                      dev_, (unsigned long long) F->diag_b, (unsigned long long) F->diag_drop,
                      (unsigned long long) F->diag_ram_evict, (unsigned long long) F->diag_lend,
@@ -5884,7 +5884,7 @@ bool Glm5Model::fast_token(int32_t token, std::string& err) {
                 const FastState* Fm = m->fast_;
                 unsigned int last = 0;
                 for (int i = 0; i < gf::kRingSize; ++i) last = std::max(last, (unsigned int) Fm->ring_h[i].seq);
-                std::fprintf(stderr, "glm fast: token %lld waiting > 10 s - CUDA%d last route seq %u, last answer %u\n",
+                std::fprintf(stderr, "glm fast: token %lld waiting > 10 s - ROCm%d last route seq %u, last answer %u\n",
                              (long long) p, m->dev_, last, (unsigned int) Fm->resp_h->seq);
             }
         }
@@ -6170,7 +6170,7 @@ void Glm5Model::pool_check(size_t floor_b, size_t slot_b, size_t all_b) {
         if (ded > 0 && ded < total_b && b.fixed == 0 && used + b.avail > limit) {
             const size_t give = std::min(b.avail, used + b.avail - limit);
             pool_short_ += give;
-            std::fprintf(stderr, "glm fast: CUDA%d Windows gives this APU's GPU %.2f GB of dedicated memory (HIP counts "
+            std::fprintf(stderr, "glm fast: ROCm%d Windows gives this APU's GPU %.2f GB of dedicated memory (HIP counts "
                                  "%.2f GB with shared memory): the expert pool stays within it, %.2f GB less\n",
                          dev_, (double) ded / 1073741824.0, (double) total_b / 1073741824.0,
                          (double) give / 1073741824.0);
@@ -6199,7 +6199,7 @@ void Glm5Model::pool_check(size_t floor_b, size_t slot_b, size_t all_b) {
                 const double room = std::max(0.0, (double) can - margin);   // (what the experts may still commit)
                 if (cap.second > 0) {
                     const size_t hint = glmfast::pagefile_hint_gib(commit_limit_, commit_ram_, commit_kept_);
-                    std::fprintf(stderr, "glm fast: CUDA%d WARNING: %.1f GB of experts stay off the GPU - Windows charges "
+                    std::fprintf(stderr, "glm fast: ROCm%d WARNING: %.1f GB of experts stay off the GPU - Windows charges "
                                          "the GPU's memory to its commit (RAM + page file) and can commit only %.1f GB "
                                          "more for them (%.0f GB kept for the other programs). A page file of %zu GB "
                                          "(%zu MB; now %.0f GB) keeps them on the GPU: System > About > Advanced system "
@@ -6207,7 +6207,7 @@ void Glm5Model::pool_check(size_t floor_b, size_t slot_b, size_t all_b) {
                                  dev_, (double) cap.second / gb, room / gb, margin / gb, hint, hint * 1024,
                                  (double) (commit_limit_ > commit_ram_ ? commit_limit_ - commit_ram_ : 0) / 1073741824.0);
                 } else {
-                    std::fprintf(stderr, "glm fast: CUDA%d the expert pool stays within Windows' commit (%.1f GB more "
+                    std::fprintf(stderr, "glm fast: ROCm%d the expert pool stays within Windows' commit (%.1f GB more "
                                          "for it, %.0f GB kept for the other programs): its budget %.2f GB less, every "
                                          "expert still fits\n",
                                  dev_, room / gb, margin / gb, (double) (b2.avail - cap.first) / 1073741824.0);
@@ -6243,7 +6243,7 @@ void Glm5Model::pool_check(size_t floor_b, size_t slot_b, size_t all_b) {
         if (have == 0) {
             // nothing to write at all: not a card that is short, but frees of a write before that have not landed -
             // the budget stays as it is (giving it all back left a start no pool)
-            std::fprintf(stderr, "glm fast: CUDA%d the expert pool's check got no memory to write: the budget stays "
+            std::fprintf(stderr, "glm fast: ROCm%d the expert pool's check got no memory to write: the budget stays "
                                  "%.2f GB\n", dev_, (double) b.avail / 1073741824.0);
             return;
         }
@@ -6259,11 +6259,11 @@ void Glm5Model::pool_check(size_t floor_b, size_t slot_b, size_t all_b) {
         if (give == 0) return;
         pool_short_ += give;
         if (have < b.avail)
-            std::fprintf(stderr, "glm fast: CUDA%d the driver gave %.2f of the expert pool's %.2f GB (%zu MiB free then, "
+            std::fprintf(stderr, "glm fast: ROCm%d the driver gave %.2f of the expert pool's %.2f GB (%zu MiB free then, "
                                  "reserve %zu MiB): %.2f GB less\n", dev_, (double) have / 1073741824.0,
                          (double) b.avail / 1073741824.0, fr >> 20, b.reserve >> 20, (double) give / 1073741824.0);
         else
-            std::fprintf(stderr, "glm fast: CUDA%d only %zu MiB free once the expert pool's %.2f GB are written "
+            std::fprintf(stderr, "glm fast: ROCm%d only %zu MiB free once the expert pool's %.2f GB are written "
                                  "(reserve %zu MiB): %.2f GB less\n", dev_, fr >> 20, (double) b.avail / 1073741824.0,
                          b.reserve >> 20, (double) give / 1073741824.0);
     }
@@ -6406,7 +6406,7 @@ bool Glm5Model::spec_kda_reserve(std::string& err) {
         err = "glm spec: the recurrent-state backup did not allocate";
         return false;
     }
-    std::fprintf(stderr, "glm spec: CUDA%d the head's recurrent-state backup (%.0f MB) before the expert pool\n", dev_,
+    std::fprintf(stderr, "glm spec: ROCm%d the head's recurrent-state backup (%.0f MB) before the expert pool\n", dev_,
                  (double) bytes / 1048576.0);
     return true;
 }
@@ -6855,7 +6855,7 @@ bool Glm5Model::decode_spec(almond::glm::kernels::SamplerParams& sp, int64_t max
                      tp[2] / np, tp[3] / np, tp[4] / np, tp[5] / np);
         for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get())
             if (m->spec_n_ > 0)
-                std::fprintf(stderr, "glm spec prof CUDA%d (%lld calls, ms/call): sync %.3f | boundary %.3f | embed %.3f | "
+                std::fprintf(stderr, "glm spec prof ROCm%d (%lld calls, ms/call): sync %.3f | boundary %.3f | embed %.3f | "
                                      "enqueue layers %.3f | DEVICE token %.2f ms, gap before %.2f ms\n", m->dev_,
                              (long long) m->spec_n_, m->spec_t_[0] / m->spec_n_, m->spec_t_[1] / m->spec_n_,
                              m->spec_t_[2] / m->spec_n_, m->spec_t_[3] / m->spec_n_,

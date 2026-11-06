@@ -5167,7 +5167,7 @@ void note_mv(int device, bool on) {
     if (device < 0 || device >= 32) return;
     const unsigned bit = 1u << device;
     if (seen.fetch_or(bit) & bit) return;
-    std::fprintf(stderr, "glm mv: CUDA%d dense GEMVs on the %s\n", device, on ? "RDNA3 kernel" : "original kernels");
+    std::fprintf(stderr, "glm mv: ROCm%d dense GEMVs on the %s\n", device, on ? "RDNA3 kernel" : "original kernels");
 }
 bool mv_rdna_device() {
     static const int mode = [] {   // -1: default (gfx115x + gfx120x), 0: off, 1: every gfx11/gfx12
@@ -5905,8 +5905,8 @@ void note_kernel(std::atomic<unsigned>& seen, int device, const char* what, cons
     if (device < 0 || device >= 32) return;
     const unsigned bit = 1u << device;
     if (seen.fetch_or(bit) & bit) return;
-    if (label == "original") std::fprintf(stderr, "glm %s: CUDA%d on the original kernels\n", what, device);
-    else std::fprintf(stderr, "glm %s: CUDA%d on the take-two kernels %s\n", what, device, label.c_str());
+    if (label == "original") std::fprintf(stderr, "glm %s: ROCm%d on the original kernels\n", what, device);
+    else std::fprintf(stderr, "glm %s: ROCm%d on the take-two kernels %s\n", what, device, label.c_str());
 }
 std::atomic<unsigned> g_dsa2_seen{0}, g_mla2_seen{0};
 int multiprocessors(int dev) {
@@ -6424,7 +6424,7 @@ void note_gu22(bool tuned, int path) {
     if (hipGetDevice(&dev) != hipSuccess || dev < 0 || dev >= 16) return;
     const unsigned bit = 1u << (dev * 2 + path);
     if (seen.fetch_or(bit) & bit) return;
-    std::fprintf(stderr, "glm experts: CUDA%d IQ2_S gate/up on the %s kernel (%s)\n", dev, tuned ? "tuned RDNA" : "original",
+    std::fprintf(stderr, "glm experts: ROCm%d IQ2_S gate/up on the %s kernel (%s)\n", dev, tuned ? "tuned RDNA" : "original",
                  path ? "multi-token launch" : "token path");
 }
 // Splitting shared down removes its dynamic type switch from routed gate/up's

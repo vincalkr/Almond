@@ -2783,7 +2783,7 @@ void fused_gr_check() {
     const int want = env_variant();
     if (want == kHcPlain) {
         g_variant[dev].store(kHcPlain);
-        std::fprintf(stderr, "qwen hc: CUDA%d: the hyper-connection read runs as the plain one (ALMOND_HC_SPLIT=0)\n",
+        std::fprintf(stderr, "qwen hc: ROCm%d: the hyper-connection read runs as the plain one (ALMOND_HC_SPLIT=0)\n",
                      dev);
         return;
     }
@@ -2795,17 +2795,17 @@ void fused_gr_check() {
     else if (okv[kHcSplit]) use = kHcSplit;
     g_variant[dev].store(use);
     if (!ran)
-        std::fprintf(stderr, "qwen hc: CUDA%d: the check of split/staged could not run (%s)\n", dev, why[0].c_str());
+        std::fprintf(stderr, "qwen hc: ROCm%d: the check of split/staged could not run (%s)\n", dev, why[0].c_str());
     static const char* const name[4] = {"", "plain", "split", "staged"};
     for (int v = kHcStaged; v >= kHcSplit; --v)
         if (v <= want && !okv[v] && ran)
-            std::fprintf(stderr, "qwen hc: CUDA%d: the %s read differs from the plain read on this card - not used: "
+            std::fprintf(stderr, "qwen hc: ROCm%d: the %s read differs from the plain read on this card - not used: "
                                  "%s\n", dev, name[v], why[v].c_str());
     static const char* const what[4] = {
         "", "the plain read (the norm per token, the down projection on 41 blocks)",
         "split (the norm per token and stream, then the plain read's down projection)",
         "staged (the norm per token and stream, the down projection's activations staged ahead by cp.async)"};
-    std::fprintf(stderr, "qwen hc: CUDA%d: the hyper-connection read runs as %s%s\n", dev, what[use],
+    std::fprintf(stderr, "qwen hc: ROCm%d: the hyper-connection read runs as %s%s\n", dev, what[use],
                  use >= kHcSplit ? "; checked bit for bit against the plain read on this card (ALMOND_HC_SPLIT=1 or 0 "
                                    "for the earlier ones)" : "");
 }
@@ -3169,13 +3169,13 @@ void fused_gr_persist_init() {
     cudaDeviceProp prop{};
     cudaGetDeviceProperties(&prop, dev);
     if (prop.warpSize != 32) {
-        std::fprintf(stderr, "qwen hc: CUDA%d: ALMOND_HC_PERSIST=1 is off here: the kernel is written for 32-lane waves "
+        std::fprintf(stderr, "qwen hc: ROCm%d: ALMOND_HC_PERSIST=1 is off here: the kernel is written for 32-lane waves "
                              "(this card runs %d)\n", dev, prop.warpSize);
         return;
     }
 #if defined(__HIPCC__)
     if (almond::qwen::kernels::gfx_arch_is_gfx12(prop.gcnArchName) || almond::qwen::kernels::gfx_arch_is_gfx11_wmma(prop.gcnArchName)) {
-        std::fprintf(stderr, "qwen hc: CUDA%d: ALMOND_HC_PERSIST=1 is off here: gfx11 / gfx12 have no s_memrealtime for the barrier "
+        std::fprintf(stderr, "qwen hc: ROCm%d: ALMOND_HC_PERSIST=1 is off here: gfx11 / gfx12 have no s_memrealtime for the barrier "
                              "timeout (written and measured for gfx1030; an R9700 saw no gain from it, #2226)\n", dev);
         return;
     }
@@ -3189,7 +3189,7 @@ void fused_gr_persist_init() {
               cudaMemset(st.bar, 0, 64 * sizeof(unsigned)) == cudaSuccess;
     if (!ok) {
         cudaGetLastError();
-        std::fprintf(stderr, "qwen hc: CUDA%d: ALMOND_HC_PERSIST=1 is off here: workspace allocation failed\n", dev);
+        std::fprintf(stderr, "qwen hc: ROCm%d: ALMOND_HC_PERSIST=1 is off here: workspace allocation failed\n", dev);
         return;
     }
     // the check: random weights and inputs with the pending write and the inject rows, against the default read; the
@@ -3284,17 +3284,17 @@ void fused_gr_persist_init() {
     cudaDeviceSynchronize();
     cudaGetLastError();
     if (!ok) {
-        std::fprintf(stderr, "qwen hc: CUDA%d: ALMOND_HC_PERSIST=1 is off here: the check failed at %d tokens "
+        std::fprintf(stderr, "qwen hc: ROCm%d: ALMOND_HC_PERSIST=1 is off here: the check failed at %d tokens "
                              "(max relative difference %.3g)\n", dev, bad_t, worst);
         return;
     }
     if (max_t == 0) {
-        std::fprintf(stderr, "qwen hc: CUDA%d: ALMOND_HC_PERSIST=1 is off here: 80 blocks are not resident at once on %d "
+        std::fprintf(stderr, "qwen hc: ROCm%d: ALMOND_HC_PERSIST=1 is off here: 80 blocks are not resident at once on %d "
                              "multiprocessors (the check timed out)\n", dev, mp);
         return;
     }
     st.max_t = max_t;
-    std::fprintf(stderr, "qwen hc: CUDA%d: ALMOND_HC_PERSIST=1: the verifier's hyper-connection read runs as one "
+    std::fprintf(stderr, "qwen hc: ROCm%d: ALMOND_HC_PERSIST=1: the verifier's hyper-connection read runs as one "
                          "persistent kernel (80 blocks on %d multiprocessors, up to %d tokens; %d token counts timed out in "
                          "the check; checked against the default read, max relative difference %.2g)\n", dev, mp, max_t,
                  timeouts, worst);

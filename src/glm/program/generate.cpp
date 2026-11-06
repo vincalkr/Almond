@@ -3996,14 +3996,14 @@ static int glm_pack_generate(const Options& o) {
         if (fm < 0) continue;
         const int64_t ok_mib = i == 0 ? 256 : 512;
         if (fm >= ok_mib) {
-            std::fprintf(stderr, "glm serve: CUDA%d: %lld MiB of VRAM free with everything loaded\n", pv.dev, (long long) fm);
+            std::fprintf(stderr, "glm serve: ROCm%d: %lld MiB of VRAM free with everything loaded\n", pv.dev, (long long) fm);
         } else if (pv.adapted) {
-            std::fprintf(stderr, "glm serve: WARNING: CUDA%d: %lld MiB of VRAM free with everything loaded - this card "
+            std::fprintf(stderr, "glm serve: WARNING: ROCm%d: %lld MiB of VRAM free with everything loaded - this card "
                                  "only just fits the model (the VRAM reserve was lowered to %d MiB so the expert pool "
                                  "fits): requests may stall. Close other programs that use the GPU, or lower "
                                  "--max-context\n", pv.dev, (long long) fm, pv.reserve_mib);
         } else {
-            std::fprintf(stderr, "glm serve: CUDA%d: %lld MiB of VRAM free with everything loaded - LOW: requests may "
+            std::fprintf(stderr, "glm serve: ROCm%d: %lld MiB of VRAM free with everything loaded - LOW: requests may "
                                  "stall; add %s %lld to the config's args (or lower --max-context)\n", pv.dev,
                          (long long) fm, i == 0 ? "--vram-reserve-mib" : "--vram-reserve-later-mib",
                          (long long) (pv.reserve_mib + (i == 0 ? 512 : 768) - fm));
@@ -4936,7 +4936,7 @@ int glm_main(int argc, char** argv) {
             std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "glm generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
+        std::fprintf(stderr, "glm generate: ROCm%d context ready, %.2f GiB free before expert arena registration\n",
                      remote_dev[0], free_gib);
     }
     // plan v0.3 P6: the PCIe share of the missed experts, measured per kind of pack (the paper, finding on PCIe).
@@ -5275,12 +5275,12 @@ int glm_main(int argc, char** argv) {
         void* arena_s = nullptr;
         if (cudaMalloc(&arena_s, pool_bytes) != cudaSuccess ||
             !st.wt.load(o.pack, arena_s, pool_bytes, err, skip.empty() ? nullptr : &skip)) {
-            std::fprintf(stderr, "glm generate: layer split, CUDA%d weights: %s\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split, ROCm%d weights: %s\n", st.dev,
                          err.empty() ? "the weight arena does not fit" : err.c_str());
             return 1;
         }
         if (!o.native_dense_gguf.empty() && !st.dense.load(o.native_dense_gguf, st.wt, err, o.native_ple_key)) {
-            std::fprintf(stderr, "glm generate: layer split, CUDA%d native dense projections: %s\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split, ROCm%d native dense projections: %s\n", st.dev,
                          err.c_str());
             return 1;
         }
@@ -5290,19 +5290,19 @@ int glm_main(int argc, char** argv) {
             cudaStreamCreateWithFlags(&st.stream, cudaStreamNonBlocking) != cudaSuccess ||
             cudaStreamCreateWithFlags(&st.adapt_stream, cudaStreamNonBlocking) != cudaSuccess ||
             cudaEventCreateWithFlags(&st.adapt_ev, cudaEventDisableTiming) != cudaSuccess) {
-            std::fprintf(stderr, "glm generate: layer split, CUDA%d: the session state failed\n", st.dev);
+            std::fprintf(stderr, "glm generate: layer split, ROCm%d: the session state failed\n", st.dev);
             return 1;
         }
         const almond::glm::core::WeightRef* wo_s = st.wt.find("output.weight");
         if (wo_s == nullptr ||
             (last && !o.native_head_gguf.empty() && !st.head.load(o.native_head_gguf, g.n_embd, wo_s->ne1, err))) {
-            std::fprintf(stderr, "glm generate: layer split, CUDA%d head: %s\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split, ROCm%d head: %s\n", st.dev,
                          wo_s == nullptr ? "output.weight is missing" : err.c_str());
             return 1;
         }
         // a control vector (the speed projection): its tables on this device too - the stage's layers apply it here
         if (!almond::glm::kernels::cvec_replicate(err)) {
-            std::fprintf(stderr, "glm generate: layer split, CUDA%d: %s\n", st.dev, err.c_str());
+            std::fprintf(stderr, "glm generate: layer split, ROCm%d: %s\n", st.dev, err.c_str());
             return 1;
         }
         // --vision: this device's image-position table (the identity until a picture request), read by every rope
@@ -5311,7 +5311,7 @@ int glm_main(int argc, char** argv) {
             if (cudaMalloc(&st.mrope, mrope_host.size() * sizeof(int32_t)) != cudaSuccess ||
                 cudaMemcpy(st.mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
                     cudaSuccess) {
-                std::fprintf(stderr, "glm generate: layer split, CUDA%d: the image position table failed\n", st.dev);
+                std::fprintf(stderr, "glm generate: layer split, ROCm%d: the image position table failed\n", st.dev);
                 return 1;
             }
             almond::glm::kernels::mrope_table_set(st.mrope);
@@ -5321,12 +5321,12 @@ int glm_main(int argc, char** argv) {
         if (!pcie_given && native_pack) {
             const double bw = probe_pcie_h2d_gbps();
             if (bw > 0.0) st.pcie_frac = bw >= 20.0 ? 0.55 : bw < 4.0 ? 0.0 : std::min(0.55, std::max(0.05, 0.55 * (bw / 26.0)));
-            std::fprintf(stderr, "glm generate: layer split: CUDA%d PCIe probe %.1f GB/s -> pcie_frac %.2f\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split: ROCm%d PCIe probe %.1f GB/s -> pcie_frac %.2f\n", st.dev,
                          bw, st.pcie_frac);
         }
         size_t fb = 0, tb = 0;
         cudaMemGetInfo(&fb, &tb);
-        std::fprintf(stderr, "glm generate: layer split: CUDA%d holds its weights, session%s; %.2f GiB free\n",
+        std::fprintf(stderr, "glm generate: layer split: ROCm%d holds its weights, session%s; %.2f GiB free\n",
                      st.dev, last ? " and head" : "", (double) fb / 1073741824.0);
     }
     GpuStage* const last_st = stages.empty() ? nullptr : stages.back().get();
@@ -5355,7 +5355,7 @@ int glm_main(int argc, char** argv) {
             std::fprintf(stderr, "glm generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "glm generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
+        std::fprintf(stderr, "glm generate: ROCm%d context ready, %.2f GiB free before expert arena registration\n",
                      remote_dev[r], free_gib);
     }
 
@@ -5486,7 +5486,7 @@ int glm_main(int argc, char** argv) {
         const almond::glm::core::OnDevice on(dev);
         size_t fb = 0, tb = 0;
         if (const cudaError_t e = cudaMemGetInfo(&fb, &tb); e != cudaSuccess)
-            std::fprintf(stderr, "glm generate: layer split: CUDA%d free memory: %s\n", dev < 0 ? 0 : dev,
+            std::fprintf(stderr, "glm generate: layer split: ROCm%d free memory: %s\n", dev < 0 ? 0 : dev,
                          cudaGetErrorString(e));
         const int64_t reserve = ((int64_t) o.vram_reserve_mib + split_pf_mib + (later ? 1024 : 0)) << 20;
         return std::max<int64_t>((int64_t) fb - reserve, 0);
@@ -5505,7 +5505,7 @@ int glm_main(int argc, char** argv) {
             cudaGetLastError();
             const double speed = std::max(1.0, (double) sms * (double) khz / 1e6);   // SMs x GHz
             layer_ms[(size_t) i] = 0.33 * (84.0 * 2.617) / speed;
-            std::fprintf(stderr, "glm generate: layer split auto: CUDA%d %d SMs at %.2f GHz -> %.2f ms per layer, "
+            std::fprintf(stderr, "glm generate: layer split auto: ROCm%d %d SMs at %.2f GHz -> %.2f ms per layer, "
                                  "%.2f GiB for experts\n", dev, sms, khz / 1e6, layer_ms[(size_t) i],
                          (double) cap[(size_t) i] / 1073741824.0);
         }
@@ -5838,7 +5838,7 @@ int glm_main(int argc, char** argv) {
         if (sized.empty() ||
             !(native_pack ? st.cache.open_sized(sized, g.n_layers, g.n_expert, err)
                           : st.cache.open((int64_t) sized.size(), g.n_layers, g.n_expert, (int64_t) lay.max_blob, err))) {
-            std::fprintf(stderr, "glm generate: layer split, CUDA%d expert cache: %s\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split, ROCm%d expert cache: %s\n", st.dev,
                          sized.empty() ? "no room" : err.c_str());
             return 1;
         }
@@ -5849,7 +5849,7 @@ int glm_main(int argc, char** argv) {
             if (slot == almond::glm::core::kNotResident) break;
             const uint8_t* b = srcp->blob(pr.first, pr.second);
             if (b == nullptr || !st.cache.fill_slot_blocking(slot, b, err, (int64_t) lay.blob_bytes(pr.first))) {
-                std::fprintf(stderr, "glm generate: layer split, CUDA%d profile fill failed at pair %lld: %s\n",
+                std::fprintf(stderr, "glm generate: layer split, ROCm%d profile fill failed at pair %lld: %s\n",
                              st.dev, (long long) filled, err.c_str());
                 return 1;
             }
@@ -5858,11 +5858,11 @@ int glm_main(int argc, char** argv) {
         if (filled == 0 || !st.cache.verify_slot(st.cache.slot_of(st.profile[0].first, st.profile[0].second),
                                                  srcp->blob(st.profile[0].first, st.profile[0].second), err,
                                                  (int64_t) lay.blob_bytes(st.profile[0].first))) {
-            std::fprintf(stderr, "glm generate: layer split, CUDA%d expert cache: %s\n", st.dev,
+            std::fprintf(stderr, "glm generate: layer split, ROCm%d expert cache: %s\n", st.dev,
                          filled == 0 ? "nothing filled" : err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "glm generate: layer split: CUDA%d runs layers %lld-%lld, expert cache %lld slots "
+        std::fprintf(stderr, "glm generate: layer split: ROCm%d runs layers %lld-%lld, expert cache %lld slots "
                              "(%.2f GiB), %lld of its %zu profiled pairs; slot 0 verified\n",
                      st.dev, (long long) st.lb, (long long) (st.le - 1), (long long) st.cache.slots(), st.cache.gib(),
                      (long long) filled, st.profile.size());
@@ -5947,7 +5947,7 @@ int glm_main(int argc, char** argv) {
                 std::fprintf(stderr, "glm generate: %s\n", err.c_str());
                 return 1;
             }
-            std::fprintf(stderr, "glm generate: CUDA%d: %lld additional experts, %.2f GiB; "
+            std::fprintf(stderr, "glm generate: ROCm%d: %lld additional experts, %.2f GiB; "
                                  "results return through pinned host rows\n", remote_dev[r],
                          (long long) remote_experts[(size_t) r].resident(), remote_experts[(size_t) r].gib());
         }
@@ -6580,7 +6580,7 @@ int glm_main(int argc, char** argv) {
             if (cudaMalloc((void**) &st->d_res, host_res.size() * sizeof(int32_t)) != cudaSuccess ||
                 cudaMemcpy(st->d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
                     cudaSuccess) {
-                std::fprintf(stderr, "glm generate: layer split: CUDA%d residency table failed\n", st->dev);
+                std::fprintf(stderr, "glm generate: layer split: ROCm%d residency table failed\n", st->dev);
                 return 1;
             }
         }
@@ -6754,7 +6754,7 @@ int glm_main(int argc, char** argv) {
             st.sp.set_stage(st.lb, i + 1 < stages.size() ? st.le : -1, i + 1 < stages.size() ? &stages[i + 1]->sp : nullptr);
             const almond::glm::core::OnDevice on(st.dev);
             if (!st.sp.init(st.wt, g, st.ss, srcp, &st.cache, host_res.data(), o.prefill_chunk, (void*) st.stream, err)) {
-                std::fprintf(stderr, "glm serve: layer split, CUDA%d prompt path: %s\n", st.dev, err.c_str());
+                std::fprintf(stderr, "glm serve: layer split, ROCm%d prompt path: %s\n", st.dev, err.c_str());
                 return 1;
             }
         }
@@ -8086,7 +8086,7 @@ int glm_main(int argc, char** argv) {
                 std::fprintf(stderr, "glm serve: suffix drafts: %lld windows, %lld of %lld drafts accepted\n",
                              (long long) sfx_windows, (long long) sfx_ok, (long long) sfx_drafts);
             for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
-                std::fprintf(stderr, "glm serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
+                std::fprintf(stderr, "glm serve: ROCm%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
                                      "(%.1f MiB with full rows) in this request; host %.0f ms staging+launching, %.0f ms "
                                      "waiting for it (since start)\n", r + 1,
                              (long long) (remote_experts[(size_t) r].computed() - remote_before[(size_t) r]),
@@ -8834,7 +8834,7 @@ int glm_main(int argc, char** argv) {
         }
         std::printf("%-24s %lld blobs read\n", "  expert blobs", (long long) srcp->reads());
         for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
-            std::printf("  CUDA%d experts           %lld routed entries computed\n",
+            std::printf("  ROCm%d experts           %lld routed entries computed\n",
                         r + 1, (long long) remote_experts[(size_t) r].computed());
         // ---- **R4's DISPATCH MEASUREMENT: h, ON THE ENGINE'S OWN ROUTING.**  No offline trace, no corpus
         // question, no k-fold - these are the ids the router actually produced on this run.  Reported as

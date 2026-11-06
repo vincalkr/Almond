@@ -174,7 +174,7 @@ bool Glm5Model::seq_alloc_arenas(std::string& err) {
         }
         more += (uint64_t) ((n_rec > 0 ? (size_t) n_rec * run : 0) + pool_floats) * sizeof(float);
     }
-    std::fprintf(stderr, "glm multi: CUDA%d %d sequence states: the first for %lld tokens (%.2f GB), %d more for %lld "
+    std::fprintf(stderr, "glm multi: ROCm%d %d sequence states: the first for %lld tokens (%.2f GB), %d more for %lld "
                  "(%.2f GB in all, with every sequence's snapshot)\n", dev_, n, (long long) max_ctx_,
                  (double) state_bytes_ / 1e9, n - 1, (long long) ctx, (double) more / 1e9);
     // several conversations drafting at once (ALMOND_GLM_MULTI_MTP): their windows' buffers, before the pool too

@@ -218,7 +218,7 @@ bool moe_wmma_on(int gu_type, int d_type, int E, int nff) {
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
         ok = major == 7 && minor == 0 && almond::glm::kernels::gemm_iq_f16_grouped_supported(dev);
         probed = dev;
-        if (ok) std::fprintf(stderr, "glm prefill: Volta grouped-WMMA prompt experts on (CUDA%d)\n", dev);
+        if (ok) std::fprintf(stderr, "glm prefill: Volta grouped-WMMA prompt experts on (ROCm%d)\n", dev);
     }
     return ok;
 #endif
@@ -998,11 +998,11 @@ void Glm5Model::prefill_cap(int T, const char* why) {
         (hop && cudaHostAlloc((void**) &S->hop_h, (size_t) 2 * T * 4 * E * sizeof(float), cudaHostAllocDefault) !=
                     cudaSuccess)) {
         cudaGetLastError();
-        std::fprintf(stderr, "glm prefill: CUDA%d pinned staging did not allocate - token by token\n", dev_);
+        std::fprintf(stderr, "glm prefill: ROCm%d pinned staging did not allocate - token by token\n", dev_);
         prefill_destroy();
         return;
     }
-    std::fprintf(stderr, "glm prefill: CUDA%d chunks of %d tokens (%s)\n", dev_, T, why);
+    std::fprintf(stderr, "glm prefill: ROCm%d chunks of %d tokens (%s)\n", dev_, T, why);
     S->T = T;
 }
 
@@ -1015,10 +1015,10 @@ void Glm5Model::prefill_settle(double pinned_share) {
     if (S == nullptr || S->lend_pct_fixed || pinned_share >= 0.9) return;
     S->lend_pct = 85;
     const auto pick = S->choose(S->lend_pct);
-    std::fprintf(stderr, "glm prefill: CUDA%d %.0f%% of the experts' bytes are held pinned: the pool lends at most 85%% "
+    std::fprintf(stderr, "glm prefill: ROCm%d %.0f%% of the experts' bytes are held pinned: the pool lends at most 85%% "
                          "of its slots\n", dev_, 100.0 * pinned_share);
     if (pick.first == 0) {
-        std::fprintf(stderr, "glm prefill: CUDA%d the expert pool can lend no prompt chunk - token by token\n", dev_);
+        std::fprintf(stderr, "glm prefill: ROCm%d the expert pool can lend no prompt chunk - token by token\n", dev_);
         prefill_destroy();
         return;
     }
@@ -1097,7 +1097,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
         }
     }
     if (!why.empty()) {
-        std::fprintf(stderr, "glm prefill: CUDA%d has no prompt path (not covered: %s) - token by token\n", dev_,
+        std::fprintf(stderr, "glm prefill: ROCm%d has no prompt path (not covered: %s) - token by token\n", dev_,
                      why.substr(0, 400).c_str());
         return true;
     }
@@ -1151,7 +1151,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
     }
     const int64_t keep = Glm5Model::pool_keep(g.n_exp_used);
     if (getenv("ALMOND_GLM_PREFILL_KEEP") != nullptr)
-        std::fprintf(stderr, "glm prefill: CUDA%d the pool keeps %lld slots a layer while a prompt runs "
+        std::fprintf(stderr, "glm prefill: ROCm%d the pool keeps %lld slots a layer while a prompt runs "
                              "(ALMOND_GLM_PREFILL_KEEP; the floor is %d, the is %d)\n",
                      dev_, (long long) keep, g.n_exp_used + gf::kSpares, g.n_exp_used + gf::kSpares + 2);
     size_t avail = part_budget(dev_free, dev_total, (size_t) keep * stride_sum, stride_max).avail;
@@ -1185,7 +1185,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
         complete = avail > margin &&
                    glmfast::complete_pool_slots(avail - margin, stride_sum, g.n_expert, gf::kSpares, tail) > 0;
         if (complete && ring_max > 0) {
-            std::fprintf(stderr, "glm prefill: CUDA%d the expert pool will hold every expert: no prestage buffer, the "
+            std::fprintf(stderr, "glm prefill: ROCm%d the expert pool will hold every expert: no prestage buffer, the "
                                  "smallest disk landing ring\n", dev_);
             ring_max = 0;
         }
@@ -1256,13 +1256,13 @@ bool Glm5Model::prefill_setup(std::string& err) {
     const auto pick = S->choose(S->lend_pct);
     const int64_t T = pick.first;
     if (T == 0) {
-        std::fprintf(stderr, "glm prefill: CUDA%d the expert pool (%lld slots a layer) can lend no prompt chunk "
+        std::fprintf(stderr, "glm prefill: ROCm%d the expert pool (%lld slots a layer) can lend no prompt chunk "
                              "(--prefill %s) - token by token\n", dev_, (long long) per, mode.c_str());
         prefill_destroy();
         return true;
     }
     if (!is_auto && T != ceiling)
-        std::fprintf(stderr, "glm prefill: CUDA%d prompt chunk %lld -> %lld tokens so its buffers fit in the expert "
+        std::fprintf(stderr, "glm prefill: ROCm%d prompt chunk %lld -> %lld tokens so its buffers fit in the expert "
                              "pool\n", dev_, (long long) ceiling, (long long) T);
     S->T = (int) T;
     const auto pu = prefill_bytes_for((size_t) T);
@@ -1290,7 +1290,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
         (l1_ < g.n_layers && cudaHostAlloc((void**) &S->hop_h, (size_t) 2 * T * 4 * E * sizeof(float),
                                            cudaHostAllocDefault) != cudaSuccess)) {
         cudaGetLastError();
-        std::fprintf(stderr, "glm prefill: CUDA%d pinned staging did not allocate - token by token\n", dev_);
+        std::fprintf(stderr, "glm prefill: ROCm%d pinned staging did not allocate - token by token\n", dev_);
         prefill_destroy();
         return true;
     }
@@ -1313,7 +1313,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
             n = std::max(kMinLand, n / 2);
         }
         if (S->gpin == nullptr) {
-            std::fprintf(stderr, "glm prefill: CUDA%d the disk landing ring did not allocate - token by token\n", dev_);
+            std::fprintf(stderr, "glm prefill: ROCm%d the disk landing ring did not allocate - token by token\n", dev_);
             prefill_destroy();
             return true;
         }
@@ -1321,7 +1321,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
         S->ev_land.assign((size_t) n, nullptr);
     }
     if (cublasCreate(&S->blas) != CUBLAS_STATUS_SUCCESS) {
-        std::fprintf(stderr, "glm prefill: CUDA%d cublasCreate failed - token by token\n", dev_);
+        std::fprintf(stderr, "glm prefill: ROCm%d cublasCreate failed - token by token\n", dev_);
         prefill_destroy();
         return true;
     }
@@ -1344,11 +1344,11 @@ bool Glm5Model::prefill_setup(std::string& err) {
                 cublasGemmEx(S->blas, CUBLAS_OP_N, CUBLAS_OP_N, 16, 16, 16, &one, wa, CUDA_R_16F, 16, wb, CUDA_R_16F,
                              16, &zero, wc, CUDA_R_32F, 16, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
             const cudaError_t we = cudaStreamSynchronize(F->cs);
-            std::fprintf(stderr, "glm prefill: CUDA%d cuBLAS warm-up: sgemm %d, gemm f16 %d, sync %s\n", dev_,
+            std::fprintf(stderr, "glm prefill: ROCm%d cuBLAS warm-up: sgemm %d, gemm f16 %d, sync %s\n", dev_,
                          (int) w1, (int) w2, cudaGetErrorString(we));
         } else {
             cudaGetLastError();
-            std::fprintf(stderr, "glm prefill: CUDA%d cuBLAS warm-up skipped (no scratch)\n", dev_);
+            std::fprintf(stderr, "glm prefill: ROCm%d cuBLAS warm-up skipped (no scratch)\n", dev_);
         }
         if (wa != nullptr) cudaFree(wa);
         if (wb != nullptr) cudaFree(wb);
@@ -1392,7 +1392,7 @@ bool Glm5Model::prefill_setup(std::string& err) {
     }
     if (!events_ok) {
         cudaGetLastError();
-        std::fprintf(stderr, "glm prefill: CUDA%d staging events did not create - token by token\n", dev_);
+        std::fprintf(stderr, "glm prefill: ROCm%d staging events did not create - token by token\n", dev_);
         prefill_destroy();
         return true;
     }
@@ -1408,11 +1408,11 @@ bool Glm5Model::prefill_setup(std::string& err) {
         S->stages = v == nullptr || std::atoi(v) != 0;
         if (S->stages) {   // (a create that fails leaves the event null and the line's sums read -1)
             for (cudaEvent_t* e : {&S->sev_a, &S->sev_b, &S->sev_h0, &S->sev_h1}) cudaEventCreate(e);
-            std::fprintf(stderr, "glm prefill: CUDA%d the chunk stage line is on (ALMOND_GLM_PREFILL_STAGES=0 "
+            std::fprintf(stderr, "glm prefill: ROCm%d the chunk stage line is on (ALMOND_GLM_PREFILL_STAGES=0 "
                                  "silences it)\n", dev_);
         }
     }
-    std::fprintf(stderr, "glm prefill: CUDA%d chunks of %d tokens (--prefill %s; mixer sub-batches of %d), borrowing "
+    std::fprintf(stderr, "glm prefill: ROCm%d chunks of %d tokens (--prefill %s; mixer sub-batches of %d), borrowing "
                          "%.0f MB of the expert pool while a prompt runs (activations %.0f, weight scratch %.0f, expert "
                          "staging %.0f, prestage %.0f: %d experts); disk landing ring %d experts (%.0f MB pinned)\n",
                  dev_, S->T, S->mode.c_str(),
@@ -1433,7 +1433,7 @@ size_t Glm5Model::prefill_trim_prestage(size_t max_borrow) {
     const size_t base = S->borrow_bytes - ((S->pbuf_bytes + 255u) & ~(size_t) 255u);
     int np = base < max_borrow ? (int) ((max_borrow - base) / std::max<size_t>(1, S->gstride)) : 0;
     if (np < 16) np = 0;
-    std::fprintf(stderr, "glm prefill: CUDA%d prestage buffer %d -> %d experts (what the pool can lend)\n", dev_, S->NP, np);
+    std::fprintf(stderr, "glm prefill: ROCm%d prestage buffer %d -> %d experts (what the pool can lend)\n", dev_, S->NP, np);
     S->NP = np;
     S->pbuf_bytes = (size_t) np * S->gstride;
     S->borrow_bytes = base + ((S->pbuf_bytes + 255u) & ~(size_t) 255u);
@@ -1573,12 +1573,12 @@ bool Glm5Model::prefill_carve(int Tn, int64_t end) {
         return v ? std::atoll(v) : 0;
     }();
     if (fail_above > 0 && end >= 0 && (int64_t) Tn > fail_above) {
-        std::fprintf(stderr, "glm prefill: CUDA%d the layout of %d tokens does not fit (ALMOND_PREALLOC_FAIL)\n", dev_,
+        std::fprintf(stderr, "glm prefill: ROCm%d the layout of %d tokens does not fit (ALMOND_PREALLOC_FAIL)\n", dev_,
                      Tn);
         return false;
     }
     if (S->region != nullptr && S->need > S->region_bytes) {
-        std::fprintf(stderr, "glm prefill: CUDA%d the layout needs %zu bytes of a %zu-byte loan\n", dev_, S->need,
+        std::fprintf(stderr, "glm prefill: ROCm%d the layout needs %zu bytes of a %zu-byte loan\n", dev_, S->need,
                      S->region_bytes);
         return false;
     }
@@ -1616,7 +1616,7 @@ bool Glm5Model::prefill_lend(std::string& err) {
         if (dev_ >= 0 && dev_ < 8 && !said[dev_]) {
             said[dev_] = true;
             std::fprintf(stderr,
-                         "glm prefill: CUDA%d the MMQ scratch pool has %.1f MB of the loan (%.1f MB past the layout's "
+                         "glm prefill: ROCm%d the MMQ scratch pool has %.1f MB of the loan (%.1f MB past the layout's "
                          "need; %llu experts more lent for it)\n",
                          dev_, (double) nbytes / 1048576.0, (double) kMmqSlab / 1048576.0,
                          (unsigned long long) (S->dropped - dropped_before));
@@ -1653,7 +1653,7 @@ bool Glm5Model::vision_lend(size_t& bytes, std::string& err) {
     for (auto& P : F->lp) P.xbase = nullptr;
     vis_lent_ = true;
     bytes = F->xpool_bytes;
-    std::fprintf(stderr, "glm fast: CUDA%d %.2f GB lent to the vision encoder (%llu experts moved to colder slots, "
+    std::fprintf(stderr, "glm fast: ROCm%d %.2f GB lent to the vision encoder (%llu experts moved to colder slots, "
                          "%llu dropped)\n", dev_, (double) bytes / 1073741824.0, (unsigned long long) moved,
                  (unsigned long long) (dropped - moved));
     return true;
@@ -1690,7 +1690,7 @@ bool Glm5Model::vision_reclaim(std::string& err) {
         }
     }
     vis_lent_ = false;
-    std::fprintf(stderr, "glm fast: CUDA%d the vision encoder's %.2f GB are back in the expert pool\n", dev_,
+    std::fprintf(stderr, "glm fast: ROCm%d the vision encoder's %.2f GB are back in the expert pool\n", dev_,
                  (double) F->xpool_bytes / 1073741824.0);
     return true;
 }
@@ -1904,7 +1904,7 @@ void Glm5Model::prefill_destroy() {
     if (S->prof && !S->pacc.empty()) {
         double tot = 0;
         for (auto& kv : S->pacc) tot += kv.second;
-        std::fprintf(stderr, "glm prefill prof CUDA%d (%lld tokens, %.0f ms of stream time; waits on disk %.0f ms, plan %.0f "
+        std::fprintf(stderr, "glm prefill prof ROCm%d (%lld tokens, %.0f ms of stream time; waits on disk %.0f ms, plan %.0f "
                              "ms host; disk experts used %llu, read %llu):\n", dev_, (long long) S->tokens, tot, S->ms_disk,
                      S->ms_plan, (unsigned long long) S->staged_disk, (unsigned long long) S->disk_issued);
         std::vector<std::pair<double, std::string>> v;
@@ -1986,7 +1986,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
     {   // an error left in the thread's state by an earlier kernel is what the first cuBLAS call reports
         const cudaError_t stale = cudaGetLastError();
         if (stale != cudaSuccess)
-            std::fprintf(stderr, "glm prefill: CUDA%d stale CUDA error before this chunk's layers: %s\n", dev_,
+            std::fprintf(stderr, "glm prefill: ROCm%d stale CUDA error before this chunk's layers: %s\n", dev_,
                          cudaGetErrorString(stale));
     }
 
@@ -2006,14 +2006,14 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             return (p == nullptr || R == nullptr) ? -1 : (long long) ((const uint8_t*) p - R);
         };
         std::fprintf(stderr,
-                     "glm prefill diag: CUDA%d %s failed %d: m=%d n=%d k=%d lda=%d ldb=%d ldc=%d A=%p B=%p C=%p "
+                     "glm prefill diag: ROCm%d %s failed %d: m=%d n=%d k=%d lda=%d ldb=%d ldc=%d A=%p B=%p C=%p "
                      "A_off=%lld B_off=%lld C_off=%lld region=%p bytes=%zu need=%zu T=%d sub=%d\n",
                      dev_, what, (int) st, m, n, k, lda, ldb, ldc, A, B, C, off(A), off(B), off(C), (const void*) R,
                      S->region_bytes, S->need, S->T, S->sub);
         size_t freeb = 0, totb = 0;
         (void) cudaMemGetInfo(&freeb, &totb);
         std::fprintf(stderr,
-                     "glm prefill diag: CUDA%d w16=%p(%zu) w32=%p(%zu) ws=%p(%zu) gbuf=%p(%zu) pbuf=%p(%zu) blas=%p "
+                     "glm prefill diag: ROCm%d w16=%p(%zu) w32=%p(%zu) ws=%p(%zu) gbuf=%p(%zu) pbuf=%p(%zu) blas=%p "
                      "cs=%p curdev=%d free=%zuMB of %zuMB cuda=%s\n",
                      dev_, (const void*) S->w16, S->w16_elems, (const void*) S->w32, S->w32_elems, (const void*) S->ws,
                      S->ws_bytes, (const void*) S->gbuf, S->gbuf_bytes, (const void*) S->pbuf, S->pbuf_bytes,
@@ -2034,7 +2034,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                     once = true;   // an error the widen kernels left behind would be what the GEMM below reports
                     const cudaError_t e = cudaGetLastError();
                     if (e != cudaSuccess)
-                        std::fprintf(stderr, "glm prefill: CUDA%d stale CUDA error before the first GEMM: %s\n", dev_,
+                        std::fprintf(stderr, "glm prefill: ROCm%d stale CUDA error before the first GEMM: %s\n", dev_,
                                      cudaGetErrorString(e));
                 }
             }
@@ -2421,7 +2421,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         else if (C->pf_->calc_carve(T, S->gstride, E, K, g.n_expert, why))
             calc_half = true;
         if (!calc_half)
-            std::fprintf(stderr, "glm prefill: CUDA%d computes no share of CUDA%d's experts in this chunk (%s)\n",
+            std::fprintf(stderr, "glm prefill: ROCm%d computes no share of ROCm%d's experts in this chunk (%s)\n",
                          C->dev_, dev_, why.c_str());
     }
     // ... and its balance, from a helped layer's two lanes (both from its plan): this GPU's staged copies against the
@@ -2437,7 +2437,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         cudaSetDevice(dev_);
         if (!ok) {
             const cudaError_t e = cudaGetLastError();
-            std::fprintf(stderr, "glm prefill: CUDA%d the waiting GPU's lane times did not read (%s) - its share stays %.2f\n",
+            std::fprintf(stderr, "glm prefill: ROCm%d the waiting GPU's lane times did not read (%s) - its share stays %.2f\n",
                          dev_, cudaGetErrorString(e), S->calc_share);
             return;
         }
@@ -3961,7 +3961,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
                     worst = std::max(worst, std::fabs(d));
                     same += a[i] == b[i];
                 }
-                std::fprintf(stderr, "glm prefill calc check CUDA%d layer %d: %zu experts, %d rows on CUDA%d - its sum against "
+                std::fprintf(stderr, "glm prefill calc check ROCm%d layer %d: %zu experts, %d rows on ROCm%d - its sum against "
                                      "this GPU's: rel L2 %.3e, worst |diff| %.3e, %.4f%% of the values identical\n",
                              dev_, il, calc_set.size(), calc_nrows, C->dev_, std::sqrt(num / std::max(1e-30, den)), worst,
                              100.0 * (double) same / (double) std::max<size_t>(1, a.size()));
@@ -4069,7 +4069,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
             float v = 0.0f;
             return cudaEventElapsedTime(&v, a, b) == cudaSuccess ? (double) v : -1.0;
         };
-        std::fprintf(stderr, "glm prefill trace CUDA%d, a chunk of %d tokens (ms; plan = the routing known, the lanes "
+        std::fprintf(stderr, "glm prefill trace ROCm%d, a chunk of %d tokens (ms; plan = the routing known, the lanes "
                              "from there):\n", dev_, T);
         for (int il = l0_; il < l1_; ++il) {
             const auto& t = S->tr[(size_t) il];
@@ -4136,7 +4136,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
         const double moved = (double) (S->ct_ram + S->ct_disk) / gb;
         char line[1024];
         std::snprintf(line, sizeof line,
-                      "glm prefill: CUDA%d chunk %d/%d, %d tokens, wall %.0f ms | the copy lane %.0f ms: copies %.0f "
+                      "glm prefill: ROCm%d chunk %d/%d, %d tokens, wall %.0f ms | the copy lane %.0f ms: copies %.0f "
                       "(%.1f GB/s), ring wait %.0f, gaps %.0f, mixer windows %.0f | lead %.0f, tail %.0f | pcie %.2f GB "
                       "(ram %.2f, disk %.2f) + %.2f GB vram | experts: staged %llu, resident %llu (%llu rows), "
                       "prestaged %llu, cpu %llu (%llu rows, %.0f ms) | plan %.0f ms host, disk wait %.0f ms, hop in "
@@ -4263,7 +4263,7 @@ bool Glm5Model::prefill(const std::vector<int32_t>& tokens, std::string& err, in
             break;
         }
         Trun = std::max(kMinPrefillChunk, Trun / 2);
-        std::fprintf(stderr, "glm prefill: CUDA%d the chunk is %d tokens now (its layout did not fit)\n", dev_, Trun);
+        std::fprintf(stderr, "glm prefill: ROCm%d the chunk is %d tokens now (its layout did not fit)\n", dev_, Trun);
     }
     if (ok) {
         for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
@@ -4366,7 +4366,7 @@ bool Glm5Model::dual_prefill_ready() {
             cudaFree(db);
         }
         if (!ok) {
-            std::fprintf(stderr, "glm prefill: CUDA%d and CUDA%d report peer access but a peer copy came out wrong on "
+            std::fprintf(stderr, "glm prefill: ROCm%d and ROCm%d report peer access but a peer copy came out wrong on "
                                  "this machine - the dual-link prompt stays off\n", dev_, B->dev_);
             cudaSetDevice(dev_);
             return false;
@@ -4841,7 +4841,7 @@ bool Glm5Model::prefill_run(const std::vector<int32_t>& tokens, std::string& err
         std::string per_part;
         for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
             if (!per_part.empty()) per_part += ", ";
-            per_part += "CUDA" + std::to_string(m->dev_) + " " +
+            per_part += "ROCm" + std::to_string(m->dev_) + " " +
                         std::to_string((long long) std::llround(m->pf_->pr_wall)) + " ms";
             if (m->pf_->pr_hop > 0.5)
                 per_part += " (hop in " + std::to_string((long long) std::llround(m->pf_->pr_hop)) + " ms)";
@@ -4883,7 +4883,7 @@ bool Glm5Model::prefill_run(const std::vector<int32_t>& tokens, std::string& err
                 xe += m->pf_->calc_experts;
                 xr += m->pf_->calc_rows;
                 char b[64];
-                std::snprintf(b, sizeof b, "%sCUDA%d's layers %.2f", sh.empty() ? "" : ", ", m->dev_, m->pf_->calc_share);
+                std::snprintf(b, sizeof b, "%sROCm%d's layers %.2f", sh.empty() ? "" : ", ", m->dev_, m->pf_->calc_share);
                 sh += b;
             }
             std::fprintf(stderr, "glm prefill: the waiting GPU computed %llu staged experts (%llu rows) | share now: %s "

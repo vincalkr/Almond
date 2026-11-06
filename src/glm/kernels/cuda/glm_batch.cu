@@ -2448,7 +2448,7 @@ bool mla_decode_v70(const float* q_abs, const uint16_t* lat, const int* cells, i
                       ? 1
                       : -1;
         cudaGetLastError();
-        if (ok[dev] == 1) std::fprintf(stderr, "glm_batch: CUDA%d decode attention: the split one-pass kernel (mma.m8n8k4)\n", dev);
+        if (ok[dev] == 1) std::fprintf(stderr, "glm_batch: ROCm%d decode attention: the split one-pass kernel (mma.m8n8k4)\n", dev);
     }
     if (ok[dev] != 1) return false;
     // splits of whole 32-cell tiles, about one block a multiprocessor over the head groups (ALMOND_GLM_MLA_V70_SPLITS:
@@ -2512,7 +2512,7 @@ void mla_attn(const float* q_abs, const uint16_t* lat, const int* cells, const i
             tc_ok[dev] = 1;
         else if (reg_layout && fits((const void*) mla_attn_tc_reg_kernel, kTcRegSmem))
             tc_ok[dev] = 2;
-        std::fprintf(stderr, "glm_batch: CUDA%d prompt attention on the %s\n", dev,
+        std::fprintf(stderr, "glm_batch: ROCm%d prompt attention on the %s\n", dev,
                      f32_only || tc_ok[dev] < 0 ? "F32 cores"
                      : tc_ok[dev] == 2          ? "tensor cores (context in registers)"
                      : tc_ok[dev] == 3          ? "tensor cores (mma.sync, 32 heads a block)"
@@ -2545,7 +2545,7 @@ void mla_attn(const float* q_abs, const uint16_t* lat, const int* cells, const i
                                                (int) kV7Smem) == cudaSuccess ? 1 : -1;
             cudaGetLastError();
             if (v70_ok[dev] == 1)
-                std::fprintf(stderr, "glm_batch: CUDA%d prompt attention: the one-pass kernel (mma.m8n8k4)\n", dev);
+                std::fprintf(stderr, "glm_batch: ROCm%d prompt attention: the one-pass kernel (mma.m8n8k4)\n", dev);
         }
         if (tc_ok[dev] == 1 && v70_ok[dev] == 1 && n_head % T2_H == 0)
             mla_attn_v70_kernel<false><<<dim3((unsigned) T, (unsigned) (n_head / T2_H)), 256, kV7Smem, s>>>(

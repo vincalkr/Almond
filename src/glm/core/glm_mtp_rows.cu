@@ -196,7 +196,7 @@ bool Glm5Model::mtpw_alloc(std::string& err) {
         cudaGetLastError();
         return fail("the drafts' event");
     }
-    std::fprintf(stderr, "glm multi mtp: CUDA%d windows of %d rows (%d drafts) for %d conversations, %d rows a group: "
+    std::fprintf(stderr, "glm multi mtp: ROCm%d windows of %d rows (%d drafts) for %d conversations, %d rows a group: "
                          "%.0f MB of VRAM, %.1f MB pinned\n", dev_, M->W, M->W - 1, n, rows_max(),
                  (double) dev_bytes / 1048576.0, (double) pin_bytes / 1048576.0);
     return true;

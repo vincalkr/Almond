@@ -1943,7 +1943,7 @@ bool use_legacy() {
         c = v != nullptr && std::strcmp(v, "legacy") == 0 ? 1 : v != nullptr && std::strcmp(v, "new") == 0 ? 2
             : major < 8                                    ? 1
                                                            : 2;
-        if (c == 1) std::fprintf(stderr, "exl3: CUDA%d decodes with v1.1.8's kernels\n", dev);
+        if (c == 1) std::fprintf(stderr, "exl3: ROCm%d decodes with v1.1.8's kernels\n", dev);
         cache[dev].store(c, std::memory_order_release);
     }
     return c == 1;
