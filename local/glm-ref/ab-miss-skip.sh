@@ -11,7 +11,7 @@ for arm in "base" "w12f23 0.12 23" "w16f23 0.16 23" "w12f0 0.12 0"; do
     if [ -n "${2:-}" ]; then export ALMOND_GLM_MISS_SKIP_W=$2 ALMOND_GLM_MISS_SKIP_FROM=$3
     else unset ALMOND_GLM_MISS_SKIP_W ALMOND_GLM_MISS_SKIP_FROM; fi
     echo "== $1"
-    (./run.sh --model glm --port 8163 > $S 2>&1 &)
+    (./almond serve --model glm --port 8163 > $S 2>&1 &)
     for i in $(seq 150); do grep -q "^ready" $S && break; sleep 2; done
     grep -m1 "light misses left out" local/serve-glm-engine.log >/dev/null 2>&1
     .venv/bin/python local/glm-ref/speed.py 8163 2

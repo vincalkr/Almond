@@ -67,7 +67,7 @@ or by hand:
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # the server's Python packages
 local/fetch.sh                                                        # the models: what is in models/, which to download
 ./build.sh                                                            # ggml, the engine, GLM's image encoder (tens of minutes the first time)
-./run.sh                                                              # DeepSeek's server on 127.0.0.1:8150 (--model glm: GLM's)
+./almond serve                                                        # DeepSeek's server on 127.0.0.1:8150 (--model glm: GLM's)
 ```
 
 - `./setup.sh --check` only says what is there. `local/fetch.sh` lists the models with their state in `models/` and
@@ -86,19 +86,22 @@ local/fetch.sh                                                        # the mode
 - `./build.sh` builds the vendored ggml (`third_party/llama.cpp/ggml`) into `third_party/llama.cpp/build-hip`, the
   engine into `build-hip-fused`, and GLM's image encoder into `build-vision`; `ROCM`, `GFX`, `JOBS`, `REBUILD_GGML=1`
   from the environment.
-- `./run.sh` uses cards 0 and 1; `./run.sh --gpu 0` (or `--gpu 1`) one card, `--gpu 0,1` both. The number of cards
+- `./almond serve` uses cards 0 and 1; `./almond serve --gpu 0` (or `--gpu 1`) one card, `--gpu 0,1` both. The number
+  of cards
   picks the configuration: `local/ds41-local.json` (two cards) or `local/ds41-local-1gpu.json` (one);
-  `--config FILE` uses that file. Other arguments go to the server (`./run.sh --port 8151`). `./stop.sh` stops a
+  `--config FILE` uses that file. Other arguments go to the server (`./almond serve --port 8151`). `./stop.sh` stops a
   server started in the background (as Ctrl+C would; `--force` kills it if it does not end in 60 s). Loading takes about a minute; the API is at
   `http://127.0.0.1:8150/v1` (OpenAI and Anthropic), the chat is `./almond` (below). Never expose the server beyond
   `127.0.0.1` without `--api-key`.
 
 ## Models, the router and the chat
 
-Almond serves DeepSeek-V4.1-Flash (`./run.sh`, the default), GLM-5.3-Flash (`./run.sh --model glm`, its path of
-the same executable in `src/glm`, MIT: `src/glm/LICENSE`) and Qwen3.8-Flash-Next (`./run.sh --model qwen`, `src/qwen`,
+Almond serves DeepSeek-V4.1-Flash (`./almond serve`, the default), GLM-5.3-Flash (`./almond serve --model glm`, its
+path of
+the same executable in `src/glm`, MIT: `src/glm/LICENSE`) and Qwen3.8-Flash-Next (`./almond serve --model qwen`,
+`src/qwen`,
 MIT: `src/qwen/LICENSE`); `local/fetch.sh` downloads and prepares their files.
-`./run.sh --router` puts every model of `local/router.json` behind one address, as llama-server's
+`./almond serve --router` puts every model of `local/router.json` behind one address, as llama-server's
 router mode does: `GET /v1/models` lists them with their status (loaded / loading / unloaded), context and thinking
 levels (`reasoning_levels`, `reasoning_default`); `POST /models/load` / `/models/unload {"model": NAME}`; a request that
 names another model loads it, stopping the one running once its requests are done (the cards hold one at a time:
@@ -160,7 +163,7 @@ Through the API the level is `reasoning_effort`, `reasoning.effort` (OpenAI) or 
 (a request's `reasoning_budget_tokens` sets one). Thinking that loops is caught (`serve/loop_guard.py`) and closed so
 the model answers (docs/MODELS.md, "Loops in the thinking").
 
-The API for another program (an agent harness, an IDE): `./run.sh --router` (or `./almond --keep`) and point it at
+The API for another program (an agent harness, an IDE): `./almond serve --router` (or `./almond --keep`) and point it at
 `http://127.0.0.1:8150/v1`; `GET /v1/models` lists `deepseek-v4.1-flash-1017`, `glm-5.3-flash` and `qwen3.8-flash-next`. `--session-log DIR`
 (or `ALMOND_SESSION_LOG`) writes every request and its answer to `DIR/<date>.jsonl`, for debugging. A request whose `max_tokens` does not fit beside its prompt (a harness sending the
 model's 128K) gets the room left instead of a 400 (`"fit_max_tokens": true` in the configurations).
@@ -170,12 +173,13 @@ model's 128K) gets the room left instead of a 400 (`"fit_max_tokens": true` in t
 Every model reads images. GLM's and DeepSeek's encoders are in VRAM only for a request with images; Qwen's runs on the
 CPU.
 
-**GLM-5.3-Flash:** with its encoder in `models/glm53-vision`, `./run.sh --model glm` picks
+**GLM-5.3-Flash:** with its encoder in `models/glm53-vision`, `./almond serve --model glm` picks
 `local/glm-local-vision.json`; the encoder (`build-vision/build/bin/almond-vision`) runs in 2.7 GB of VRAM the engine
 lends it for the request and takes back after (docs/MODELS.md, "Images").
 
 **Qwen3.8-Flash-Next:** with its encoder (`local/fetch.sh qwen-vision`, 0.9 GB) and `almond-vision` built,
-`./run.sh --model qwen` picks `local/qwen-local-vision.json`; the encoder reads pictures on the CPU (12 threads, up to
+`./almond serve --model qwen` picks `local/qwen-local-vision.json`; the encoder reads pictures on the CPU (12 threads,
+up to
 300 image tokens a picture), the engine's card keeps its expert cache.
 
 **DeepSeek-V4.1-Flash:** images need the model's image routing bias, `blk.N.exp_probs_b_vl.bias`, which the GSQ-RCO pack does not carry. It is
@@ -183,7 +187,7 @@ in the repository as `local/rco-iq2xxs-meta/vl-bias.gguf` (61 KB): the checkpoin
 ISTA-DASLab publish it (`exp_probs_b_vl.f32`), written by `tools/v41/ds41_vl_bias.py`; the configurations add it with
 `DS41_VL_BIAS`. The pack's text bias is bit-identical to the checkpoint's in all 40 layers, so the pack's routing was
 not recalibrated and the image bias fits it. With the image encoder in `models/vision-1017` (`local/fetch-rco-1017.sh`
-builds it from the checkpoint), `./run.sh` picks `local/ds41-local-vision.json` (`-1gpu-vision` for one card).
+builds it from the checkpoint), `./almond serve` picks `local/ds41-local-vision.json` (`-1gpu-vision` for one card).
 
 The encoder (0.9 GiB) is loaded on card 0 only for a request with images, in the VRAM the expert cache gives up for
 the prompt, and freed before the cache re-opens; text requests never load it. A 22x70-patch image is loaded in 0.6 s
@@ -210,14 +214,14 @@ engine running), and `--monitor` shows them too.
 Decode reads an expert from the NVMe every 10-20 ms; between reads the drive (APST) and the CPU cores (C3) fall
 asleep and each read costs more. `local/power-tune.sh on` keeps them awake and sets the `performance`
 governor; it also raises the RAM's streaming bandwidth from 51-54 to 61-62 GB/s, which the CPU's experts read at.
-Install it once and `./run.sh` switches
+Install it once and `./almond serve` switches
 it on at start and off when the server ends:
 
 ```sh
 sudo local/install-power-tune.sh             # a root-owned copy and a sudo rule for it alone
 ```
 
-`DS41_POWER_TUNE=0 ./run.sh` leaves the settings alone; `sudo local/install-power-tune.sh uninstall` removes it;
+`DS41_POWER_TUNE=0 ./almond serve` leaves the settings alone; `sudo local/install-power-tune.sh uninstall` removes it;
 `sudo local/power-tune.sh on|off|show` by hand.
 
 ## Expert rank (DeepSeek)
@@ -239,7 +243,8 @@ python3 local/cfg.py arg --arena-gib 50      # pinned RAM for experts: 80 GiB on
 
 The arena is the biggest lever after the cards: an expert that is in neither VRAM nor the arena is read from the
 NVMe. `--vram-margin` (0.5 GiB) is the VRAM left free beside the expert cache; raise it if another program uses the
-card. With one card use `./run.sh --gpu 0` (the two-card default stops at startup: "peer device 1 does not exist").
+card. With one card use `./almond serve --gpu 0` (the two-card default stops at startup: "peer device 1 does not
+exist").
 
 ## Development
 

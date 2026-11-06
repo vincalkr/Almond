@@ -1,6 +1,8 @@
 #!/bin/sh
-# Stops the Almond server(s) of this folder that ./run.sh started, the way Ctrl+C would: the server asks its engine to
-# quit, run.sh switches power-tune off once no server is left.  Waits up to TIMEOUT seconds (default 60) for the server
+# Stops the Almond server(s) of this folder that ./almond serve started, the way Ctrl+C would: the server asks its
+# engine to
+# quit, ./almond serve switches power-tune off once no server is left.  Waits up to TIMEOUT seconds (default 60) for
+# the server
 # and its engine to end; --force then kills what is left.
 #   ./stop.sh            stop and wait
 #   ./stop.sh --force    the same, then kill a server or engine still running after TIMEOUT
@@ -39,7 +41,7 @@ fi
 if [ "$FORCE" = 1 ]; then
     for p in $left; do kill -KILL "$p" 2>/dev/null; done
     echo "stop.sh: still running after ${TIMEOUT} s: killed $(echo $left | tr ' ' ',')"
-    # run.sh may have been killed with them: switch power-tune off here if it is installed
+    # ./almond serve may have been killed with them: switch power-tune off here if it is installed
     [ -x /usr/local/sbin/almond-power-tune ] && sudo -n /usr/local/sbin/almond-power-tune off >/dev/null 2>&1 &&
         echo "stop.sh: power-tune off"
     exit 0

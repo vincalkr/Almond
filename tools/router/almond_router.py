@@ -2,8 +2,8 @@
 """Almond's router: one address for every model this machine has, as llama-server's router mode does.
 
 The models are the ones `local/router.json` lists ({"models": [{"model": "glm"}, {"model": "ds41"}, ...],
-"default": "glm"}; each entry's "model" / "config" are what ./run.sh takes).  The router asks each one, without loading
-it, for its name, context and thinking levels (`run.sh --describe`), and serves:
+"default": "glm"}; each entry's "model" / "config" are what ./almond serve takes).  The router asks each one, without
+loading it, for its name, context and thinking levels (`./almond serve --describe`), and serves:
 
 - GET /v1/models, /models: every model with its status (llama.cpp's: loaded / loading / unloaded, "failed" with the
   exit code), its context and its thinking levels ("reasoning_levels": [value, label, what it does], and the default)
@@ -13,10 +13,10 @@ it, for its name, context and thinking levels (`run.sh --describe`), and serves:
   one running is stopped once its requests are done.  A request that names no model (or a name the router does not
   know) goes to the loaded one, or loads the default.
 
-Each model runs as its own server (./run.sh, on 127.0.0.1:--child-port), started and stopped by the router; its web
-app, API and monitor are forwarded as they are.
+Each model runs as its own server (tools/cli/launch.py, on 127.0.0.1:--child-port), started and stopped by the router; its
+web app, API and monitor are forwarded as they are.
 
-  tools/router/almond_router.py --port 8150      (./run.sh --router does this)
+  tools/router/almond_router.py --port 8150      (./almond serve --router does this)
 """
 import argparse
 import http.client
@@ -32,6 +32,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
+LAUNCH = ROOT / "tools/cli/launch.py"      # what ./almond serve runs: one model's server
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 # GET endpoints that only look (the monitor, llama.cpp's props / slots): with no model loaded they say so instead of
 # loading one
@@ -60,18 +61,18 @@ class Models:
             print(f"router: {mid} ({' '.join(run)}): context {info.get('max_context')}, thinking "
                   f"{'/'.join(v for v, *_ in info.get('reasoning_levels') or [])}", flush=True)
         self.default = default if default in self.models else next(iter(self.models), None)
-        if default and default not in self.models:      # "default" may name a run.sh model ("glm") as well as an id
+        if default and default not in self.models:      # "default" may name a launch.py model ("glm") as well as an id
             self.default = next((m for m, d in self.models.items() if d["run"][1] == default), self.default)
 
     # ---- the listing
     def status(self, mid: str) -> dict:
         d = self.models[mid]
         if mid == self.current and self.proc is not None and self.proc.poll() is None:
-            return {"value": "loaded", "args": ["run.sh", *d["run"]]}
+            return {"value": "loaded", "args": ["launch.py", *d["run"]]}
         if mid == self.loading:
-            return {"value": "loading", "args": ["run.sh", *d["run"]]}
+            return {"value": "loading", "args": ["launch.py", *d["run"]]}
         if d["failed"] is not None:
-            return {"value": "unloaded", "args": ["run.sh", *d["run"]], "failed": True, "exit_code": d["failed"]}
+            return {"value": "unloaded", "args": ["launch.py", *d["run"]], "failed": True, "exit_code": d["failed"]}
         return {"value": "unloaded"}
 
     def listing(self) -> dict:
@@ -113,7 +114,7 @@ class Models:
             self.cv.wait_for(lambda: self.active == 0)
         print(f"router: stopping {self.current}", flush=True)
         try:
-            os.killpg(self.proc.pid, signal.SIGINT)     # run.sh's group: the server ends its engine, power-tune off
+            os.killpg(self.proc.pid, signal.SIGINT)     # launch.py's group: the server ends its engine, power-tune off
         except ProcessLookupError:
             pass
         try:
@@ -130,7 +131,7 @@ class Models:
                 return None
             self._stop()
             d = self.models[mid]
-            cmd = [str(ROOT / "run.sh"), *d["run"], "--port", str(self.child_port), "--host", "127.0.0.1"]
+            cmd = [sys.executable, str(LAUNCH), *d["run"], "--port", str(self.child_port), "--host", "127.0.0.1"]
             if self.api_key:
                 cmd += ["--api-key", self.api_key]
             print(f"router: loading {mid}: {' '.join(cmd)}", flush=True)
@@ -160,13 +161,13 @@ class Models:
 
 
 def describe(run: list) -> dict:
-    out = subprocess.run([str(ROOT / "run.sh"), *run, "--describe"], cwd=ROOT, capture_output=True, text=True,
+    out = subprocess.run([sys.executable, str(LAUNCH), *run, "--describe"], cwd=ROOT, capture_output=True, text=True,
                          timeout=120)
     line = (out.stdout.strip().splitlines() or [""])[-1]
     try:
         return json.loads(line)
     except ValueError:
-        raise SystemExit(f"router: run.sh {' '.join(run)} --describe failed:\n{out.stdout}{out.stderr}")
+        raise SystemExit(f"router: launch.py {' '.join(run)} --describe failed:\n{out.stdout}{out.stderr}")
 
 
 def fetch(port: int, method: str, path: str, body: bytes | None = None, headers: dict | None = None,

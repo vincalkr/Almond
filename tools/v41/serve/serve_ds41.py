@@ -14,7 +14,7 @@ swaps in V4.1's pieces:
   note the LEADING SPACE in the tag names) parsed as DeepSeek's parse_tool_calls does; the `calls` wrapper is
   stripped from the stream.  A value may carry an escape of its own closing tag: undone.
 
-  serve_ds41.py --engine almond --config local/ds41-local.json --port 8150   (./run.sh does this)
+  serve_ds41.py --engine almond --config local/ds41-local.json --port 8150   (./almond serve does this)
 """
 import json
 import os

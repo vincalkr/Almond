@@ -11,7 +11,7 @@ conversation the engine holds is written there (the engine's SAVE), and a prompt
 while the engine has nothing of it in RAM (after a restart, a model switch, or once it left the RAM cache) is resumed
 from it (RESTORE) instead of being read again.  At most "conversation_dir_gib" (default 16) on disk, oldest out first.
 
-  serve_qwen.py --engine almond --config local/qwen-local.json --port 8150   (./run.sh --model qwen does this)
+  serve_qwen.py --engine almond --config local/qwen-local.json --port 8150   (./almond serve --model qwen does this)
 """
 import hashlib
 import json

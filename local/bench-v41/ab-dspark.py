@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """local/bench-v41/ab-dspark.py - DSpark (ALMOND_SERVE_DSPARK) off / on through the server.
 
-Each run starts the server (./run.sh --config <variant>) without the conversation disk, sends the dev-code prompt
+Each run starts the server (./almond serve --config <variant>) without the conversation disk, sends the dev-code prompt
 (a code review over two engine sources, ~16.7K tokens), three follow-up turns of ~200 tokens each and then a prose
 request, all greedy with 256 output tokens, and reads each request's decode tok/s from /metrics.  Variants
 interleave, REPS times.  Output: local/sweep-dspark/summary.txt.
@@ -76,7 +76,7 @@ def chat(msgs):
 
 
 def run(v, rep):
-    srv = subprocess.Popen([str(ROOT / "run.sh"), "--config", str(config(v))], cwd=ROOT,
+    srv = subprocess.Popen([str(ROOT / "almond"), "serve", "--config", str(config(v))], cwd=ROOT,
                            stdout=open(OUT / f"serve-{v}-{rep}.out", "w"), stderr=subprocess.STDOUT)
     try:
         for _ in range(600):

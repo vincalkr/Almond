@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """local/bench-v41/short-chat.py - decode tok/s on short chats (the default configuration, routing exact).
 
-One server start (./run.sh, the default two-card configuration, no conversation disk), then a short chat of three
+One server start (./almond serve, the default two-card configuration, no conversation disk), then a short chat of three
 turns (a ~60-token question, two follow-ups; the context stays under ~1,500 tokens) and a fresh ~1,200-token
 prompt, greedy, 256 output tokens each, REPS times; each request's decode tok/s from /metrics.  For comparing with
 engines that report speed on short chats.  Output: local/sweep-short/summary.txt.
@@ -55,7 +55,7 @@ def chat(msgs):
     return m.get("content") or m.get("reasoning_content") or "", (r["prompt_tokens"] if "prompt_tokens" in r else r["prompt_read"], r["decode_tok_s"], r["hit_rate"])
 
 
-srv = subprocess.Popen([str(ROOT / "run.sh"), "--config", str(config())], cwd=ROOT,
+srv = subprocess.Popen([str(ROOT / "almond"), "serve", "--config", str(config())], cwd=ROOT,
                        stdout=open(OUT / "serve.out", "w"), stderr=subprocess.STDOUT)
 rows = []
 try:

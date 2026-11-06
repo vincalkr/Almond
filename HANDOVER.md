@@ -11,7 +11,8 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
   The cards' 305 W cap, -200 mV and stock memory clock are deliberate; power-tune (NVMe APST and CPU C3 off, the
   `performance` governor) runs with a server (`/usr/local/sbin/almond-power-tune`).
 - **One engine:** `build-hip-fused/almond-engine`, DeepSeek's path (`src/ds41`), GLM's (`src/glm`, `--glm-pack`) or
-  Qwen's (`src/qwen`, `--qwen`), on one ggml (`third_party/llama.cpp`). The router (`./run.sh --router`) serves them at
+  Qwen's (`src/qwen`, `--qwen`), on one ggml (`third_party/llama.cpp`). The router (`./almond serve --router`) serves
+  them at
   `127.0.0.1:8150`, loading the one a request names; `./almond` is the terminal chat and agent.
 - **DeepSeek-V4.1-Flash-1017:** the ISTA-DASLab GSQ-RCO IQ2_XXS pack (138.2 GB, four shards of the 2026-10-25
   revision, read through `DS41_META`), the checkpoint's FP8 Engram rows, exact routing. Decode ~21-23 tok/s short,

@@ -11,7 +11,7 @@ Jinja chat template; this shim swaps in GLM's differences:
   parser reads `<tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>`.  The stream is
   translated, as serve_ds41.py does for DeepSeek's DSML, so every heuristic of that parser keeps working.
 
-  serve_glm.py --engine almond --config local/glm-local.json --port 8150   (./run.sh --model glm does this)
+  serve_glm.py --engine almond --config local/glm-local.json --port 8150   (./almond serve --model glm does this)
 """
 import os
 import re

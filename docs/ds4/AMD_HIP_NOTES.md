@@ -83,5 +83,5 @@ through pinned host memory.
 
 ## API server
 
-`./run.sh` starts `tools/v41/serve/serve_ds41.py` with `local/ds41-local.json` on `127.0.0.1:8150`: OpenAI
+`./almond serve` starts `tools/v41/serve/serve_ds41.py` with `local/ds41-local.json` on `127.0.0.1:8150`: OpenAI
 `/v1/chat/completions` and `/v1/responses`, Anthropic `/v1/messages`, the web chat and monitor at `/`.

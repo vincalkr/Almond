@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-power-tune.sh [uninstall] - once, with sudo: lets ./run.sh switch local/power-tune.sh on when the server
+# install-power-tune.sh [uninstall] - once, with sudo: lets ./almond serve switch local/power-tune.sh on when the server
 # starts and off when it ends, without asking for a password.
 #
 #   sudo local/install-power-tune.sh             install (or update after local/power-tune.sh changed)
@@ -27,4 +27,4 @@ visudo -cf "$TMP" >/dev/null
 install -o root -g root -m 0440 "$TMP" "$RULE"
 rm -f "$TMP"
 echo "installed $BIN (root:root 0755) and $RULE: $U may run 'sudo -n $BIN on|off|show'"
-echo "./run.sh now switches it on at start and off when the server ends (DS41_POWER_TUNE=0 turns that off)"
+echo "./almond serve now switches it on at start and off when the server ends (DS41_POWER_TUNE=0 turns that off)"

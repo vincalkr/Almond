@@ -388,7 +388,7 @@ candidate 19.68 / 17.20 / 17.36 and 19.14 / 18.00 / 18.92 - code -7%, docs +9%: 
 
 ```
 ./build.sh
-./run.sh                                         # the server, local/ds41-local.json
+./almond serve                                         # the server, local/ds41-local.json
 bash local/bench-v41/ab-rco-requant.sh           # decode and prompt speed (server stopped)
 bash local/eval-lucebox/run-eval.sh TAG          # quality; MODEL / RANK / ENGRAM as in the table above
 ```

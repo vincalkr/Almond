@@ -99,7 +99,8 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    seconds), so it is vendored instead of ported piece by piece: `engines/glm` (the GLM engine v1.1.37, 7ee8f27, MIT,
    with its pinned ggml), built by `./build.sh` into `build-maya-hip/glm`, served by Almond's server through
    `tools/glm/serve/serve_glm.py` (GLM's `<arg_key>` tool calls translated into the server's form, as serve_ds41.py
-   does for DSML) and `./run.sh --model glm` (`local/glm-local.json`, 128K context). It splits the layers over the two
+   does for DSML) and `./almond serve --model glm` (`local/glm-local.json`, 128K context). It splits the layers over
+   the two
    cards (0-22 / 23-44), each card's experts in its own LRU pool (~4300 slots), a pinned RAM tier and a CPU lane.
    Exact routing (no `TRUNK_KEEP`). Same GGUF, the 512-token doc, 510 positions scored:
 
@@ -111,7 +112,7 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
 
    (KL from the Almond trunk 0.063 mean, 0.035 median; argmax agree 88.4%.) Decode, 128-token prompt, 130 tokens,
    greedy, a cold start: 7.77 -> 20.71 tok/s (VRAM hits 11% -> 66%, CPU experts 210 -> 97 a token). Through the
-   server (`./run.sh --model glm`, power-tune on, thinking off, 700 tokens of code three times): 21.1, 25.1, 25.4
+   server (`./almond serve --model glm`, power-tune on, thinking off, 700 tokens of code three times): 21.1, 25.1, 25.4
    tok/s; a short Italian answer 24.7 then 28.8 (85% hits). Tool calls (OpenAI, streamed, the tool's result back),
    Anthropic thinking: checked by hand. The Almond trunk (`--trunk glm` in ds41_generate) stays as the reference.
    **MTP drafts (2026-10-29, on by default):** the GSQ-RCO GGUF has no draft block (nextn 0); an IQ2_S quant
@@ -135,7 +136,7 @@ built behind a flag and compared (tok/s, prompt tok/s, KL / top-1 against the re
    **The expert profile (2026-10-29, on by default):** the engine starts each card's VRAM pool from a profile (the
    most routed experts first, and each layer's share of slots) and saves what it routed into it on quit and every
    10 minutes; the pools stay LRU while it runs. `local/glm-local.json` passes `--expert-profile` and
-   `--expert-profile-save` on `local/glm-expert-profile.bin`, which run.sh seeds with its shipped
+   `--expert-profile-save` on `local/glm-expert-profile.bin`, which ./almond serve seeds with its shipped
    (`engines/glm/data/expert-profile-glm.bin`). A fresh start each arm, six 600-token requests (temperature 0,
    thinking off, MTP on), tok/s:
 

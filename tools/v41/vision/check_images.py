@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""check_images.py - ask the running server (./run.sh --config local/ds41-local-vision.json) about pictures.
+"""check_images.py - ask the running server (./almond serve --config local/ds41-local-vision.json) about pictures.
 
     python3 tools/v41/vision/check_images.py [--url http://127.0.0.1:8150] [--question "..."] IMAGE [IMAGE ...]
 

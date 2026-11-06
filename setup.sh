@@ -51,7 +51,7 @@ if [ $built = 0 ] || [ "$CHECK" = 0 ]; then
 fi
 
 echo "== 5. power-tune (+11% short answers, +21% at ~25K context on DeepSeek, measured 2026-10-21)"
-if [ -x /usr/local/sbin/almond-power-tune ]; then ok "installed: run.sh switches it on with a server and off after"
+if [ -x /usr/local/sbin/almond-power-tune ]; then ok "installed: a server switches it on and off after"
 else
     miss "power-tune (optional)"
     if ask "  install it (asks for your sudo password once)?"; then sudo local/install-power-tune.sh; fi
@@ -101,5 +101,5 @@ if [ "$CHECK" = 0 ]; then
 fi
 
 echo
-echo "done. ./run.sh starts DeepSeek, ./run.sh --model glm GLM, ./run.sh --model qwen Qwen, ./run.sh --router all of them on"
+echo "done. ./almond serve starts DeepSeek, --model glm GLM, --model qwen Qwen, --router all of them on"
 echo "demand; ./almond is the CLI."

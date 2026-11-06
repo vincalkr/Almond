@@ -5,6 +5,9 @@
   ./almond -p "question"         one prompt, the answer on stdout, then exit
   ./almond -m glm                the model (a name from /models, or the start of one: glm, deepseek, qwen)
   ./almond --ctx 65536           the context window of the models it starts (a running server keeps its own)
+  ./almond serve [--router]      a server without the chat: one model (--model glm / qwen, DeepSeek by default) or
+                                 the router; ./almond serve --help for its options (tools/cli/launch.py)
+  ./almond stop [--force]        stop this folder's servers (./stop.sh)
 
 Thinking: --nothink, --think (the model's default), --think-max, --think-level LEVEL - the levels are the model's own
 (GLM-5.3-Flash: low / high / max, it always thinks; DeepSeek-V4.1: off / low / high / max = 0 / 50 / 75 / 100;
@@ -31,8 +34,8 @@ On a terminal the last line is a status bar: the prompt's reading, the answer's 
   ./almond --monitor   the same as /stats, refreshed every second (Ctrl+C leaves)
 
 A line ending in \\ goes on to the next; \"\"\" starts and ends a block of several lines.  Ctrl+C stops the answer and
-returns to the prompt; Ctrl+D (or /quit) leaves.  It speaks Almond's OpenAI API (the router's, ./run.sh --router, or
-one model's server, ./run.sh): the history and the thinking level live here, the model there.
+returns to the prompt; Ctrl+D (or /quit) leaves.  It speaks Almond's OpenAI API (the router's, ./almond serve --router,
+or one model's server, ./almond serve): the history and the thinking level live here, the model there.
 """
 import argparse
 import difflib
@@ -51,6 +54,16 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[2]
 TTY = sys.stdout.isatty()
 DIM, BOLD, CYAN, RED, RESET = (("\x1b[2m", "\x1b[1m", "\x1b[36m", "\x1b[31m", "\x1b[0m") if TTY else ("",) * 5)
+LOGO = r"""
+    _    _     __  __  ___  _   _ ____
+   / \  | |   |  \/  |/ _ \| \ | |  _ \
+  / _ \ | |   | |\/| | | | |  \| | | | |
+ / ___ \| |___| |  | | |_| | |\  | |_| |
+/_/   \_\_____|_|  |_|\___/|_| \_|____/
+"""
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import launch  # noqa: E402  (./almond serve)
+
 HISTORY = Path.home() / ".almond_history"
 CHATS = ROOT / "local" / "chats"
 COMMANDS = [    # (name, arguments, what it does): /help's order, Tab's suggestions
@@ -1069,6 +1082,7 @@ class Chat:
         self.pending = ""
         if readline:
             self.complete_setup(readline)
+        say(f"{CYAN}{BOLD}{LOGO}{RESET}")
         self.banner()
         self.bar.start()
         try:
@@ -1274,13 +1288,15 @@ def say(text: str):
 
 def start_router(api: Api, port: int, ctx: int | None = None, session_log: str | None = None) -> subprocess.Popen:
     log = ROOT / "local" / "router.log"
-    say(f"{DIM}nothing answers at {api.host}:{api.port}: starting the router (./run.sh --router, log {log}) ...{RESET}")
-    env = dict(os.environ)                               # (run.sh / the server: every model the router starts)
+    say(f"{DIM}nothing answers at {api.host}:{api.port}: "
+        f"starting the router (./almond serve --router, log {log}) ...{RESET}")
+    env = dict(os.environ)                               # (launch.py / the server: every model the router starts)
     if ctx:
         env["ALMOND_CTX"] = str(ctx)
     if session_log:
         env["ALMOND_SESSION_LOG"] = session_log
-    p = subprocess.Popen([str(ROOT / "run.sh"), "--router", "--port", str(port)], cwd=ROOT, start_new_session=True,
+    p = subprocess.Popen([sys.executable, str(ROOT / "tools/cli/launch.py"), "--router", "--port", str(port)], cwd=ROOT,
+                         start_new_session=True,
                          stdout=open(log, "a"), stderr=subprocess.STDOUT, env=env)
     for _ in range(240):
         if p.poll() is not None:
@@ -1292,6 +1308,13 @@ def start_router(api: Api, port: int, ctx: int | None = None, session_log: str |
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["serve"]:
+        if sys.argv[2:3] in (["-h"], ["--help"]):
+            print(launch.__doc__)
+            return 0
+        return launch.serve(sys.argv[2:])
+    if sys.argv[1:2] == ["stop"]:
+        os.execv(str(ROOT / "stop.sh"), [str(ROOT / "stop.sh"), *sys.argv[2:]])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-p", "--prompt", help="one prompt: the answer on stdout, then exit")
     ap.add_argument("-m", "--model", help="the model (a name from /models or its start: glm, deepseek, qwen)")
@@ -1341,7 +1364,7 @@ def main() -> int:
     started = None
     if a.monitor:                       # a look, never a start: nothing is loaded for it
         if not api.up():
-            raise SystemExit(f"almond: nothing answers at {a.url} (./run.sh --router, or ./almond, starts it)")
+            raise SystemExit(f"almond: nothing answers at {a.url} (./almond serve --router, or ./almond, starts it)")
         run_monitor(api)
         return 0
     if not api.up():

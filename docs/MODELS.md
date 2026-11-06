@@ -108,7 +108,8 @@ Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
 - GLM: the encoder (`almond-vision`, llama.cpp's mtmd with GLM-5.3's tower, built by `./build.sh` for HIP;
   `local/fetch.sh glm-vision` gets the mmproj F16 + vocab, 1.1 GB) starts only when a picture arrives, in 2.78 GB the
   engine lends it from the tail of card 0's expert pool (273 experts moved to colder slots, 27 dropped) and takes back
-  after (`local/glm-local-vision.json`, which `./run.sh --model glm` picks when the encoder is there). Text decode, one
+  after (`local/glm-local-vision.json`, which `./almond serve --model glm` picks when the encoder is there). Text
+  decode, one
   run each: 29.2, 32.2 before, 29.8, 33.3 after the first picture, 29.2 after the second (cached: no encoder start).
 
 ## Sessions on disk
@@ -194,7 +195,7 @@ symbols, tabs and runs of spaces); GLM's (`glm4`) the same on those and on the m
 The same author's 3.5-bit build (`pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF`, 137.07 GB against 117.48; the card says
 +4.49% PPL over Q8_0 against +9.07%, KL 0.071 against 0.142). `local/glm-pack.sh 3.5` makes its pack
 (`models/glm53-gsq-rco/pack-3.5` then). It is GLM's model since 2026-11-02: the 3.0bit GGUF, its pack and kept
-slots went to the trash, and `local/glm-pack.sh`, `local/fetch.sh glm`, `./run.sh --model glm` take the 3.5bit
+slots went to the trash, and `local/glm-pack.sh`, `local/fetch.sh glm`, `./almond serve --model glm` take the 3.5bit
 (the expert profile it learned in these runs kept). On the two 7900 XTX, power-tune on: 35.5 GB of experts on the cards as with 3.0, 84.6 GB
 pinned in RAM (76 with 3.0), the rest read from the NVMe.
 

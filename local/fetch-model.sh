@@ -98,4 +98,4 @@ if [ "${VISION:-1}" != 0 ]; then
     "$PY" "$HERE/tools/v41/vision/make_vision_gguf.py" --out "$DEST/vision-1017/DeepSeek-V4.1-Flash-1017-Vision.gguf"
   fi
 fi
-say "=== done: ./run.sh starts the server on it"
+say "=== done: ./almond serve starts the server on it"

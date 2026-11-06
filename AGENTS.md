@@ -6,14 +6,16 @@ card 0, a second 24 GB card, pinned RAM and NVMe. One C++/HIP executable, `build
 path in `src/ds41`, GLM's in `src/glm` when its arguments name `--glm-pack`, Qwen's in `src/qwen` when they name
 `--qwen`, the shared libraries in `src/` and `include/`); an OpenAI- and Anthropic-compatible server (`serve/`,
 started per model by `tools/v41/serve/serve_ds41.py`, `tools/glm/serve/serve_glm.py` or
-`tools/qwen/serve/serve_qwen.py` through `./run.sh`); the router (`tools/router/almond_router.py`, `./run.sh --router`);
+`tools/qwen/serve/serve_qwen.py` through `./almond serve`); the router (`tools/router/almond_router.py`, `./almond
+serve --router`);
 the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurations, tools and measurements in
 `local/`, `tools/` and `docs/`.
 
 ## Running it
 
 - `./almond` starts the router on `127.0.0.1:8150` if nothing answers and chats with the default model (GLM);
-  `./run.sh` one model's server (DeepSeek; `--model glm` GLM, `--model qwen` Qwen), `./run.sh --router` all of them
+  `./almond serve` one model's server (DeepSeek; `--model glm` GLM, `--model qwen` Qwen), `./almond serve --router` all
+  of them
   behind one address.
   Never expose a server beyond `127.0.0.1` without `--api-key`. `./stop.sh` stops this folder's server.
 - DeepSeek: `local/ds41-local.json` on cards 0 and 1 (`--gpu 0` / `--gpu 1`: `local/ds41-local-1gpu.json`); with the

@@ -10,7 +10,7 @@
 #
 # The image routing bias the pack lacks is in the repo (local/rco-iq2xxs-meta/vl-bias.gguf, 61 KB, from ISTA-DASLab's
 # exp_probs_b_vl.f32 = the checkpoint's ffn.gate.bias_vl, by tools/v41/ds41_vl_bias.py), so with the encoder
-# ./run.sh starts with images on.
+# ./almond serve starts with images on.
 #
 # The files come from revision $REV (2026-10-25): on 2026-10-27 the repository switched to llama.cpp's upstream
 # six-shard layout, which this engine does not read.
@@ -114,6 +114,6 @@ if [ "$DRY_RUN" != 1 ]; then
         fi
     fi
     echo "fetch-rco: --engram - the configurations name the checkpoint's FP8 rows in models/engram-1017 (203 GB, from"
-    echo "           local/fetch-model.sh + local/ds4-engram-extract.py). Without them ./run.sh still starts: the engine"
+    echo "           local/fetch-model.sh + local/ds4-engram-extract.py). Without them the server still starts: the engine"
     echo "           falls back to the pack's own $DEST/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf and prints that it does."
 fi
