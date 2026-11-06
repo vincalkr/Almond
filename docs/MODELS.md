@@ -253,7 +253,20 @@ which slows both): 838 kernels a token against 2,130, the GPU busy 13.8 ms a tok
 
 The hyper-connections' gap is the weights, not the kernels: its file holds `hc_*_down`, `hc_*_up` and `hc_*_inject` as
 Q8_0, ours as BF16 (as the checkpoint): 0.67 against 1.26 GB a token, read at about 390 and 480 GB/s. Its attention
-weights are Q8_0 too. Not changed here: Q8_0 hyper-connections would change the model's numbers (KL not measured).
+weights are Q8_0 too. Measured what Q8_0 hyper-connections cost: our GGUF with only `hc_*_down`, `hc_*_up` and
+`hc_*_inject` requantized from BF16 to Q8_0 (54.82 -> 54.22 GB), the other fork's `llama-perplexity` on the CPU
+(`-ngl 0`; its GPU path refuses our expert types), `local/glm-ref/long-docs.txt`, 16 x 512 tokens, against the
+unchanged GGUF's logits:
+
+| | Q8_0 hyper-connections | the unchanged GGUF again |
+| --- | ---: | ---: |
+| PPL ratio | 1.0014 +/- 0.0077 | 1.0000 |
+| mean KL | 0.0704 +/- 0.0018 | 0.0000 |
+| 99% KL | 0.552 | 0 |
+| same top token | 87.1% | 100% |
+
+A KL of 0.07 is the size of a whole quantization step (IQ4_XS against Q8 on another model, 0.077): the
+hyper-connections stay BF16.
 
 Fewer promotions during decode (`--adapt-every 8`, or `--adapt-swaps 0`) did not help (with drafts, tok/s, two rounds
 alternated): base 87.6 / 89.2, every 8 86.8 / 87.7, no swaps 88.5 / 90.4. The defaults stay.
