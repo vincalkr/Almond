@@ -312,6 +312,11 @@ run-to-run spread.
 The same (one run in each arm drops to ~19 on Promessi Sposi, either arm): the ~6 ms of per-layer round trips are not
 the thread's wake-up. Off.
 
+**The context the engine is started with** (2026-11-07): does the decode pay for the 262,144 positions it allocates
+when a conversation uses a few hundred? Through the server, `local/glm-ref/speed.py` (three short prompts, 600 tokens,
+temperature 0), the configuration against the same with `--ctx 32768`, two rounds alternated, mean tok/s: 262,144
+20.9 / 20.8, 32,768 18.7 / 20.9. The same: the attention works on the positions in use, not on the allocation.
+
 ## The Engram tables, in either form
 
 The Engram rows come as the pack's own iq4_nl GGUF (`DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`, 110.6 GB, one tensor a
