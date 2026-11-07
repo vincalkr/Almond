@@ -2239,6 +2239,7 @@ class Vision:
         make room for a later one (#1072: with more than 64 unique images the first was deleted before the request
         had read it)."""
         out: list[tuple[Path, int]] = []
+        self.encoded_new = 0                            # how many of them were not in the cache (the status line)
         for src in sources:
             out.append(self.encode(src, keep=[p for p, _ in out]))
         return out
@@ -2253,6 +2254,7 @@ class Vision:
                 self.cache[key] = self.cache.pop(key)                  # most recently used last
                 return self.cache[key]
             img, out = self.dir / f"{key}.img", self.dir / f"{key}.sve"
+            self.encoded_new = getattr(self, "encoded_new", 0) + 1
             if self.on_demand and (self.proc is None or self.proc.poll() is not None):
                 self.proc = None
                 self._start()                           # (in the memory the engine lends it)
@@ -3810,9 +3812,13 @@ class Service:
                     with self.status_lock:
                         (self.status if st is None else st)["pictures_noted"] = True
                     n = s["pictures"]
-                    print(f"[{s.get('effort') or 'almond'}] taking in {n} picture{'s' if n != 1 else ''} before reading "
-                          f"the prompt ({s.get('prompt_tokens', 0):,} tokens): the engine loads them and takes back the "
-                          "image encoder's GPU memory - this can take a minute", flush=True)
+                    if s.get("pictures_new") == 0:          # every one already encoded: only its file is read
+                        print(f"[{s.get('effort') or 'almond'}] {n} picture{'s' if n != 1 else ''}, already encoded, "
+                              f"before reading the prompt ({s.get('prompt_tokens', 0):,} tokens)", flush=True)
+                    else:
+                        print(f"[{s.get('effort') or 'almond'}] taking in {n} picture{'s' if n != 1 else ''} before "
+                              f"reading the prompt ({s.get('prompt_tokens', 0):,} tokens): the engine loads them and "
+                              "takes back the image encoder's GPU memory - this can take a minute", flush=True)
                 return now
             print(f"[{s.get('effort') or 'almond'}] reading the prompt: {done} tokens{cache}{speed}, {el:.0f} s so far",
                   flush=True)
@@ -3904,7 +3910,7 @@ class Service:
                         self.ensure_loaded()
                     with self.status_lock:
                         st.update(pictures=(len(set(emb_keys.split(","))) if emb_keys else 1) if emb else 0,
-                                  pictures_noted=False)
+                                  pictures_noted=False, pictures_new=getattr(self.vision, "encoded_new", None))
                         st.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
                                   generated=0, started=time.time(), first_token=None, tool=None, tail="",
                                   max_tokens=max_new, reasoning_recoveries=0,
