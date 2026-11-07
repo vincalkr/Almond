@@ -155,6 +155,28 @@ argmax differences 2 / 2 / 2 against 5 / 5 / 5 (the same text either way). The l
 So of the ~0.56 ms a layer's attention takes, ~0.4 ms is kernel time and ~0.15 ms the card's own gap between
 dependent kernels - ~6 ms a token over 40 layers, the most that fusing the attention's small kernels could win.
 
+**The router in one kernel: opt-in, off** (`ALMOND_ROUTER_FUSE=1`, 2026-11-07). After the router's product a layer ran
+11 small kernels (softplus, sqrt, the two bias adds, argsort, the id copy, get_rows, sum, the 1e-20 guard, div,
+scale). ggml-cuda already fuses DeepSeek-V4's `sqrt(softplus)` routing (`topk_moe`) when the graph has its node order
+and a power-of-two expert count; with the flag the engine builds that order (only where the selection-only bias is all
+zero, no image rows and no `ALMOND_RB_*`), and `tools/v41/ggml/topk-moe-384.patch` adds the 384-expert case. Same
+top-k; the weights are normalised as `w * (1 / max(sum, 1e-20))` instead of `w / (sum + 1e-20)`, the same up to the
+last bit. Promessi Sposi 300 tokens, forced, the configuration's flags, 3 rounds alternated (`ALMOND_ATTN_PROF=1`):
+
+| | the attention's compute call, ms a token | tok/s | argmax differences |
+| --- | --- | --- | --- |
+| the configuration | 22.40 / 22.59 / 22.45 | 20.67 / 18.90 / 18.34 | 2 / 2 / 2 |
+| `ALMOND_ROUTER_FUSE=1` | 21.07 / 21.15 / 21.16 | 19.79 / 20.82 / 18.62 | 7 / 7 / 7 |
+
+1.3 ms a token fewer in the attention (10 kernels a layer, ~3 us each), the size predicted above; the tok/s spread
+of a run (18.3-20.8 on the same flags) is larger than that, so the end-to-end gain is not measurable with these runs.
+The extra argmax differences fall on the same fragile steps as `GGML_CUDA_DISABLE_GRAPHS=1`'s 5 (steps 91, 102, 178,
+277, gaps 0.1-1.1). Lucebox (one card, `ALMOND_DENSE_REQUANT=q6_K`): ppl 10.368 against 10.372 for the configuration
+repeated (`rco-iq2xxs-fp8eng-q6k-base2`, bit-identical to the earlier run), KL 0.014 and 94.9% the same top-1
+against it (`rco-iq2xxs-fp8eng-q6k-routerfuse`). Off: the rest of the attention's small kernels (the K / V gather
+before the flash attention, ~10 a layer, and the shared expert's clamps) would each win about as much, ~1 ms a token,
+inside the same spread; not built.
+
 ### A rotated-INT4 copy of the experts for prompts: not built (2026-11-06)
 
 RDNA3's `v_wmma_i32_16x16x16_iu4` runs at twice the rate of the INT8 instruction ggml's MMQ uses; a block-Hadamard

@@ -157,6 +157,7 @@ struct Ds41Dense::Impl {
         ggml_tensor * selm = nullptr;     // F32 [ITOP, NC]  0 / -inf (row visible to the query)
         ggml_tensor * raw_snap = nullptr, * st_kv_snap = nullptr, * st_sc_snap = nullptr;   // snapshot()
         ggml_tensor * rbias = nullptr;    // F32 [NE]        selection-only routing bias (set_route_bias), 0 = model routing
+        bool rbias_on = false;            // set_route_bias wrote a non-zero value (ALMOND_ROUTER_FUSE needs it off)
     };
     int snap_pos = -1;
     struct ParkedRows { ggml_tensor * t; size_t off; std::vector<uint8_t> b; };
@@ -793,6 +794,21 @@ static ggml_cgraph * build_attn(Ds41Dense::Impl & im, ggml_context * gc, int il,
         ggml_tensor * m = ggml_reshape_2d(gc, b.v1(im.i_img, n, (size_t) col0 * 4), 1, n);
         s0 = ggml_add(gc, s0, ggml_mul(gc, ggml_repeat(gc, dv, sc), m));
     }
+    // ALMOND_ROUTER_FUSE=1 (opt-in, the card only): the router built in the node order ggml-cuda's topk_moe fusion
+    // matches (UNARY softplus, SQRT, RESHAPE, ADD bias, ARGSORT, VIEW, GET_ROWS, RESHAPE, SUM_ROWS, CLAMP, DIV,
+    // RESHAPE, SCALE), so the 11 small kernels after the router's product run as one.  Only where the selection is the
+    // model's own (no rbias, no image rows, no ALMOND_RB_*): the same top-k; the weights' normalisation is
+    // w * (1 / max(sum, 1e-20)) in the fused kernel against w / (sum + 1e-20) - the same up to the last bit.
+    static const bool router_fuse = std::getenv("ALMOND_ROUTER_FUSE") && std::getenv("ALMOND_ROUTER_FUSE")[0] == '1';
+    ggml_tensor * fused_ids = nullptr, * fused_wts = nullptr;
+    if (router_fuse && !im.cpu && !img_rows && !im.ly[(size_t) il].rbias_on && !std::getenv("ALMOND_RB_PROTECT") &&
+        !std::getenv("ALMOND_RB_MARGIN")) {
+        ggml_tensor * probs = ggml_reshape_3d(gc, sc, 1, im.NE, n);
+        fused_ids = ggml_argsort_top_k(gc, s0, (int) im.NU);                                  // [NU, n]
+        ggml_tensor * w = ggml_reshape_2d(gc, ggml_get_rows(gc, probs, fused_ids), im.NU, n);
+        if (G.norm_topk) w = ggml_div(gc, w, ggml_clamp(gc, ggml_sum_rows(gc, w), 1e-20f, INFINITY));
+        fused_wts = ggml_scale(gc, ggml_reshape_3d(gc, w, 1, im.NU, n), (float) G.weights_scale);
+    }
     ggml_tensor * rb = ggml_reshape_2d(gc, im.ly[(size_t) il].rbias, im.NE, 1);
     ggml_tensor * sel = nullptr;
     // SMART route bias (opt-in; the flat bias changes ~every choice it can: -14 pt API top-1, repetition loops):
@@ -826,13 +842,16 @@ static ggml_cgraph * build_attn(Ds41Dense::Impl & im, ggml_context * gc, int il,
         ggml_tensor * unprot = ggml_scale_bias(gc, protect, -1.0f, 1.0f);
         if (gate) unprot = ggml_mul(gc, unprot, gate);
         sel = ggml_add(gc, ggml_add(gc, s0, ggml_mul(gc, ggml_repeat(gc, rb, like), unprot)), ggml_scale(gc, protect, 1e4f));
-    } else {
+    } else if (!fused_ids) {
         sel = ggml_add(gc, s0, rb);
     }
-    ggml_tensor * ids = ggml_argsort_top_k(gc, sel, (int) im.NU);   // [NU, n]
-    ggml_tensor * wts = ggml_reshape_2d(gc, ggml_get_rows(gc, ggml_reshape_3d(gc, sc, 1, im.NE, n), ids), im.NU, n);
-    if (G.norm_topk) wts = ggml_div(gc, wts, ggml_scale_bias(gc, ggml_sum_rows(gc, wts), 1.0f, 1e-20f));
-    wts = ggml_scale(gc, wts, (float) G.weights_scale);
+    ggml_tensor * ids = fused_ids, * wts = fused_wts;
+    if (!fused_ids) {
+        ids = ggml_argsort_top_k(gc, sel, (int) im.NU);   // [NU, n]
+        wts = ggml_reshape_2d(gc, ggml_get_rows(gc, ggml_reshape_3d(gc, sc, 1, im.NE, n), ids), im.NU, n);
+        if (G.norm_topk) wts = ggml_div(gc, wts, ggml_scale_bias(gc, ggml_sum_rows(gc, wts), 1.0f, 1e-20f));
+        wts = ggml_scale(gc, wts, (float) G.weights_scale);
+    }
 
     // ---- shared expert (model.py Expert, clamped SwiGLU)
     const float lim = (float) G.swiglu_limit;
@@ -846,6 +865,8 @@ static ggml_cgraph * build_attn(Ds41Dense::Impl & im, ggml_context * gc, int il,
 
     // the results go to the persistent state: copied at the end, or (ALMOND_DENSE_ALIAS) computed in place there
     auto out_to = [&](ggml_tensor * t, ggml_tensor * dst) { outs.push_back(alias_into(t, dst) ? t : ggml_cpy(gc, t, dst)); };
+    // the fused router first: expanding its weights visits the nodes in the order the fusion matches
+    if (fused_ids) ggml_build_forward_expand(gf, fused_wts);
     out_to(h, b.cols3(im.hap, D, HC, n, col0));
     outs.push_back(ggml_cpy(gc, f_post, b.cols2(im.post_f, HC, n, col0)));
     out_to(f_comb, b.cols3(im.comb_f, HC, HC, n, col0));
@@ -1339,6 +1360,13 @@ void Ds41Dense::set_route_bias(int il, const float * bias) {
     Impl & im = *p_;
     if (il < 0 || il >= (int) im.ly.size() || !im.ly[(size_t) il].rbias) return;
     ggml_backend_tensor_set(im.ly[(size_t) il].rbias, bias, 0, (size_t) im.NE * 4);
+    bool on = false;
+    for (int64_t e = 0; e < im.NE; ++e) on = on || bias[e] != 0.0f;
+    if (on != im.ly[(size_t) il].rbias_on) {   // the layer's cached decode graph was built for the other case
+        im.ly[(size_t) il].rbias_on = on;
+        for (auto it = im.graphs.begin(); it != im.graphs.end();)
+            it = it->first.il == il && it->first.kind == 1 ? im.graphs.erase(it) : std::next(it);
+    }
 }
 
 void Ds41Dense::set_oom_hook(std::function<bool()> hook) { p_->oom_hook = std::move(hook); }
