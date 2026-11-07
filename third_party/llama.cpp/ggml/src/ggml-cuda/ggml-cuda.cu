@@ -4679,6 +4679,28 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
             }
         }
     }
+    // GGML_CUDA_GRAPH_STATS=1 (diagnostic): every 4096 graph computes, how many were launched as a captured graph,
+    // captured (again), or evaluated directly - and why (not compatible, warmup, properties changed)
+    {
+        static const bool stats_on = getenv("GGML_CUDA_GRAPH_STATS") != nullptr;
+        if (stats_on) {
+            static uint64_t n_calls = 0, n_launch = 0, n_capture = 0, n_incompat = 0, n_warm = 0, n_changed = 0, n_off = 0;
+            ++n_calls;
+            if (!graph->is_enabled()) ++n_off;
+            else if (!ggml_cuda_graph_check_compability(cgraph)) ++n_incompat;
+            else if (use_cuda_graph && cuda_graph_update_required) ++n_capture;
+            else if (use_cuda_graph) ++n_launch;
+            else if (graph->warmup_complete) ++n_changed;
+            else ++n_warm;
+            if (n_calls % 4096 == 0) {
+                GGML_LOG_INFO("cuda graph stats: %llu computes: %llu launched, %llu captured, %llu direct (%llu warmup/changed, "
+                              "%llu not compatible, %llu disabled), %zu keys\n", (unsigned long long) n_calls,
+                              (unsigned long long) n_launch, (unsigned long long) n_capture,
+                              (unsigned long long) (n_warm + n_changed + n_incompat + n_off), (unsigned long long) (n_warm + n_changed),
+                              (unsigned long long) n_incompat, (unsigned long long) n_off, cuda_ctx->cuda_graphs.size());
+            }
+        }
+    }
 #endif // USE_CUDA_GRAPH
 
     if (use_cuda_graph && cuda_graph_update_required) {

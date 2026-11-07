@@ -135,6 +135,26 @@ not add; the rest is the CPU's experts and the round trips, as above. GLM, trace
 kernels a token on card 0 and 378 on card 1, about 60 of them under 5 us - its time is in the experts read from RAM
 (`moe_fetch`, 9.4 ms a token), the dense products (12.8 ms) and the wait for the CPU (5.4 ms), not in launches.
 
+**HIP graphs in the decode are already on** (2026-11-07). The decode's graphs (`begin`, each layer's attention + router
+keyed by layer and compressed-row capacity, the shared `finish`) are built once and stamped with a uid
+(`Ds41Dense::Impl::Allo`), so ggml's HIP backend captures each one and launches it again: `GGML_CUDA_GRAPH_STATS=1`
+(a counter added to ggml, `tools/v41/ggml/graph-stats.patch`), Promessi Sposi 300 tokens, 24,576 graph computes:
+23,927 launched as a captured graph, 252 captured, 397 run directly (a new graph's first call), 286 graphs. Graphs on
+against `GGML_CUDA_DISABLE_GRAPHS=1`, the configuration's flags, forced, 3 rounds alternated: 20.68 / 18.09 / 19.71
+against 20.47 / 18.64 / 18.95 tok/s, attention + router 25.1 / 25.2 / 31.9 against 26.2 / 30.5 / 34.2 ms a token,
+argmax differences 2 / 2 / 2 against 5 / 5 / 5 (the same text either way). The launches are therefore not the cost:
+
+- `ALMOND_ATTN_PROF=1` (adds a sync before and after each layer's attention graph): wait before 0.00 ms a token, the
+  compute call 22.5 ms (24.1 with graphs off), left on the card after it 0.00 - the call returns when the card is
+  done, and nothing queued before it is still running.
+- rocprofv3, 40 Promessi Sposi tokens, graphs on: `hipGraphLaunch` 22 us on average; an attention graph is 73
+  kernels (54 of them under 5 us), 407 us of kernel time, of it 176 us in the 8 `mul_mat_vec_q` (the weights read),
+  25 us `mul_mat_vec_f`, 18 us flash attention, 15 us argsort; consecutive kernels inside a graph are ~3.5 us apart
+  under the profiler (which adds ~3 us a kernel).
+
+So of the ~0.56 ms a layer's attention takes, ~0.4 ms is kernel time and ~0.15 ms the card's own gap between
+dependent kernels - ~6 ms a token over 40 layers, the most that fusing the attention's small kernels could win.
+
 ### A rotated-INT4 copy of the experts for prompts: not built (2026-11-06)
 
 RDNA3's `v_wmma_i32_16x16x16_iu4` runs at twice the rate of the INT8 instruction ggml's MMQ uses; a block-Hadamard

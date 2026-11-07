@@ -1745,7 +1745,25 @@ bool Ds41Dense::attn_router(int il, int * ids, float * wts, const float ** fn_ho
         gc = ggml_init(p);
         gf = build_attn(im, gc, il, n);
     }
+    // ALMOND_ATTN_PROF=1 (diagnostic, adds a sync): a decode attn_router's time split into the wait for the work queued
+    // before it (the previous layer's experts and finish), the graph compute call, and what is left on the card after
+    // that call returns
+    static const bool aprof = std::getenv("ALMOND_ATTN_PROF") != nullptr;
+    static double ap[4] = {};
+    double t0 = 0, t1 = 0, t2 = 0;
+    if (aprof && cached) { t0 = dprof_now(); ggml_backend_synchronize(im.backend); t1 = dprof_now(); }
     const bool ok = im.compute(gf, cached);
+    if (aprof && cached) {
+        t2 = dprof_now();
+        ggml_backend_synchronize(im.backend);
+        const double t3 = dprof_now();
+        ap[0] += t1 - t0; ap[1] += t2 - t1; ap[2] += t3 - t2;
+        if (++ap[3] == (double) im.ly.size() * 64) {
+            std::fprintf(stderr, "attn prof ms/token: wait before %.2f, compute call %.2f, left on the card %.2f\n", ap[0] / 64,
+                         ap[1] / 64, ap[2] / 64);
+            for (double & v : ap) v = 0;
+        }
+    }
     if (gc) ggml_free(gc);
     if (!ok) return false;
     // one sync for the three readbacks (was one per tensor_get: 3 x 40 stream syncs per decode token)
