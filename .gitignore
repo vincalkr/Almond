@@ -115,8 +115,11 @@ core.[0-9]*
 /local/reports/
 /models
 /.venv
-# src/glm: directories named core (not core dumps)
+# source directories named core (not core dumps)
+!src/core
+!include/almond/core
 !src/glm/**/core
+!src/qwen/**/core
 build-vision/
 local/glm-slots/
 local/qwen-slots/
