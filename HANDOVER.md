@@ -5,7 +5,7 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 [docs/ds4/AMD_HIP_NOTES.md](docs/ds4/AMD_HIP_NOTES.md), [docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md),
 [docs/ENGINE_REVIEW.md](docs/ENGINE_REVIEW.md).
 
-## State (2026-11-02)
+## State (2026-11-08)
 
 - **Machine:** two RX 7900 XTX (card 1 on a PCIe 4.0 x2 uplink), Ryzen 9 9900X, 122 GiB RAM, PCIe 5.0 NVMe, ROCm 7.14.
   The cards' 305 W cap, -200 mV and stock memory clock are deliberate; power-tune (NVMe APST and CPU C3 off, the
@@ -24,6 +24,12 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 - **Qwen3.8-Flash-Next:** the GSQ-RCO IQ3_S GGUF (83.6 GB, two shards) with its pack and the MTP block from the BF16
   checkpoint, on card 0: 87.4 tok/s through the server (79-100 per prompt), the same as the build it came from (88.4,
   and the same 64 greedy ids one-shot). Levels none / low / medium / xhigh. Images on the CPU (`almond-vision`).
+- **Qwen3.8-27B (dense):** the GSQ-RCO IQ3_S GGUF (11.28 GiB, MTP block included) on its own path (`src/qwen35`,
+  `--qwen35`, ggml graphs), `./almond serve --model qwen27`: one card, 192K, q8_0 KV, MTP 3 by default. 73.3 tok/s
+  mean greedy over three prompts (llama.cpp 75.5), PPL 6.1552 (llama.cpp 6.1542); z-lab's DFlash2 drafter opt-in
+  (`local/qwen27-local-dflash.json`: faster on code, slower on free prose); 256K on two cards
+  (`local/qwen27-local-256k.json`). Its own chat template (the GGUF's); levels off / low / medium / xhigh, each checked
+  through the server. On branch `qwen35-27b`.
 - **Images:** DeepSeek and GLM, each encoder in VRAM only for a request with pictures (DeepSeek's loaded and freed; GLM's
   in 2.78 GB the engine lends it, at up to 1,024 image tokens since its memory is measured without flash attention).
 - **Conversations:** each kept in RAM and on disk and resumed from the longest prefix (`local/conv-cache-rco`,
@@ -50,6 +56,12 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 - `fit_max_tokens` on: a client's max_tokens beside a long prompt gets the room left, not a 400.
 
 ## Open
+
+- **Qwen3.8-27B:** no images yet (the mmproj is in `models/qwen38-27b`, `GENI` is refused), no conversations on disk
+  (`SAVE` / `RESTORE`), and a conversation resumes only when the new prompt continues the cached tokens exactly (no
+  DeltaNet checkpoint inside the prompt). The 4-token verify window costs 1.4 decode tokens (ggml's MMVQ is
+  latency-bound on RDNA3; table, decode-once and unroll changes did not help); past ~100K the q8_0 KV's f16
+  conversion in the verify window halves the decode. Its files are not in `local/fetch.sh`.
 
 - **Qwen3.8-Flash-Next:** no perplexity yet (no `LOGP` on its path, no prompt logits on the native one), no
   long-context or agent-session measurement; one card only (the engine has a layer split for two, not tried here).

@@ -356,6 +356,13 @@ Flash-Next's `serve_qwen.py`, the tokenizer is Flash-Next's with the 27B's own c
 `models/qwen38-27b/tokenizer`). Model files: `models/qwen38-27b/` (the ISTA-DASLab IQ3_S + MTP GGUF, 11.28 GiB, and
 optionally z-lab's DFlash2 Q8_0 drafter, 1.92 GiB). Text only for now (`GENI` is refused).
 
+Template and thinking: the GGUF's own chat template (it differs from Flash-Next's only in merging several system /
+developer messages); the tokenizer is Flash-Next's (the same 248,320 tokens, compared one by one). The levels are the
+model card's, the same as Flash-Next's: off (`enable_thinking` false, an empty thinking block), low and xhigh (a
+system instruction each), medium (none), xhigh by default, a client's high or max is xhigh; sampling with thinking
+1.0 / 0.95 / top_k 20, without 0.7 / 0.8 / 20 and presence 1.5. Checked through the server (greedy, "a train leaves at
+9:40 and arrives at 13:15, how long?"): off 9 tokens, low 149, medium 300, xhigh 67, the same right answer each.
+
 How it keeps state: each DeltaNet layer keeps 8 snapshots of its SSM state (`ggml_gated_delta_net` with K = 8) and a
 conv window of 11 rows; a verify window of n tokens of which a are kept leaves the state in snapshot n-a, read by the
 next graph through `get_rows` with that index as an input, so a rejected draft costs no copy and the graphs stay the

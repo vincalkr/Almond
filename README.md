@@ -1,6 +1,6 @@
 <h1 align="center">Almond - MoE models on RX 7900 XTX</h1>
 
-<p align="center"><b>DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash and Qwen3.8-Flash-Next on one or two RX 7900 XTX, their experts across VRAM, pinned RAM and NVMe</b><br>
+<p align="center"><b>DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash and Qwen3.8-Flash-Next on one or two RX 7900 XTX, their experts across VRAM, pinned RAM and NVMe; the dense Qwen3.8-27B on one card</b><br>
 Linux - ROCm/HIP - MIT</p>
 
 A C++/HIP inference engine for large MoE models (one executable, `build-hip-fused/almond-engine`), an OpenAI- and
@@ -13,6 +13,8 @@ Anthropic-compatible server, a router that serves every model at one address, an
 - **GLM-5.3-Flash** as the GSQ-RCO 3.5bit pack (137 GB) with its MTP draft block (`src/glm`).
 - **Qwen3.8-Flash-Next** as the [ISTA-DASLab GSQ-RCO IQ3_S GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF)
   (two shards, 83.6 GB) with its MTP draft block from the BF16 checkpoint (`src/qwen`).
+- **Qwen3.8-27B** (dense) as the [ISTA-DASLab GSQ-RCO IQ3_S GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF)
+  (11.28 GiB, its MTP block in the same file) on ggml graphs (`src/qwen35`), optionally with z-lab's DFlash2 drafter.
 
 How each model is set up and measured: [docs/MODELS.md](docs/MODELS.md); the one-engine work:
 [docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md).
@@ -42,6 +44,11 @@ build it replaced: 14.01) (docs/MODELS.md).
 
 Qwen3.8-Flash-Next (GSQ-RCO IQ3_S), one card, through the server (the same three prompts, two rounds): 87.4 tok/s
 decode with its MTP drafts, 79-100 per prompt (docs/MODELS.md, "Qwen3.8-Flash-Next").
+
+Qwen3.8-27B (GSQ-RCO IQ3_S), card 0, greedy, the same three prompts (code / technical / story), 512 tokens: 42.2 tok/s
+without drafts, 73.3 with its MTP block (96.1 / 73.0 / 57.6; llama.cpp on the same GGUF 75.5), 105.4 / 81.3 / 44.5
+with the DFlash2 drafter; PPL 6.1552 against llama.cpp's 6.1542 on the same text. One card to 192K context, two for
+256K (docs/MODELS.md, "Qwen3.8-27B").
 
 ## Requirements
 
@@ -100,7 +107,8 @@ Almond serves DeepSeek-V4.1-Flash (`./almond serve`, the default), GLM-5.3-Flash
 path of
 the same executable in `src/glm`, MIT: `src/glm/LICENSE`) and Qwen3.8-Flash-Next (`./almond serve --model qwen`,
 `src/qwen`,
-MIT: `src/qwen/LICENSE`); `local/fetch.sh` downloads and prepares their files.
+MIT: `src/qwen/LICENSE`), and the dense Qwen3.8-27B (`./almond serve --model qwen27`, `src/qwen35`; its files in
+`models/qwen38-27b`, not in `local/fetch.sh` yet); `local/fetch.sh` downloads and prepares the others' files.
 `./almond serve --router` puts every model of `local/router.json` behind one address, as llama-server's
 router mode does: `GET /v1/models` lists them with their status (loaded / loading / unloaded), context and thinking
 levels (`reasoning_levels`, `reasoning_default`); `POST /models/load` / `/models/unload {"model": NAME}`; a request that
@@ -118,16 +126,16 @@ instead.
 ```
 
 - thinking: each model's own levels, from the client's words. GLM-5.3-Flash: low / high / max (its default; an
-  Anthropic budget under 2K low, under 8K high, else max). Qwen3.8-Flash-Next: off / low / medium / xhigh (its
-  default; high and max are xhigh). DeepSeek-V4.1: off / low (50) /
+  Anthropic budget under 2K low, under 8K high, else max). Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium /
+  xhigh (its default; high and max are xhigh). DeepSeek-V4.1: off / low (50) /
   high (75, default) / max (100) or a number 1-100 (`none` is taken as off). `--nothink`, `--think`, `--think-max` (the model's most thorough level), `--think-level L`; `/think L`,
   `/nothink` in the chat. `/health` and `/v1/models` say which levels a model has.
 - DeepSeek's sampling follows its cloud API (deepseek-flash): with thinking the temperature has no effect (1.0) and
   top_p is 0.95-1.0 (default 1.0); without thinking temperature 0-2 (default 1.0) and top_p 1.0; no top_k, min_p or
   penalties; an unset max_tokens is 8K without thinking, 64K with it, 128K at max effort.
   `ALMOND_DS41_FREE_SAMPLING=1` passes a request's values as they are.
-- Qwen3.8-Flash-Next follows its model card: thinking xhigh (the default) / medium / low, or off (`enable_thinking`
-  false; a client's high or max is xhigh); sampling with thinking temperature 1.0, top_p 0.95, top_k 20, without it
+- Qwen3.8-Flash-Next and Qwen3.8-27B follow their model card: thinking xhigh (the default) / medium / low, or off
+  (`enable_thinking` false; a client's high or max is xhigh); sampling with thinking temperature 1.0, top_p 0.95, top_k 20, without it
   0.7, 0.8, 20 and presence penalty 1.5 (a request's own values win).
 - GLM-5.3-Flash follows Z.ai's API: it always thinks, at low / high / max (default max; none, minimal and
   Anthropic's disabled are low, medium high, xhigh max); temperature 0-1 (default 1.0), top_p 0.01-1 (0.95), no
