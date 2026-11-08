@@ -27,5 +27,7 @@
     "top_k": 20
   },
   "loop_guard": true,
-  "fit_max_tokens": true
+  "fit_max_tokens": true,
+  "conversation_dir": "local/qwen27-slots-256k",
+  "conversation_dir_gib": 16
 }

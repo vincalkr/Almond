@@ -361,12 +361,22 @@ Images (`local/qwen27-local-vision.json`, picked by `./almond serve --model qwen
 engine takes `GENI` with its `SVE1` records: each picture's rows replace its run of `<|image_pad|>` tokens in the
 trunk's embeddings, with mtmd's M-RoPE positions (t = p, h = p + y, w = p + x; the text after it at p + max(nx, ny));
 each image row is matched on its picture's key (the server's `img_keys=`) and index, so a different picture of the
-same size is never taken for a cached one. The MTP block reads the `<|image_pad|>` token's embedding on those rows
-(drafts only). Checked on card 1 with a 640x420 test picture (a red square, a blue circle, "ALMOND 27B"; 260 image
+same size is never taken for a cached one; the MTP block reads the picture's rows too. Checked on card 1 with a 640x420 test picture (a red square, a blue circle, "ALMOND 27B"; 260 image
 tokens, a 20x13 grid): both shapes, their colours and places and the text described right, in English and Italian
 (5.7 s with the encode, 1.1 s with the picture already encoded); a second turn of that conversation reused 293 of
 316 tokens; another picture of the same size (a green triangle, an orange square) reused none and was described
-right.
+right. Real pictures (greedy, thinking off, 500 tokens): `/usr/share/backgrounds/jdituicha-raccoon1-light.jpg` (the
+raccoon, the faint "2", the purple-to-orange gradient: right), llama.cpp's `media/matmul.png` (both products, their
+row / column-major layouts and the ne labels: right), a 2939x2499 Android Studio screenshot (the IDE,
+`MainActivity.kt` and "BUILD SUCCESSFUL" right, but files it could not read made up: at 300 image tokens, the
+configuration's limit as for Flash-Next, its small text is not legible). MTP drafts accepted on those three: 307 /
+576, 313 / 558, 329 / 513.
+
+Conversations on disk (`conversation_dir`, `local/qwen27-slots`, serve_qwen.py's `SAVE` / `RESTORE` after each
+reply): the file holds the tokens, match keys, M-RoPE positions, each DeltaNet layer's live state, the KV rows of
+every attention layer up to the conversation's length, the MTP rows not paired yet and the DFlash2 ring (199 MiB for
+1,394 tokens, saved in 105 ms). Checked on card 1: a conversation saved, the server restarted, the next turn resumed
+the 1,394 tokens from the file in 77 ms and read only its new ones (1,409 of 1,414 reused, the right answer).
 
 Template and thinking: the GGUF's own chat template (it differs from Flash-Next's only in merging several system /
 developer messages); the tokenizer is Flash-Next's (the same 248,320 tokens, compared one by one). The levels are the

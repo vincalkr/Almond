@@ -746,12 +746,12 @@ Built& trunk_graph(Model& m, Graphs& G, int n, int64_t pos0, int m_rows, int ksn
 // (catch-up windows, kind 1: afterwards pending <- hbuf column pidx), or the block's own last h (a draft step, r == 1,
 // kind 2).  The head reads row out_ids.  The catch-up graph of a decode round always has the same r (padded), so it
 // is built once and replayed.
-Built& mtp_graph(Model& m, Graphs& G, int r, int64_t pos0, bool step) {
+Built& mtp_graph(Model& m, Graphs& G, int r, int64_t pos0, bool step, int n_img = 0) {
     const Hp& h = m.hp;
     Layer& l = m.L[h.n_layer];
     const int n_kv = pad_kv(pos0 + r, m.o.max_ctx);
     char key[160];
-    std::snprintf(key, sizeof key, "m r%d kv%d s%d", r, n_kv, step);
+    std::snprintf(key, sizeof key, "m r%d kv%d s%d I%d", r, n_kv, step, n_img);
     const int kind = step ? 2 : 1;
     auto [bp, hit] = G.get(m, key, kind);
     Built& b = *bp;
@@ -770,6 +770,13 @@ Built& mtp_graph(Model& m, Graphs& G, int r, int64_t pos0, bool step) {
     in.pidx = ggml_new_tensor_1d(c, GGML_TYPE_I32, 1);
     for (ggml_tensor* t : {in.tok, in.pos, in.mask, in.kv_idx, in.out_ids, in.hidx, in.pidx}) ggml_set_input(t);
     ggml_tensor* e = ggml_get_rows(c, m.tok_embd, in.tok);
+    if (n_img > 0) {   // a picture's rows: the block reads them as the trunk did, not the <|image_pad|> embedding
+        in.img = ggml_new_tensor_2d(c, GGML_TYPE_F32, h.n_embd, n_img);
+        in.img_idx = ggml_new_tensor_1d(c, GGML_TYPE_I64, n_img);
+        ggml_set_input(in.img);
+        ggml_set_input(in.img_idx);
+        e = ggml_set_rows(c, e, in.img, in.img_idx);
+    }
     ggml_tensor* hr = step ? m.mtph : ggml_get_rows(c, m.hbuf, in.hidx);
     ggml_tensor* cur = ggml_concat(c, rms(c, e, l.enorm, h.eps), rms(c, hr, l.hnorm, h.eps), 0);
     cur = ggml_mul_mat(c, l.eh_proj, cur);
@@ -1118,9 +1125,22 @@ struct Engine {
     // An MTP catch-up window: k pairs (tok[i], hbuf column hcols[i]) at pos0.., padded to R rows; pending <- hbuf
     // column pcol.  Returns the draft after the last pair (argmax) and its probability.
     int mtp_catch(const int32_t* tok, int k, int64_t pos0, const std::vector<int32_t>& hcols, int pcol, int R,
-                  float* p) {
+                  float* p, const int32_t* img = nullptr) {   // img: per row, its image row in img_buf (-1 text)
         const auto tp = Clock::now();
-        Built& b = mtp_graph(m, G, R, pos0, false);
+        std::vector<int64_t> iidx;
+        std::vector<float> irows;
+        if (img)
+            for (int i = 0; i < k; ++i)
+                if (img[i] >= 0) {
+                    iidx.push_back(i);
+                    irows.insert(irows.end(), img_buf.begin() + (size_t) img[i] * m.hp.n_embd,
+                                 img_buf.begin() + (size_t) (img[i] + 1) * m.hp.n_embd);
+                }
+        Built& b = mtp_graph(m, G, R, pos0, false, (int) iidx.size());
+        if (!iidx.empty()) {
+            ggml_backend_tensor_set(b.in.img, irows.data(), 0, irows.size() * 4);
+            ggml_backend_tensor_set(b.in.img_idx, iidx.data(), 0, iidx.size() * 8);
+        }
         std::vector<int32_t> t(R, 0), hc(R, hcols.empty() ? 0 : hcols[0]);
         std::copy(tok, tok + k, t.begin());
         std::copy(hcols.begin(), hcols.end(), hc.begin());
@@ -1201,6 +1221,174 @@ struct Engine {
             out.push_back(cand[(size_t) i * K + pred]);
         }
         prof_add("dflash", tp);
+    }
+
+    // ---- Conversations on disk: SAVE <path> / RESTORE <path> between requests (serve_qwen.py's conversation_dir).
+    // The file holds what the engine holds for the conversation: its tokens, match keys, M-RoPE positions and next
+    // position, each DeltaNet layer's live SSM state and conv rows, the KV rows of every attention layer (the MTP
+    // block's too) up to its length, the MTP rows not paired yet, and the DFlash2 ring.  Written to <path>.tmp, then
+    // renamed; a restore checks the header and the file's size before it touches the device.
+    static constexpr uint32_t kSessMagic = 0x53353351;   // "Q35S"
+    struct SessHead {
+        uint32_t magic, version;
+        int32_t n_layer, n_embd, n_vocab, kv_type, mtp, df_layers, conv_ch, kv_dim;
+        int64_t ssm_d, len, next_p, kept_prev, mtp_ok;
+    };
+    std::string sess_err;
+    uint64_t sess_bytes(const SessHead& h) const {
+        uint64_t n = sizeof(SessHead) + (uint64_t) h.len * (4 + 8 + 12);
+        for (const Layer& l : m.L) {
+            if (l.conv) n += (uint64_t) h.ssm_d * 4 + (uint64_t) 3 * h.conv_ch * 4;
+            if (l.k_cache) n += 2 * (uint64_t) h.len * l.k_cache->nb[1];
+        }
+        n += (uint64_t) (h.kept_prev + 1) * h.n_embd * 4;
+        if (m.df) n += (uint64_t) DF_RING * 8 + (uint64_t) m.df->L.size() * 2 * DF_RING * m.df->kv_dim() * 2;
+        return n;
+    }
+    SessHead sess_head() const {
+        SessHead h{};
+        h.magic = kSessMagic;
+        h.version = 1;
+        h.n_layer = m.hp.n_layer;
+        h.n_embd = m.hp.n_embd;
+        h.n_vocab = m.hp.n_vocab;
+        h.kv_type = (int32_t) m.o.kv_type;
+        h.mtp = m.o.mtp > 0;
+        h.df_layers = m.df ? (int32_t) m.df->L.size() : 0;
+        h.conv_ch = m.hp.conv_ch();
+        h.kv_dim = m.hp.kv_dim();
+        h.ssm_d = m.hp.ssm_d();
+        h.len = (int64_t) cache.size();
+        h.next_p = next_p;
+        h.kept_prev = kept_prev;
+        h.mtp_ok = mtp_ok;
+        return h;
+    }
+    // moves `bytes` between a device tensor (from byte `off`) and the file through a 16 MiB stage
+    bool sess_io(FILE* f, ggml_tensor* t, size_t off, size_t bytes, bool save, uint64_t& done, uint64_t total) {
+        static std::vector<uint8_t> stage(16u << 20);
+        for (size_t at = 0; at < bytes;) {
+            const size_t n = std::min(stage.size(), bytes - at);
+            if (save) {
+                ggml_backend_tensor_get(t, stage.data(), off + at, n);
+                if (std::fwrite(stage.data(), 1, n, f) != n) return false;
+            } else {
+                if (std::fread(stage.data(), 1, n, f) != n) return false;
+                ggml_backend_tensor_set(t, stage.data(), off + at, n);
+            }
+            at += n;
+            done += n;
+            std::printf("SESSION %llu %llu\n", (unsigned long long) done, (unsigned long long) total);
+            std::fflush(stdout);
+        }
+        return true;
+    }
+    bool sess_host(FILE* f, void* p, size_t bytes, bool save, uint64_t& done) {
+        const bool ok = save ? std::fwrite(p, 1, bytes, f) == bytes : std::fread(p, 1, bytes, f) == bytes;
+        done += bytes;
+        return ok;
+    }
+    // the body after the header, both ways (the state goes to / comes from the live slot and conv rows)
+    bool sess_body(FILE* f, const SessHead& h, bool save, uint64_t total) {
+        uint64_t done = sizeof(SessHead);
+        const size_t L = (size_t) h.len;
+        if (!save) {
+            cache.resize(L);
+            ckey.resize(L);
+            rp.resize(L * 3);
+        }
+        if (!sess_host(f, cache.data(), L * 4, save, done) || !sess_host(f, ckey.data(), L * 8, save, done) ||
+            !sess_host(f, rp.data(), L * 12, save, done))
+            return false;
+        const int C = h.conv_ch;
+        const int slot = save ? m.ssm_slot : 0, coff = save ? m.conv_off : CONV_W - 3;
+        for (Layer& l : m.L) {
+            if (l.conv) {
+                if (!sess_io(f, l.ssm, (size_t) slot * h.ssm_d * 4, (size_t) h.ssm_d * 4, save, done, total) ||
+                    !sess_io(f, l.conv, (size_t) coff * C * 4, (size_t) 3 * C * 4, save, done, total))
+                    return false;
+            }
+            if (l.k_cache) {
+                if (!sess_io(f, l.k_cache, 0, L * l.k_cache->nb[1], save, done, total) ||
+                    !sess_io(f, l.v_cache, 0, L * l.v_cache->nb[1], save, done, total))
+                    return false;
+            }
+        }
+        for (int64_t c = 0; c < h.kept_prev; ++c)
+            if (!sess_io(f, m.hbuf, (size_t) c * m.hbuf->nb[1], (size_t) h.n_embd * 4, save, done, total)) return false;
+        if (!sess_io(f, m.hbuf, (size_t) m.pend_col() * m.hbuf->nb[1], (size_t) h.n_embd * 4, save, done, total))
+            return false;
+        if (m.df) {
+            if (!sess_host(f, m.df->ring_pos.data(), DF_RING * 8, save, done)) return false;
+            for (DfLayer& l : m.df->L)
+                if (!sess_io(f, l.k_ring, 0, ggml_nbytes(l.k_ring), save, done, total) ||
+                    !sess_io(f, l.v_ring, 0, ggml_nbytes(l.v_ring), save, done, total))
+                    return false;
+        }
+        return true;
+    }
+    // -> the answer line (SAVED / RESTORED <tokens> <bytes> <ms>, or SERR <kind> <published> <reason>)
+    std::string session(bool save, const std::string& path) {
+        const auto t0 = Clock::now();
+        char buf[512];
+        auto serr = [&](const char* kind, const std::string& why) {
+            std::snprintf(buf, sizeof buf, "SERR %s 0 %s", kind, why.c_str());
+            return std::string(buf);
+        };
+        if (path.empty()) return serr("invalid", "no path");
+        if (save) {
+            const SessHead h = sess_head();
+            const uint64_t total = sess_bytes(h);
+            const std::string tmp = path + ".tmp";
+            FILE* f = std::fopen(tmp.c_str(), "wb");
+            if (!f) return serr("storage", "cannot write " + tmp);
+            bool ok = std::fwrite(&h, sizeof h, 1, f) == 1 && sess_body(f, h, true, total);
+            ok = (std::fflush(f) == 0) && ok;
+            ok = (std::fclose(f) == 0) && ok;
+            if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) {
+                std::remove(tmp.c_str());
+                return serr("io", "writing " + path + " failed");
+            }
+            std::snprintf(buf, sizeof buf, "SAVED %lld %llu %.1f", (long long) h.len, (unsigned long long) total,
+                          ms_since(t0));
+            return buf;
+        }
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f) return serr("invalid", "cannot open " + path);
+        SessHead h{};
+        const SessHead me = sess_head();
+        if (std::fread(&h, sizeof h, 1, f) != 1 || h.magic != kSessMagic || h.version != 1 || h.n_layer != me.n_layer ||
+            h.n_embd != me.n_embd || h.n_vocab != me.n_vocab || h.kv_type != me.kv_type || h.mtp != me.mtp ||
+            h.df_layers != me.df_layers || h.conv_ch != me.conv_ch || h.kv_dim != me.kv_dim || h.ssm_d != me.ssm_d) {
+            std::fclose(f);
+            return serr("invalid", path + " was saved by another model or configuration");
+        }
+        if (h.len <= 0 || h.len + KSNAP + 1 >= m.o.max_ctx) {
+            std::fclose(f);
+            return serr("invalid", path + " holds more tokens than this context");
+        }
+        const uint64_t total = sess_bytes(h);
+        std::fseek(f, 0, SEEK_END);
+        const long size = std::ftell(f);
+        std::fseek(f, sizeof h, SEEK_SET);
+        if (size < 0 || (uint64_t) size != total) {
+            std::fclose(f);
+            return serr("invalid", path + " is not the size its header says");
+        }
+        const bool ok = sess_body(f, h, false, total);
+        std::fclose(f);
+        if (!ok) {   // the device state is partly written: start from nothing rather than from half a conversation
+            clear();
+            return serr("io", "reading " + path + " failed; the conversation was dropped");
+        }
+        m.ssm_slot = 0;
+        m.conv_off = CONV_W - 3;
+        next_p = (int32_t) h.next_p;
+        kept_prev = (int) h.kept_prev;
+        mtp_ok = h.mtp_ok != 0;
+        std::snprintf(buf, sizeof buf, "RESTORED %lld %llu %.1f", (long long) h.len, (unsigned long long) total,
+                      ms_since(t0));
+        return buf;
     }
 
     // Reset to an empty sequence.
@@ -1380,13 +1568,16 @@ struct Engine {
             if (use_mtp) {
                 // pairs (h_{p-1}, x_p) at position p for the window's tokens; the first window skips x_0
                 if (at == 0) {
-                    if (n > 1) mtp_catch(ids.data() + 1, n - 1, 1, cols(0, 0, n - 1), n - 1, n - 1, nullptr);
+                    if (n > 1)
+                        mtp_catch(ids.data() + 1, n - 1, 1, cols(0, 0, n - 1), n - 1, n - 1, nullptr,
+                                  rq->img_row.data() + 1);
                     else {
                         // a one-token prompt: pending <- h_0 through a 1-row pass that writes nothing useful
                         mtp_catch(ids.data(), 1, 0, cols(0, 0, 1), 0, 1, nullptr);
                     }
                 } else if (mtp_ok) {
-                    mtp_catch(ids.data() + at, n, (int64_t) at, cols(1, 0, n - 1), n - 1, n, nullptr);
+                    mtp_catch(ids.data() + at, n, (int64_t) at, cols(1, 0, n - 1), n - 1, n, nullptr,
+                              rq->img_row.data() + at);
                 }
                 mtp_ok = true;
             }
@@ -1671,6 +1862,12 @@ int serve(Engine& E) {
     std::string line;
     while (lq.pop(line)) {
         if (line.empty()) continue;
+        if (line.rfind("SAVE ", 0) == 0 || line.rfind("RESTORE ", 0) == 0) {
+            const bool save = line[0] == 'S';
+            std::printf("%s\n", E.session(save, line.substr(save ? 5 : 8)).c_str());
+            std::fflush(stdout);
+            continue;
+        }
         if (line == "CONVCLEAR") {
             E.clear();
             std::printf("CLEARED\n");

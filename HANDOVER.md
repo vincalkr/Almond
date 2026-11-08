@@ -57,8 +57,8 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 
 ## Open
 
-- **Qwen3.8-27B:** images work (on the CPU encoder, checked on test pictures only, not on photos or documents); no conversations on disk
-  (`SAVE` / `RESTORE`; the state checkpoints are in RAM only, four at a time, lost on a restart). The 4-token verify window costs 1.4 decode tokens (ggml's MMVQ is
+- **Qwen3.8-27B:** images (CPU encoder, 300 image tokens: a large screenshot's small text is not legible, as on
+  Flash-Next) and conversations on disk work; measured on a few pictures and one restart, not in long agent sessions. The 4-token verify window costs 1.4 decode tokens (ggml's MMVQ is
   latency-bound on RDNA3; table, decode-once and unroll changes did not help); past ~100K the q8_0 KV's f16
   conversion in the verify window halves the decode. Its files are not in `local/fetch.sh`.
 
