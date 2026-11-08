@@ -126,6 +126,14 @@ instead.
 ./almond --session-log                     # the servers it starts log every request and answer to local/session-log/<date>.jsonl
 ```
 
+- `--agent` gives the model tools to read, write and edit files and run commands in the working directory (each
+  write, edit and command asks first; `--yes` does not); `--agent --web` adds `web_search` and `web_fetch` (each asks
+  before it runs too). The search goes to a SearXNG instance when `ALMOND_SEARXNG_URL` is set (its JSON API on;
+  private, no key), to the Brave Search API with `BRAVE_API_KEY`, else to DuckDuckGo's HTML page (no key; it can slow
+  down or refuse a client that searches a lot); `web_fetch` reads a page as text. Pages are given to the model as
+  data, never as instructions. Checked with Qwen3.8-27B: "what is llama.cpp's latest release and what changes"
+  searched, read the release page and the compare view, and answered from them.
+
 - thinking: each model's own levels, from the client's words. GLM-5.3-Flash: low / high / max (its default; an
   Anthropic budget under 2K low, under 8K high, else max). Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium /
   xhigh (its default; high and max are xhigh). DeepSeek-V4.1: off / low (50) /
