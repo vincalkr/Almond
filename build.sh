@@ -28,7 +28,8 @@ fi
 if [ ! -f "$B/ggml/src/libggml-base.a" ] || [ -n "${REBUILD_GGML:-}" ]; then
     echo "=== ggml (third_party/llama.cpp/ggml -> third_party/llama.cpp/build-hip)"
     cmake -S third_party/ggml-build -B third_party/llama.cpp/build-hip "${COMMON[@]}" \
-        -DGGML_HIP=ON -DGGML_HIP_GRAPHS=ON -DGGML_CUDA_FA=ON -DGGML_NATIVE=ON -DGGML_OPENMP=ON -DBUILD_SHARED_LIBS=OFF
+        -DGGML_HIP=ON -DGGML_HIP_GRAPHS=ON -DGGML_CUDA_FA=ON -DGGML_NATIVE=ON -DGGML_OPENMP=ON -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON   # static archives linked into PIE executables (Ubuntu's default, issue #4)
 fi
 cmake --build third_party/llama.cpp/build-hip -j "$JOBS"
 

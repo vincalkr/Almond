@@ -27,7 +27,7 @@ I32 = 26   # GGML_TYPE_I32
 
 def ggml_type_names():
     """ggml's type enum as id -> lowercase name, read from the vendored header."""
-    h = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..",
+    h = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
                      "third_party", "llama.cpp", "ggml", "include", "ggml.h")
     body = open(h).read().split("enum ggml_type {", 1)[1].split("};", 1)[0]
     return {int(m.group(2)): m.group(1)[len("GGML_TYPE_"):].lower()
