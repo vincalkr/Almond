@@ -398,6 +398,15 @@ IQ3_S / IQ3_XXS / IQ2_S / IQ4_XS blocks once for all columns, or unrolling its K
 40.7 ms; rocprofv3: the kernels read at ~350 GB/s at 4 columns, ~470 GB/s at one, latency-bound), so ggml is
 unchanged.
 
+Conversations: the engine keeps up to four checkpoints of the recurrent state in host RAM (the DeltaNet SSM states
+and conv rows and the MTP pending row, ~150 MB each), one in front of each prompt's last `<|im_start|>` and one at
+its end; the KV caches, the MTP block's KV and the DFlash2 ring are indexed by position and stay right for any prefix.
+A request resumes from the cache when it continues it, else from the longest checkpoint that is a prefix of it.
+Without them, every agent turn whose prompt rendered the previous answer again (its thinking dropped) was read from
+zero: in an agent session through the CLI, 13,539 and 14,514-token prompts read again in 12.5-13.9 s. With them
+(card 1, a 4-turn conversation, thinking low, 400 tokens a turn): turn 0 2,159 tokens read in 2.57 s, turns 1-3
+reused 2,559 / 2,985 / 3,411 of 2,585 / 3,011 / 3,437 and read the rest in 0.26-0.30 s.
+
 Long context (`--bench 256` after a prompt of the docs' tokens repeated, q8_0 KV, context 262144):
 
 | cards | prompt | prompt read | decode, MTP 3 |

@@ -1162,15 +1162,98 @@ struct Engine {
         int64_t reused = 0;
         double ms = 0;
     };
+    // Checkpoints of the recurrent state in host RAM: the DeltaNet layers' SSM state and conv rows and the MTP
+    // block's pending row after a prefix of a prompt.  Everything else the engine keeps (the KV caches, the MTP
+    // block's KV, the DFlash2 ring) is indexed by position, so it is still right for any prefix of what was read.  A
+    // chat client resends the conversation with the last answer rendered again (its thinking dropped), so the new
+    // prompt leaves the cached tokens inside the last assistant turn: the checkpoint in front of the prompt's last
+    // <|im_start|> is the point the next turn shares.
+    struct Ckpt {
+        std::vector<int32_t> tok;
+        std::vector<float> ssm, conv, pend;
+        uint64_t used = 0;
+    };
+    static constexpr size_t kCkMax = 4;   // ~150 MB each
+    static constexpr int32_t kImStart = 248045;
+    std::vector<Ckpt> cks;
+    uint64_t ck_tick = 0;
+    // after a trunk window (state in slot 0, the conv window's tail) and its MTP pairs
+    void save_ck(const int32_t* tok, size_t n) {
+        for (Ckpt& c : cks)
+            if (c.tok.size() == n && std::equal(c.tok.begin(), c.tok.end(), tok)) { c.used = ++ck_tick; return; }
+        const auto tp = Clock::now();
+        const int C = m.hp.conv_ch();
+        const size_t D = (size_t) m.hp.ssm_d();
+        Ckpt* c;
+        if (cks.size() < kCkMax) c = &cks.emplace_back();
+        else c = &*std::min_element(cks.begin(), cks.end(), [](const Ckpt& a, const Ckpt& b) { return a.used < b.used; });
+        c->tok.assign(tok, tok + n);
+        c->used = ++ck_tick;
+        int nl = 0;
+        for (Layer& l : m.L) nl += l.conv ? 1 : 0;
+        c->ssm.resize(D * nl);
+        c->conv.resize((size_t) 3 * C * nl);
+        int i = 0;
+        for (Layer& l : m.L) {
+            if (!l.conv) continue;
+            ggml_backend_tensor_get(l.ssm, c->ssm.data() + D * i, 0, D * 4);
+            ggml_backend_tensor_get(l.conv, c->conv.data() + (size_t) 3 * C * i, (size_t) (CONV_W - 3) * C * 4,
+                                    (size_t) 3 * C * 4);
+            ++i;
+        }
+        c->pend.clear();
+        if (m.o.mtp > 0) {
+            c->pend.resize(m.hp.n_embd);
+            ggml_backend_tensor_get(m.hbuf, c->pend.data(), (size_t) m.pend_col() * m.hbuf->nb[1], (size_t) m.hp.n_embd * 4);
+        }
+        prof_add("ckpt_save", tp);
+    }
+    void restore_ck(Ckpt& c) {
+        const int C = m.hp.conv_ch();
+        const size_t D = (size_t) m.hp.ssm_d();
+        int i = 0;
+        for (Layer& l : m.L) {
+            if (!l.conv) continue;
+            ggml_backend_tensor_set(l.ssm, c.ssm.data() + D * i, 0, D * 4);
+            ggml_backend_tensor_set(l.conv, c.conv.data() + (size_t) 3 * C * i, (size_t) (CONV_W - 3) * C * 4,
+                                    (size_t) 3 * C * 4);
+            ++i;
+        }
+        if (!c.pend.empty())
+            ggml_backend_tensor_set(m.hbuf, c.pend.data(), (size_t) m.pend_col() * m.hbuf->nb[1], (size_t) m.hp.n_embd * 4);
+        m.ssm_slot = 0;
+        m.conv_off = CONV_W - 3;
+        cache = c.tok;
+        mtp_ok = m.o.mtp > 0 && !c.pend.empty();
+        kept_prev = 0;
+        c.used = ++ck_tick;
+    }
+
     PromptOut prompt(const std::vector<int32_t>& ids, bool greedy, std::vector<float>& last_logits, int32_t& last_am,
                      bool report) {
         PromptOut po;
         const auto t0 = Clock::now();
-        // reuse: the cache is a prefix of the prompt (the recurrent state cannot go back further)
+        // reuse: the cache when it is a prefix of the prompt, or the longest checkpoint that is (the recurrent state
+        // cannot go back by itself)
         size_t common = 0;
         if (cache.size() < ids.size() && std::equal(cache.begin(), cache.end(), ids.begin())) common = cache.size();
-        if (common == 0 && !cache.empty()) clear();
+        Ckpt* best = nullptr;
+        for (Ckpt& c : cks)
+            if (c.tok.size() > common && c.tok.size() < ids.size() && std::equal(c.tok.begin(), c.tok.end(), ids.begin()) &&
+                (!best || c.tok.size() > best->tok.size()))
+                best = &c;
+        if (best) {
+            restore_ck(*best);
+            common = cache.size();
+        } else if (common == 0 && !cache.empty()) {
+            clear();
+        }
         po.reused = (int64_t) common;
+        // where this prompt's checkpoint goes: in front of its last <|im_start|> (the turn the next request renders
+        // again), when that is past what is reused
+        size_t ck_at = 0;
+        for (size_t i = ids.size(); i-- > common + 1;)
+            if (ids[i] == kImStart) { ck_at = i; break; }
         size_t at = cache.size();
         const bool use_mtp = m.o.mtp > 0;
         if (use_mtp && at > 0 && mtp_ok && kept_prev > 0) {
@@ -1186,7 +1269,8 @@ struct Engine {
             const int64_t depth = pad_kv((int64_t) at + m.o.ubatch, m.o.max_ctx);
             int win = m.o.ubatch;
             if (depth > 65536) win = std::max(256, (int) ((int64_t) m.o.ubatch * 65536 / depth) / 256 * 256);
-            const int n = (int) std::min<size_t>(win, ids.size() - at);
+            int n = (int) std::min<size_t>(win, ids.size() - at);
+            if (ck_at > at && ck_at < at + n) n = (int) (ck_at - at);   // a window ends at the checkpoint
             const bool lastw = at + n == ids.size();
             std::vector<int32_t> am;
             trunk(ids.data() + at, n, 1, 1, lastw ? &am : nullptr, lastw && !greedy ? &last_logits : nullptr);
@@ -1205,6 +1289,7 @@ struct Engine {
                 mtp_ok = true;
             }
             at += n;
+            if (at == ck_at || at == ids.size()) save_ck(ids.data(), at);
             if (report) {
                 const double ms = ms_since(t0);
                 std::printf("PP %lld %lld %.0f %.1f\n", (long long) at, (long long) total, ms,
@@ -1564,7 +1649,6 @@ int bench(Engine& E) {
                     "%lld/%lld\n",
                     ids.size(), po.ms, ids.size() / (po.ms / 1000), (long long) gr.produced, gr.ms,
                     (gr.produced - 1) / (gr.ms / 1000), (long long) E.drafts_accepted, (long long) E.drafts_offered);
-        E.prof_print();
         if (rep == 0) {
             std::printf("ids:");
             for (size_t i = 0; i < std::min<size_t>(outv.size(), 48); ++i) std::printf(" %d", outv[i]);

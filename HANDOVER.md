@@ -58,8 +58,7 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 ## Open
 
 - **Qwen3.8-27B:** no images yet (the mmproj is in `models/qwen38-27b`, `GENI` is refused), no conversations on disk
-  (`SAVE` / `RESTORE`), and a conversation resumes only when the new prompt continues the cached tokens exactly (no
-  DeltaNet checkpoint inside the prompt). The 4-token verify window costs 1.4 decode tokens (ggml's MMVQ is
+  (`SAVE` / `RESTORE`; the state checkpoints are in RAM only, four at a time, lost on a restart). The 4-token verify window costs 1.4 decode tokens (ggml's MMVQ is
   latency-bound on RDNA3; table, decode-once and unroll changes did not help); past ~100K the q8_0 KV's f16
   conversion in the verify window halves the decode. Its files are not in `local/fetch.sh`.
 
