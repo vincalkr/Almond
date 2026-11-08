@@ -26,6 +26,9 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   `local/fetch-model.sh`) or the pack's iq4_nl table (110.6 GB, `local/fetch-rco-1017.sh`), which the engine falls
   back to; both measured (docs/ds4/V41_EXACT_FAST.md).
 - GLM: `local/glm-local.json` (`local/glm-local-vision.json` with its encoder in `models/glm53-vision`).
+- Qwen3.8-27B (dense): `local/qwen27-local.json` (`./almond serve --model qwen27`, `src/qwen35`, `--qwen35`: one
+  card, 192K, q8_0 KV, MTP 3); `local/qwen27-local-256k.json` on two cards; `local/qwen27-local-dflash.json` with
+  z-lab's DFlash2 drafter. Files in `models/qwen38-27b` (docs/MODELS.md, "Qwen3.8-27B").
 - Qwen: `local/qwen-local.json` on card 0 (`local/qwen-local-vision.json` with its encoder,
   `models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf`, read on the CPU): the GGUF's two shards in
   `models/qwen38-iq3s`, its pack in `models/qwen38-iq3s-pack` (`tools/qwen/iq_pack.py`), the MTP block in

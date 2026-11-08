@@ -2,7 +2,8 @@
   "models": [
     {"model": "glm"},
     {"model": "ds41"},
-    {"model": "qwen"}
+    {"model": "qwen"},
+    {"model": "qwen27"}
   ],
   "default": "glm"
 }

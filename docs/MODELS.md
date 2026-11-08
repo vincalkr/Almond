@@ -346,3 +346,64 @@ image tokens), the configuration `local/qwen-local-vision.json`; a 357-token req
 
 Not measured yet: perplexity (the native path dumps no prompt logits and the engine has no `LOGP`), long-context
 copying, an agent session.
+
+## Qwen3.8-27B (dense, GSQ-RCO IQ3_S, `--qwen35`, 2026-11-07)
+
+The dense 27B (GGUF architecture `qwen35`: 64 layers, three Gated DeltaNet layers to one gated full-attention layer,
+a dense SwiGLU FFN of 17408, its nextn block in the same file) runs on its own path, `src/qwen35/qwen35.cpp`: ggml
+graphs on the vendored ggml (HIP), `./almond serve --model qwen27` (`local/qwen27-local.json`; the server shim is
+Flash-Next's `serve_qwen.py`, the tokenizer is Flash-Next's with the 27B's own chat template in
+`models/qwen38-27b/tokenizer`). Model files: `models/qwen38-27b/` (the ISTA-DASLab IQ3_S + MTP GGUF, 11.28 GiB, and
+optionally z-lab's DFlash2 Q8_0 drafter, 1.92 GiB). Text only for now (`GENI` is refused).
+
+How it keeps state: each DeltaNet layer keeps 8 snapshots of its SSM state (`ggml_gated_delta_net` with K = 8) and a
+conv window of 11 rows; a verify window of n tokens of which a are kept leaves the state in snapshot n-a, read by the
+next graph through `get_rows` with that index as an input, so a rejected draft costs no copy and the graphs stay the
+same shape. One live graph per kind (trunk, MTP catch-up, MTP step, DFlash2 block), each with its own scheduler; a
+graph whose shape is unchanged is replayed with new inputs.
+
+Correctness: PPL on the repository's docs (`docs/*.md docs/ds4/*.md`, llama-tokenize, 16 chunks of 2048, the second
+half of each scored) 6.1552 with an f16 KV, llama.cpp's `llama-perplexity` on the same text and file 6.1542. Greedy
+output with MTP or DFlash2 is the same token for token as without (512 tokens checked).
+
+Speed, card 0, greedy, `--bench 512`, prompts: Python ISO-8601 parser with tests / Gated DeltaNet vs softmax attention
+/ a 400-word story in Italian, thinking off. llama.cpp 669204ee2 (ROCm, same GGUF, `llama-server`, f16 KV) for
+comparison:
+
+| | code | technical | story | mean (harmonic) |
+|---|---|---|---|---|
+| no drafts, q8_0 KV | 42.2 | | | |
+| MTP 3 (default), q8_0 KV | 96.1 | 73.0 | 57.6 | 73.3 |
+| MTP 3, f16 KV | 99.6 | 73.9 | 56.6 | 73.5 |
+| DFlash2, 5 drafts (`local/qwen27-local-dflash.json`) | 105.4 | 81.3 | 44.5 | 67.6 |
+| DFlash2, 7 drafts | 106.7 | 72.9 | 36.9 | 59.6 |
+| llama.cpp, no drafts | 43.7 | | | |
+| llama.cpp, MTP 3 | 102.8 | 77.2 | 58.7 | 75.5 |
+| llama.cpp, DFlash2 7 | 116.2 | 70.0 | 39.4 | 62.2 |
+
+MTP 3 stays the default: DFlash2 is ahead on code and technical prose and far behind on free prose, where its
+8-token verify windows (47.8 ms against 23.8 ms for one token) are mostly rejected. A draft probability floor
+(`--spec-min-p`) measured worse at every value tried (0.3 / 0.5 / 0.7 with 3, 4 and 5 drafts): a shorter window is
+another graph shape to build. The q8_0 KV (the default) costs nothing measurable against f16 here. Where the time
+goes in an MTP round (code prompt): the 4-token verify window 32.7 ms, the MTP catch-up 1.9 ms, two draft steps 1.6 ms
+each. The verify window is ggml's MMVQ at 4 columns; changing its RDNA3 table (warps / rows per block), decoding the
+IQ3_S / IQ3_XXS / IQ2_S / IQ4_XS blocks once for all columns, or unrolling its K loop did not make it faster (32.3 -
+40.7 ms; rocprofv3: the kernels read at ~350 GB/s at 4 columns, ~470 GB/s at one, latency-bound), so ggml is
+unchanged.
+
+Long context (`--bench 256` after a prompt of the docs' tokens repeated, q8_0 KV, context 262144):
+
+| cards | prompt | prompt read | decode, MTP 3 |
+|---|---|---|---|
+| 1 | 4K | 1000 tok/s | 67 tok/s |
+| 1 | 64K | 717 tok/s | 66 tok/s |
+| 1 | 200K | 444 tok/s | 36.6 tok/s |
+| 1 | 258K | out of memory (the MTP window's attention scratch) | |
+| 2 | 4K | 967 tok/s | 49 tok/s |
+| 2 | 258K | 352 tok/s | 25.7 tok/s |
+
+One card holds the weights (11.28 GiB) and a 256K q8_0 KV with the DeltaNet state (10.20 GiB), but not the compute
+buffers of a prompt window that deep, so the default configuration is one card at 196608 (192K) and
+`local/qwen27-local-256k.json` splits the layers over two cards for the full 262144 (slower at any length: every
+token crosses both cards). Past ~100K the decode slows down: with a q8_0 KV the verify window's attention converts the
+cache it reads to f16.

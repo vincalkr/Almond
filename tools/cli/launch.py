@@ -11,6 +11,8 @@
                                  both cards: local/glm-local.json, tools/glm/serve/serve_glm.py
   ./almond serve --model qwen    Qwen3.8-Flash-Next (GSQ-RCO IQ3_S) on Almond's engine (src/qwen, --qwen):
                                  local/qwen-local.json, tools/qwen/serve/serve_qwen.py
+  ./almond serve --model qwen27  the dense Qwen3.8-27B (GSQ-RCO IQ3_S + its MTP block) on src/qwen35 (--qwen35):
+                                 local/qwen27-local.json, tools/qwen/serve/serve_qwen.py
   ./almond serve --ctx 1m        the context window (tokens, or 128k / 256k / 1m), in a copy of the configuration
                                  (ALMOND_CTX the same; the router's models inherit it)
 
@@ -33,7 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PT = "/usr/local/sbin/almond-power-tune"
 SHIMS = {"ds41": "tools/v41/serve/serve_ds41.py", "glm": "tools/glm/serve/serve_glm.py",
-         "qwen": "tools/qwen/serve/serve_qwen.py"}
+         "qwen": "tools/qwen/serve/serve_qwen.py", "qwen27": "tools/qwen/serve/serve_qwen.py"}
 SERVERS = r"tools/(v41/serve/serve_ds41|glm/serve/serve_glm|qwen/serve/serve_qwen|router/almond_router)[.]py"
 
 
@@ -90,10 +92,10 @@ def pick_config(o: dict) -> str:
     """The configuration run for --model / --gpu when --config does not name one."""
     m = o["model"]
     if m not in SHIMS:
-        fail(f"--model takes ds41, glm or qwen (got '{m}')")
+        fail(f"--model takes ds41, glm, qwen or qwen27 (got '{m}')")
     if m != "ds41" and not os.access(ROOT / "build-hip-fused/almond-engine", os.X_OK):
         fail("build-hip-fused/almond-engine is not built (./build.sh builds it)")
-    if m != "ds41":
+    if m not in ("ds41", "qwen27"):   # the dense 27B has no experts
         # the expert profile the engine starts its VRAM pools from and saves what it learns into: its shipped one
         # until this machine has its own
         prof = ROOT / f"local/{m}-expert-profile.bin"
@@ -107,6 +109,9 @@ def pick_config(o: dict) -> str:
         # with the image encoder (local/fetch.sh glm-vision) and almond-vision built: images on, loaded per picture
         on = vision and whole(ROOT / "models/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf")
         return str(ROOT / ("local/glm-local-vision.json" if on else "local/glm-local.json"))
+    if m == "qwen27":
+        # the dense Qwen3.8-27B on src/qwen35 (--qwen35): one card, text only for now
+        return str(ROOT / "local/qwen27-local.json")
     if m == "qwen":
         # with the image encoder (local/fetch.sh qwen-vision): images on, read on the CPU (the engine lends the
         # encoder no VRAM; its cards hold the expert cache)
@@ -150,7 +155,7 @@ def with_ctx(cfg: str, ctx: str) -> str:
         fail(str(e))
     c = json.load(open(cfg))
     a = c["args"]
-    flag = "--max-context" if "--glm-pack" in a or "--qwen" in a else "--ctx"
+    flag = "--max-context" if "--glm-pack" in a or "--qwen" in a or "--qwen35" in a else "--ctx"
     if flag in a:
         a[a.index(flag) + 1] = ctx
     else:
