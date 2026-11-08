@@ -722,7 +722,7 @@ class Chat:
         self.ctx_used = 0
         self.bar = Bar(api)
         self.web = not a.no_web
-        self.agent = Agent(a.yes, a.web) if a.agent else None
+        self.agent = Agent(a.yes, self.web) if a.agent else None
         self.yes, self.stopped = a.yes, False
         self.name = None                        # the conversation's name in local/chats/ once saved
         self.prefill = ""                       # /edit: the text the next prompt starts with
