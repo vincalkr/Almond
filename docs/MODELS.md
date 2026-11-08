@@ -354,7 +354,19 @@ a dense SwiGLU FFN of 17408, its nextn block in the same file) runs on its own p
 graphs on the vendored ggml (HIP), `./almond serve --model qwen27` (`local/qwen27-local.json`; the server shim is
 Flash-Next's `serve_qwen.py`, the tokenizer is Flash-Next's with the 27B's own chat template in
 `models/qwen38-27b/tokenizer`). Model files: `models/qwen38-27b/` (the ISTA-DASLab IQ3_S + MTP GGUF, 11.28 GiB, and
-optionally z-lab's DFlash2 Q8_0 drafter, 1.92 GiB). Text only for now (`GENI` is refused).
+optionally z-lab's DFlash2 Q8_0 drafter, 1.92 GiB, and the BF16 mmproj, 0.87 GiB).
+
+Images (`local/qwen27-local-vision.json`, picked by `./almond serve --model qwen27` when the mmproj is there and
+`almond-vision` is built): the encoder runs on the CPU (`almond-vision`, 12 threads, at most 300 image tokens), the
+engine takes `GENI` with its `SVE1` records: each picture's rows replace its run of `<|image_pad|>` tokens in the
+trunk's embeddings, with mtmd's M-RoPE positions (t = p, h = p + y, w = p + x; the text after it at p + max(nx, ny));
+each image row is matched on its picture's key (the server's `img_keys=`) and index, so a different picture of the
+same size is never taken for a cached one. The MTP block reads the `<|image_pad|>` token's embedding on those rows
+(drafts only). Checked on card 1 with a 640x420 test picture (a red square, a blue circle, "ALMOND 27B"; 260 image
+tokens, a 20x13 grid): both shapes, their colours and places and the text described right, in English and Italian
+(5.7 s with the encode, 1.1 s with the picture already encoded); a second turn of that conversation reused 293 of
+316 tokens; another picture of the same size (a green triangle, an orange square) reused none and was described
+right.
 
 Template and thinking: the GGUF's own chat template (it differs from Flash-Next's only in merging several system /
 developer messages); the tokenizer is Flash-Next's (the same 248,320 tokens, compared one by one). The levels are the

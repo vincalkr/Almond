@@ -498,6 +498,7 @@ struct Inputs {
     ggml_tensor *slot = nullptr, *cidx = nullptr;   // DeltaNet: the SSM slot [1] and the conv rows [3] to start from
     ggml_tensor *hidx = nullptr, *pidx = nullptr;   // MTP: the hbuf columns of its h rows [r], the next pending [1]
     ggml_tensor *ring_idx = nullptr, *anchor = nullptr;   // DFlash2: ring cells of the rows [n], the anchor id x top_k
+    ggml_tensor *img = nullptr, *img_idx = nullptr;        // images: the encoder's rows [E, ni] and the rows they replace
 };
 
 // One gated full-attention block (trunk or nextn).  x: [E, n] normed.  Writes K/V rows at kv_idx, attends over the
@@ -669,13 +670,14 @@ void head_outputs(ggml_context* c, ggml_cgraph* gf, Built& b, ggml_tensor* logit
 
 // The trunk over n tokens at positions pos0..pos0+n-1.  The h_nextn rows go to hbuf[0..n); the head runs on m_rows
 // rows: the last one (m_rows == 1) or all n (m_rows == n).
-Built& trunk_graph(Model& m, Graphs& G, int n, int64_t pos0, int m_rows, int ksnap, bool want_logits, bool want_ppl) {
+Built& trunk_graph(Model& m, Graphs& G, int n, int64_t pos0, int m_rows, int ksnap, bool want_logits, bool want_ppl,
+                   int n_img = 0) {
     const Hp& h = m.hp;
     const int n_kv = pad_kv(pos0 + n, m.o.max_ctx);
     char key[160];
     const bool inject = m.df && !want_ppl;
-    std::snprintf(key, sizeof key, "t n%d kv%d m%d k%d L%d P%d D%d", n, n_kv, m_rows, ksnap, want_logits, want_ppl,
-                  inject);
+    std::snprintf(key, sizeof key, "t n%d kv%d m%d k%d L%d P%d D%d I%d", n, n_kv, m_rows, ksnap, want_logits, want_ppl,
+                  inject, n_img);
     auto [bp, hit] = G.get(m, key, 0);
     Built& b = *bp;
     if (hit) return b;
@@ -698,6 +700,13 @@ Built& trunk_graph(Model& m, Graphs& G, int n, int64_t pos0, int m_rows, int ksn
     }
     std::vector<ggml_tensor*> feats(inject ? m.df->target_layers.size() : 0, nullptr);
     ggml_tensor* x = ggml_get_rows(c, m.tok_embd, in.tok);
+    if (n_img > 0) {   // the picture's rows take the place of their <|image_pad|> tokens' embeddings
+        in.img = ggml_new_tensor_2d(c, GGML_TYPE_F32, h.n_embd, n_img);
+        in.img_idx = ggml_new_tensor_1d(c, GGML_TYPE_I64, n_img);
+        ggml_set_input(in.img);
+        ggml_set_input(in.img_idx);
+        x = ggml_set_rows(c, x, in.img, in.img_idx);
+    }
     for (int il = 0; il < h.n_layer; ++il) {
         Layer& l = m.L[il];
         for (size_t k = 0; k < feats.size(); ++k)
@@ -888,8 +897,9 @@ Built& df_graph(Model& m, Graphs& G, int B) {
 
 // Rows from n_real on are padding: their K/V go to the context's last cell (never attended: the usable context ends
 // before it) and their outputs are not read.
+// rp3: each row's M-RoPE position (t, h, w); null: the cache index of the row (text from position 0).
 void set_inputs(const Inputs& in, const int32_t* tok, int n, int64_t pos0, int n_kv, int m_rows, int slot = 0,
-                int conv_off = CONV_W - 3, int n_real = -1, int64_t scratch = 0) {
+                int conv_off = CONV_W - 3, int n_real = -1, int64_t scratch = 0, const int32_t* rp3 = nullptr) {
     ggml_backend_tensor_set(in.tok, tok, 0, (size_t) n * 4);
     if (in.slot) {
         const int32_t sl[1] = {slot}, ci[3] = {conv_off, conv_off + 1, conv_off + 2};
@@ -899,7 +909,13 @@ void set_inputs(const Inputs& in, const int32_t* tok, int n, int64_t pos0, int n
     std::vector<int32_t> pos((size_t) n * 4);
     std::vector<int64_t> idx(n);
     for (int i = 0; i < n; ++i) {
-        pos[i] = pos[n + i] = pos[2 * n + i] = (int32_t) (pos0 + i);
+        if (rp3) {
+            pos[i] = rp3[3 * i];
+            pos[n + i] = rp3[3 * i + 1];
+            pos[2 * n + i] = rp3[3 * i + 2];
+        } else {
+            pos[i] = pos[n + i] = pos[2 * n + i] = (int32_t) (pos0 + i);
+        }
         pos[3 * n + i] = 0;
         idx[i] = (n_real >= 0 && i >= n_real) ? scratch : pos0 + i;
     }
@@ -993,8 +1009,23 @@ struct Engine {
     Model m;
     Graphs G;                           // the trunk's and the MTP block's graphs, by shape
     Sampler smp;
-    std::vector<int32_t> cache;         // the tokens the trunk's state holds (positions 0..size-1)
-    std::vector<int32_t> ck_tokens;     // the prompt whose end the checkpoint holds
+    std::vector<int32_t> cache;         // the tokens the trunk's state holds (cache cells 0..size-1)
+    std::vector<int64_t> ckey;          // what a prompt is matched on: the token id, or an image row's key
+    std::vector<int32_t> rp;            // each cached token's M-RoPE position (t, h, w)
+    int32_t next_p = 0;                 // the position of the next text token (after a picture: p + max(nx, ny))
+    // the request being read: its image rows and, per prompt token, the row it takes (-1: text)
+    std::vector<float> img_buf;
+    std::vector<int32_t> img_row;
+    // M-RoPE positions of cache indices i0..i0+n-1: cached ones as kept, later ones text after next_p
+    std::vector<int32_t> rope3(int64_t i0, int n) const {
+        std::vector<int32_t> v((size_t) n * 3);
+        for (int i = 0; i < n; ++i) {
+            const int64_t idx = i0 + i;
+            if (idx < (int64_t) cache.size()) std::copy(rp.begin() + idx * 3, rp.begin() + idx * 3 + 3, v.begin() + i * 3);
+            else v[i * 3] = v[i * 3 + 1] = v[i * 3 + 2] = next_p + (int32_t) (idx - (int64_t) cache.size());
+        }
+        return v;
+    }
     bool mtp_ok = false;                // the MTP KV and pending row follow `cache`
     int kept_prev = 0;                  // the last trunk window's rows whose MTP pairs are not made yet (hbuf 0..)
     std::atomic<bool>* stop = nullptr;
@@ -1016,13 +1047,32 @@ struct Engine {
 
     // Runs the trunk over tok[0..n) at the end of the cache.  m_rows: 1 or n.  Returns argmax rows; logits to `lg`
     // when asked.
+    // The prompt's own rows (keys, positions, image rows) come from `rq_*` when it reads a prompt window; generated
+    // tokens are text at next_p...
+    const int64_t* rq_key = nullptr;
+    const int32_t* rq_rp = nullptr;
+    const int32_t* rq_img = nullptr;   // per row: the image row index into img_buf, -1 text
     void trunk(const int32_t* tok, int n, int m_rows, int ksnap, std::vector<int32_t>* am, std::vector<float>* lg,
                float* pmax = nullptr) {
         const auto tp = Clock::now();
         const int64_t pos0 = (int64_t) cache.size();
         if (pos0 + n > m.o.max_ctx - 1) die("the context is full (" + std::to_string(m.o.max_ctx) + " tokens)");
-        Built& b = trunk_graph(m, G, n, pos0, m_rows, ksnap, lg != nullptr, false);
-        set_inputs(b.in, tok, n, pos0, pad_kv(pos0 + n, m.o.max_ctx), m_rows, m.ssm_slot, m.conv_off);
+        std::vector<int32_t> r3 = rq_rp ? std::vector<int32_t>(rq_rp, rq_rp + 3 * n) : rope3(pos0, n);
+        std::vector<int64_t> iidx;
+        std::vector<float> irows;
+        if (rq_img)
+            for (int i = 0; i < n; ++i)
+                if (rq_img[i] >= 0) {
+                    iidx.push_back(i);
+                    irows.insert(irows.end(), img_buf.begin() + (size_t) rq_img[i] * m.hp.n_embd,
+                                 img_buf.begin() + (size_t) (rq_img[i] + 1) * m.hp.n_embd);
+                }
+        Built& b = trunk_graph(m, G, n, pos0, m_rows, ksnap, lg != nullptr, false, (int) iidx.size());
+        set_inputs(b.in, tok, n, pos0, pad_kv(pos0 + n, m.o.max_ctx), m_rows, m.ssm_slot, m.conv_off, -1, 0, r3.data());
+        if (!iidx.empty()) {
+            ggml_backend_tensor_set(b.in.img, irows.data(), 0, irows.size() * 4);
+            ggml_backend_tensor_set(b.in.img_idx, iidx.data(), 0, iidx.size() * 8);
+        }
         if (b.in.ring_idx) {   // the drafter's context rows go to the ring cells of their positions
             std::vector<int64_t> ri(n);
             for (int i = 0; i < n; ++i) {
@@ -1043,6 +1093,12 @@ struct Engine {
         }
         prof_add("trunk" + std::to_string(n), tp);
         cache.insert(cache.end(), tok, tok + n);
+        rp.insert(rp.end(), r3.begin(), r3.end());
+        if (rq_key) ckey.insert(ckey.end(), rq_key, rq_key + n);
+        else {
+            ckey.insert(ckey.end(), tok, tok + n);
+            next_p = r3[3 * (n - 1)] + 1;   // generated text: the next position follows the last
+        }
         // a full window kept: the state is the newest snapshot and the conv window's tail
         m.ssm_slot = 0;
         m.conv_off = CONV_W - 3;
@@ -1051,6 +1107,9 @@ struct Engine {
     // After a verify window of n tokens of which `keep` stay: roll the recurrent state back and drop the rest.
     void keep_window(int n, int keep) {
         cache.resize(cache.size() - (n - keep));
+        ckey.resize(cache.size());
+        rp.resize(cache.size() * 3);
+        next_p -= n - keep;
         m.ssm_slot = n - keep;
         m.conv_off = CONV_W - (n + 3) + keep;
     }
@@ -1065,7 +1124,9 @@ struct Engine {
         std::vector<int32_t> t(R, 0), hc(R, hcols.empty() ? 0 : hcols[0]);
         std::copy(tok, tok + k, t.begin());
         std::copy(hcols.begin(), hcols.end(), hc.begin());
-        set_inputs(b.in, t.data(), R, pos0, pad_kv(pos0 + R, m.o.max_ctx), 1, 0, CONV_W - 3, k, m.o.max_ctx - 1);
+        const std::vector<int32_t> r3 = rope3(pos0, R);
+        set_inputs(b.in, t.data(), R, pos0, pad_kv(pos0 + R, m.o.max_ctx), 1, 0, CONV_W - 3, k, m.o.max_ctx - 1,
+                   r3.data());
         const int32_t out[1] = {k - 1}, pc[1] = {pcol};
         if (b.in.out_ids->buffer) ggml_backend_tensor_set(b.in.out_ids, out, 0, 4);
         ggml_backend_tensor_set(b.in.hidx, hc.data(), 0, (size_t) R * 4);
@@ -1081,7 +1142,8 @@ struct Engine {
     int mtp_step(int32_t tok, int64_t pos, float* p) {
         const auto tp = Clock::now();
         Built& b = mtp_graph(m, G, 1, pos, true);
-        set_inputs(b.in, &tok, 1, pos, pad_kv(pos + 1, m.o.max_ctx), 1);
+        const std::vector<int32_t> r3 = rope3(pos, 1);
+        set_inputs(b.in, &tok, 1, pos, pad_kv(pos + 1, m.o.max_ctx), 1, 0, CONV_W - 3, -1, 0, r3.data());
         if (ggml_backend_sched_graph_compute(b.sched, b.gf) != GGML_STATUS_SUCCESS) die("the MTP graph failed");
         int32_t a = 0;
         ggml_backend_tensor_get(b.argmax, &a, 0, 4);
@@ -1106,7 +1168,7 @@ struct Engine {
         std::vector<int64_t> ri(B);
         tok[0] = t;
         for (int i = 0; i < B; ++i) {
-            pos[i] = pos[B + i] = pos[2 * B + i] = (int32_t) (L + i);
+            pos[i] = pos[B + i] = pos[2 * B + i] = next_p + i;
             pos[3 * B + i] = 0;
             ri[i] = (L + i) % DF_RING;
             d.ring_pos[ri[i]] = L + i;
@@ -1144,6 +1206,9 @@ struct Engine {
     // Reset to an empty sequence.
     void clear() {
         cache.clear();
+        ckey.clear();
+        rp.clear();
+        next_p = 0;
         mtp_ok = false;
         kept_prev = 0;
         if (m.df) std::fill(m.df->ring_pos.begin(), m.df->ring_pos.end(), -1);
@@ -1169,7 +1234,9 @@ struct Engine {
     // prompt leaves the cached tokens inside the last assistant turn: the checkpoint in front of the prompt's last
     // <|im_start|> is the point the next turn shares.
     struct Ckpt {
-        std::vector<int32_t> tok;
+        std::vector<int32_t> tok, rp;
+        std::vector<int64_t> key;
+        int32_t next_p = 0;
         std::vector<float> ssm, conv, pend;
         uint64_t used = 0;
     };
@@ -1178,16 +1245,19 @@ struct Engine {
     std::vector<Ckpt> cks;
     uint64_t ck_tick = 0;
     // after a trunk window (state in slot 0, the conv window's tail) and its MTP pairs
-    void save_ck(const int32_t* tok, size_t n) {
+    void save_ck(size_t n, int32_t np) {   // the first n cached tokens; np: the next text position after them
         for (Ckpt& c : cks)
-            if (c.tok.size() == n && std::equal(c.tok.begin(), c.tok.end(), tok)) { c.used = ++ck_tick; return; }
+            if (c.key.size() == n && std::equal(c.key.begin(), c.key.end(), ckey.begin())) { c.used = ++ck_tick; return; }
         const auto tp = Clock::now();
         const int C = m.hp.conv_ch();
         const size_t D = (size_t) m.hp.ssm_d();
         Ckpt* c;
         if (cks.size() < kCkMax) c = &cks.emplace_back();
         else c = &*std::min_element(cks.begin(), cks.end(), [](const Ckpt& a, const Ckpt& b) { return a.used < b.used; });
-        c->tok.assign(tok, tok + n);
+        c->tok.assign(cache.begin(), cache.begin() + n);
+        c->key.assign(ckey.begin(), ckey.begin() + n);
+        c->rp.assign(rp.begin(), rp.begin() + n * 3);
+        c->next_p = np;
         c->used = ++ck_tick;
         int nl = 0;
         for (Layer& l : m.L) nl += l.conv ? 1 : 0;
@@ -1224,23 +1294,48 @@ struct Engine {
         m.ssm_slot = 0;
         m.conv_off = CONV_W - 3;
         cache = c.tok;
+        ckey = c.key;
+        rp = c.rp;
+        next_p = c.next_p;
         mtp_ok = m.o.mtp > 0 && !c.pend.empty();
         kept_prev = 0;
         c.used = ++ck_tick;
     }
 
-    PromptOut prompt(const std::vector<int32_t>& ids, bool greedy, std::vector<float>& last_logits, int32_t& last_am,
-                     bool report) {
+    // A prompt: its token ids, what each is matched on (the id, or an image row's key), each one's M-RoPE position,
+    // the next text position after it, and per token the image row it takes (-1: text; rows in img_buf).
+    struct Req {
+        std::vector<int32_t> ids, rp, img_row;
+        std::vector<int64_t> key;
+        int32_t next_p = 0;
+        void text(const std::vector<int32_t>& t) {
+            ids = t;
+            key.assign(t.begin(), t.end());
+            rp.resize(t.size() * 3);
+            for (size_t i = 0; i < t.size(); ++i) rp[i * 3] = rp[i * 3 + 1] = rp[i * 3 + 2] = (int32_t) i;
+            img_row.assign(t.size(), -1);
+            next_p = (int32_t) t.size();
+        }
+    };
+    PromptOut prompt(const std::vector<int32_t>& ids_in, bool greedy, std::vector<float>& last_logits, int32_t& last_am,
+                     bool report, const Req* rq = nullptr) {
+        Req text_rq;
+        if (!rq) {
+            text_rq.text(ids_in);
+            rq = &text_rq;
+        }
+        const std::vector<int32_t>& ids = rq->ids;
+        const std::vector<int64_t>& keys = rq->key;
         PromptOut po;
         const auto t0 = Clock::now();
         // reuse: the cache when it is a prefix of the prompt, or the longest checkpoint that is (the recurrent state
         // cannot go back by itself)
         size_t common = 0;
-        if (cache.size() < ids.size() && std::equal(cache.begin(), cache.end(), ids.begin())) common = cache.size();
+        if (cache.size() < ids.size() && std::equal(ckey.begin(), ckey.end(), keys.begin())) common = cache.size();
         Ckpt* best = nullptr;
         for (Ckpt& c : cks)
-            if (c.tok.size() > common && c.tok.size() < ids.size() && std::equal(c.tok.begin(), c.tok.end(), ids.begin()) &&
-                (!best || c.tok.size() > best->tok.size()))
+            if (c.key.size() > common && c.key.size() < ids.size() && std::equal(c.key.begin(), c.key.end(), keys.begin()) &&
+                (!best || c.key.size() > best->key.size()))
                 best = &c;
         if (best) {
             restore_ck(*best);
@@ -1273,7 +1368,14 @@ struct Engine {
             if (ck_at > at && ck_at < at + n) n = (int) (ck_at - at);   // a window ends at the checkpoint
             const bool lastw = at + n == ids.size();
             std::vector<int32_t> am;
+            rq_key = keys.data() + at;
+            rq_rp = rq->rp.data() + at * 3;
+            rq_img = rq->img_row.data() + at;
             trunk(ids.data() + at, n, 1, 1, lastw ? &am : nullptr, lastw && !greedy ? &last_logits : nullptr);
+            rq_key = nullptr;
+            rq_rp = nullptr;
+            rq_img = nullptr;
+            next_p = at + n < ids.size() ? rq->rp[(at + n) * 3] : rq->next_p;
             if (lastw) last_am = am[0];
             if (use_mtp) {
                 // pairs (h_{p-1}, x_p) at position p for the window's tokens; the first window skips x_0
@@ -1289,7 +1391,7 @@ struct Engine {
                 mtp_ok = true;
             }
             at += n;
-            if (at == ck_at || at == ids.size()) save_ck(ids.data(), at);
+            if (at == ck_at || at == ids.size()) save_ck(at, next_p);
             if (report) {
                 const double ms = ms_since(t0);
                 std::printf("PP %lld %lld %.0f %.1f\n", (long long) at, (long long) total, ms,
@@ -1468,6 +1570,94 @@ bool parse_ids(const std::string& s, std::vector<int32_t>& out) {
     return !out.empty();
 }
 
+// A GENI request's pictures: the embeddings file holds one record per picture in prompt order (int32 'SVE1', n,
+// nx, ny, n_embd, then n x n_embd floats, qwen-vision's / almond-vision's format); picture k's rows take the k-th run
+// of <|image_pad|> tokens, in order.  Their M-RoPE positions are mtmd's for Qwen3.5: t = p, h = p + y, w = p + x
+// (p the position of the run's first token, rows in row-major x fastest), and the text after the picture goes on at
+// p + max(nx, ny).  Each row is matched on a key of its picture (the server's img_keys=, or a hash of its rows) and
+// its index, so two pictures of the same size are never taken for each other.
+bool image_request(Engine& E, const std::string& file, const std::vector<std::string>& f, Engine::Req& rq,
+                   std::string& why) {
+    constexpr int32_t kImagePad = 248056;
+    const int E_ = E.m.hp.n_embd;
+    std::vector<std::string> keys;
+    for (const std::string& x : f)
+        if (x.rfind("img_keys=", 0) == 0)
+            for (size_t p = 9; p <= x.size();) {
+                size_t q = x.find(',', p);
+                if (q == std::string::npos) q = x.size();
+                keys.push_back(x.substr(p, q - p));
+                p = q + 1;
+            }
+    FILE* fp = std::fopen(file.c_str(), "rb");
+    if (!fp) { why = "cannot open the embeddings file " + file; return false; }
+    struct Rec { int32_t n, nx, ny; size_t row0; uint64_t h; };
+    std::vector<Rec> recs;
+    E.img_buf.clear();
+    for (;;) {
+        int32_t hd[5];
+        if (std::fread(hd, 4, 5, fp) != 5) break;
+        if (std::memcmp(hd, "SVE1", 4) != 0 || hd[4] != E_ || hd[1] <= 0 || (int64_t) hd[2] * hd[3] != hd[1]) {
+            std::fclose(fp);
+            why = "the embeddings file is not a qwen-vision record set for this model (n_embd " + std::to_string(hd[4]) + ")";
+            return false;
+        }
+        const size_t row0 = E.img_buf.size() / E_;
+        E.img_buf.resize(E.img_buf.size() + (size_t) hd[1] * E_);
+        if (std::fread(E.img_buf.data() + row0 * E_, 4, (size_t) hd[1] * E_, fp) != (size_t) hd[1] * E_) {
+            std::fclose(fp);
+            why = "the embeddings file is cut short";
+            return false;
+        }
+        uint64_t h = 1469598103934665603ull;   // FNV-1a over the picture's key, or its rows
+        const size_t k = recs.size();
+        if (k < keys.size()) {
+            for (char ch : keys[k]) h = (h ^ (uint8_t) ch) * 1099511628211ull;
+        } else {
+            const uint8_t* b = (const uint8_t*) (E.img_buf.data() + row0 * E_);
+            for (size_t i = 0; i < (size_t) hd[1] * E_ * 4; i += 61) h = (h ^ b[i]) * 1099511628211ull;
+        }
+        recs.push_back({hd[1], hd[2], hd[3], row0, h});
+    }
+    std::fclose(fp);
+    // the runs of <|image_pad|>
+    size_t k = 0;
+    int32_t p = 0;
+    for (size_t i = 0; i < rq.ids.size();) {
+        if (rq.ids[i] != kImagePad) {
+            rq.rp[i * 3] = rq.rp[i * 3 + 1] = rq.rp[i * 3 + 2] = p++;
+            rq.key[i] = rq.ids[i];
+            ++i;
+            continue;
+        }
+        size_t j = i;
+        while (j < rq.ids.size() && rq.ids[j] == kImagePad) ++j;
+        if (k >= recs.size() || (size_t) recs[k].n != j - i) {
+            why = "the prompt's picture " + std::to_string(k + 1) + " has " + std::to_string(j - i) +
+                  " image tokens, the embeddings file " + (k < recs.size() ? std::to_string(recs[k].n) : "none");
+            return false;
+        }
+        const Rec& r = recs[k];
+        for (int32_t t = 0; t < r.n; ++t) {
+            const size_t q = i + t;
+            rq.rp[q * 3] = p;
+            rq.rp[q * 3 + 1] = p + t / r.nx;
+            rq.rp[q * 3 + 2] = p + t % r.nx;
+            rq.img_row[q] = (int32_t) (r.row0 + t);
+            rq.key[q] = (int64_t) (((r.h ^ ((uint64_t) t * 0x9E3779B97F4A7C15ull)) | (1ull << 62)) & ~(1ull << 63));
+        }
+        p += std::max(r.nx, r.ny);
+        ++k;
+        i = j;
+    }
+    if (k != recs.size()) {
+        why = "the embeddings file has " + std::to_string(recs.size()) + " pictures, the prompt " + std::to_string(k);
+        return false;
+    }
+    rq.next_p = p;
+    return true;
+}
+
 int serve(Engine& E) {
     LineQueue lq;
     E.stop = &lq.stop;
@@ -1487,11 +1677,8 @@ int serve(Engine& E) {
             std::fflush(stdout);
             continue;
         }
-        if (line.rfind("GENI", 0) == 0) {
-            std::printf("ERR images are not supported on the qwen35 path yet\n");
-            std::fflush(stdout);
-            continue;
-        }
+        const bool geni = line.rfind("GENI ", 0) == 0;
+        if (geni) line = "GEN " + line.substr(5);   // GENI <max_new> [keys] [img_keys=..] <embeddings file> <ids>
         if (line.rfind("GEN ", 0) != 0) {
             std::printf("ERR unknown command\n");
             std::fflush(stdout);
@@ -1506,10 +1693,21 @@ int serve(Engine& E) {
             i = j + 1;
         }
         std::vector<int32_t> ids;
-        if (f.size() < 2 || !parse_ids(f.back(), ids)) {
+        if (f.size() < (geni ? 3u : 2u) || !parse_ids(f.back(), ids)) {
             std::printf("ERR bad GEN line\n");
             std::fflush(stdout);
             continue;
+        }
+        Engine::Req rq;
+        rq.text(ids);
+        if (geni) {
+            std::string why;
+            if (!image_request(E, f[f.size() - 2], f, rq, why)) {
+                std::printf("ERR %s\n", why.c_str());
+                std::fflush(stdout);
+                continue;
+            }
+            f.erase(f.end() - 2);   // the file is not a sampling key
         }
         const int max_new = std::max(1, std::atoi(f[0].c_str()));
         Sampling s;
@@ -1542,7 +1740,7 @@ int serve(Engine& E) {
         if (E.cache.size() >= ids.size() && std::equal(ids.begin(), ids.end(), E.cache.begin())) E.clear();
         std::vector<float> lg;
         int32_t am = 0;
-        auto po = E.prompt(ids, greedy, lg, am, true);
+        auto po = E.prompt(ids, greedy, lg, am, true, &rq);
         if (po.reused > 0) {
             std::printf("RESUME %lld\n", (long long) po.reused);
         }

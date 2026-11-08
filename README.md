@@ -14,7 +14,8 @@ Anthropic-compatible server, a router that serves every model at one address, an
 - **Qwen3.8-Flash-Next** as the [ISTA-DASLab GSQ-RCO IQ3_S GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF)
   (two shards, 83.6 GB) with its MTP draft block from the BF16 checkpoint (`src/qwen`).
 - **Qwen3.8-27B** (dense) as the [ISTA-DASLab GSQ-RCO IQ3_S GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF)
-  (11.28 GiB, its MTP block in the same file) on ggml graphs (`src/qwen35`), optionally with z-lab's DFlash2 drafter.
+  (11.28 GiB, its MTP block in the same file) on ggml graphs (`src/qwen35`), with images on its encoder, optionally
+  with z-lab's DFlash2 drafter.
 
 How each model is set up and measured: [docs/MODELS.md](docs/MODELS.md); the one-engine work:
 [docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md).

@@ -12,7 +12,7 @@
   ./almond serve --model qwen    Qwen3.8-Flash-Next (GSQ-RCO IQ3_S) on Almond's engine (src/qwen, --qwen):
                                  local/qwen-local.json, tools/qwen/serve/serve_qwen.py
   ./almond serve --model qwen27  the dense Qwen3.8-27B (GSQ-RCO IQ3_S + its MTP block) on src/qwen35 (--qwen35):
-                                 local/qwen27-local.json, tools/qwen/serve/serve_qwen.py
+                                 local/qwen27-local.json (-vision with its encoder), tools/qwen/serve/serve_qwen.py
   ./almond serve --ctx 1m        the context window (tokens, or 128k / 256k / 1m), in a copy of the configuration
                                  (ALMOND_CTX the same; the router's models inherit it)
 
@@ -110,8 +110,10 @@ def pick_config(o: dict) -> str:
         on = vision and whole(ROOT / "models/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf")
         return str(ROOT / ("local/glm-local-vision.json" if on else "local/glm-local.json"))
     if m == "qwen27":
-        # the dense Qwen3.8-27B on src/qwen35 (--qwen35): one card, text only for now
-        return str(ROOT / "local/qwen27-local.json")
+        # the dense Qwen3.8-27B on src/qwen35 (--qwen35), one card; with its encoder (the mmproj in
+        # models/qwen38-27b) and almond-vision built: images on, read on the CPU
+        on = vision and whole(ROOT / "models/qwen38-27b/mmproj-Qwen3.8-27B-BF16.gguf")
+        return str(ROOT / ("local/qwen27-local-vision.json" if on else "local/qwen27-local.json"))
     if m == "qwen":
         # with the image encoder (local/fetch.sh qwen-vision): images on, read on the CPU (the engine lends the
         # encoder no VRAM; its cards hold the expert cache)
