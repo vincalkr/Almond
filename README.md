@@ -127,8 +127,8 @@ instead.
 ```
 
 - `--agent` gives the model tools to read, write and edit files and run commands in the working directory (each
-  write, edit and command asks first; `--yes` does not); `--agent --web` adds `web_search` and `web_fetch` (each asks
-  before it runs too). The search goes to a SearXNG instance when `ALMOND_SEARXNG_URL` is set (its JSON API on;
+  write, edit and command asks first; `--yes` does not), and `web_search` and `web_fetch` (each asks before it runs
+  too; `--no-web` leaves them out). The search goes to a SearXNG instance when `ALMOND_SEARXNG_URL` is set (its JSON API on;
   private, no key), to the Brave Search API with `BRAVE_API_KEY`, else to DuckDuckGo's HTML page (no key; it can slow
   down or refuse a client that searches a lot); `web_fetch` reads a page as text. Pages are given to the model as
   data, never as instructions. Checked with Qwen3.8-27B: "what is llama.cpp's latest release and what changes"
