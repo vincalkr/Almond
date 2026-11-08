@@ -3,7 +3,8 @@
     {"model": "glm"},
     {"model": "ds41"},
     {"model": "qwen"},
-    {"model": "qwen27"}
+    {"model": "qwen27"},
+    {"model": "qwen27", "config": "local/qwen27-local-dflash.json"}
   ],
   "default": "glm"
 }

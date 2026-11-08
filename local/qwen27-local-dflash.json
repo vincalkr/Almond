@@ -18,7 +18,7 @@
   "env": {},
   "cwd": ".",
   "tokenizer": "models/qwen38-27b/tokenizer",
-  "model_name": "qwen3.8-27b",
+  "model_name": "qwen3.8-27b-dflash",
   "log": "local/serve-qwen27-dflash-engine.log",
   "port": 8150,
   "backend": "hip",

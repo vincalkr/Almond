@@ -563,10 +563,13 @@ class Chat:
 
     def find(self, name: str):
         n = name.lower()
-        alias = {"ds41": "deepseek", "ds4": "deepseek"}.get(n, n)
-        for m in self.models:
-            if m["id"].lower() == n:
-                return m
+        # the launcher's model names; "qwen" would otherwise also match the two Qwen3.8-27B entries
+        alias = {"ds41": "deepseek", "ds4": "deepseek", "qwen": "qwen3.8-flash-next", "qwen27": "qwen3.8-27b",
+                 "qwen27-dflash": "qwen3.8-27b-dflash"}.get(n, n)
+        for want in (n, alias):
+            for m in self.models:
+                if m["id"].lower() == want:
+                    return m
         hits = [m for m in self.models if m["id"].lower().startswith(alias) or alias in m["id"].lower()]
         return hits[0] if len(hits) == 1 else None
 
@@ -1325,7 +1328,8 @@ def main() -> int:
         os.execv(str(ROOT / "stop.sh"), [str(ROOT / "stop.sh"), *sys.argv[2:]])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-p", "--prompt", help="one prompt: the answer on stdout, then exit")
-    ap.add_argument("-m", "--model", help="the model (a name from /models or its start: glm, deepseek, qwen)")
+    ap.add_argument("-m", "--model", help="the model (a name from /models or its start: glm, deepseek, qwen, qwen27, "
+                                                 "qwen27-dflash)")
     ap.add_argument("--url", default=os.environ.get("ALMOND_URL", "http://127.0.0.1:8150"))
     ap.add_argument("--api-key", default=os.environ.get("ALMOND_API_KEY", ""))
     t = ap.add_mutually_exclusive_group()
