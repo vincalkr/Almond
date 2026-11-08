@@ -1,10 +1,11 @@
 # AGENTS.md
 
-Almond is a multi-model MoE engine for AMD RX 7900 XTX cards (ROCm/HIP): DeepSeek-V4.1-Flash-1017 (the published
-GSQ-RCO IQ2_XXS pack), GLM-5.3-Flash (GSQ-RCO 3.5bit) and Qwen3.8-Flash-Next (GSQ-RCO IQ3_S), their experts across
-card 0, a second 24 GB card, pinned RAM and NVMe. One C++/HIP executable, `build-hip-fused/almond-engine` (DeepSeek's
-path in `src/ds41`, GLM's in `src/glm` when its arguments name `--glm-pack`, Qwen's in `src/qwen` when they name
-`--qwen`, the shared libraries in `src/` and `include/`); an OpenAI- and Anthropic-compatible server (`serve/`,
+Almond is a multi-model engine for AMD RX 7900 XTX cards (ROCm/HIP), for MoE and dense models: the MoE models
+DeepSeek-V4.1-Flash-1017 (the published GSQ-RCO IQ2_XXS pack), GLM-5.3-Flash (GSQ-RCO 3.5bit) and Qwen3.8-Flash-Next
+(GSQ-RCO IQ3_S), their experts across card 0, a second 24 GB card, pinned RAM and NVMe, and the dense Qwen3.8-27B
+(GSQ-RCO IQ3_S) on one card. One C++/HIP executable, `build-hip-fused/almond-engine` (DeepSeek's path in `src/ds41`,
+GLM's in `src/glm` when its arguments name `--glm-pack`, Qwen's in `src/qwen` when they name `--qwen`, the dense
+Qwen3.8-27B's in `src/qwen35` when they name `--qwen35`, the shared libraries in `src/` and `include/`); an OpenAI- and Anthropic-compatible server (`serve/`,
 started per model by `tools/v41/serve/serve_ds41.py`, `tools/glm/serve/serve_glm.py` or
 `tools/qwen/serve/serve_qwen.py` through `./almond serve`); the router (`tools/router/almond_router.py`, `./almond
 serve --router`);

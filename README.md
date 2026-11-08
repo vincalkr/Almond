@@ -1,9 +1,9 @@
-<h1 align="center">Almond - MoE models on RX 7900 XTX</h1>
+<h1 align="center">Almond - MoE and dense models on RX 7900 XTX</h1>
 
 <p align="center"><b>DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash and Qwen3.8-Flash-Next on one or two RX 7900 XTX, their experts across VRAM, pinned RAM and NVMe; the dense Qwen3.8-27B on one card</b><br>
 Linux - ROCm/HIP - MIT</p>
 
-A C++/HIP inference engine for large MoE models (one executable, `build-hip-fused/almond-engine`), an OpenAI- and
+A C++/HIP inference engine for large MoE models and dense ones (one executable, `build-hip-fused/almond-engine`), an OpenAI- and
 Anthropic-compatible server, a router that serves every model at one address, and a terminal chat with an agent mode.
 
 - **DeepSeek-V4.1-Flash-1017** as the [ISTA-DASLab GSQ-RCO pack](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)

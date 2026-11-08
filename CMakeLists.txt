@@ -1,4 +1,5 @@
-# Almond - a multi-model MoE engine (today DeepSeek-V4.1-Flash, src/ds41) and the few libraries it links.
+# Almond - a multi-model engine for MoE and dense models (DeepSeek-V4.1-Flash in src/ds41, GLM in src/glm, Qwen3.8-Flash-Next
+# in src/qwen, the dense Qwen3.8-27B in src/qwen35) and the few libraries it links.
 #
 # Of the libraries this tree started from, exactly the objects ds41_generate links remain (traced with -Wl,--trace on
 # 2026-10-18): the VRAM expert cache and VMM, pinned host memory, the CPU expert kernels, the HIP MMVQ / IQ kernels and
