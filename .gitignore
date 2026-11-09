@@ -123,6 +123,9 @@ core.[0-9]*
 build-vision/
 local/glm-slots/
 local/qwen-slots/
+# every model's conversation states on disk (serve's conversation_dir, the engine's SAVE files: GB each)
+/local/*-slots/
+/local/*-slots-*/
 local/vision-memory.json
 local/.run-ctx-*
 local/session-log/
