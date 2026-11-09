@@ -28,6 +28,6 @@
   },
   "loop_guard": true,
   "fit_max_tokens": true,
-  "conversation_dir": "local/qwen27-slots-256k",
+  "conversation_dir": "local/qwen27-slots",
   "conversation_dir_gib": 16
 }
