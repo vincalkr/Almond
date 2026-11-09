@@ -345,21 +345,23 @@ COMPACT_MIN_FREE = 8192
 COMPACT_TAIL_DIVISOR = 10
 COMPACT_TAIL_CAP = 50000
 COMPACT_SUMMARY_MAX = 8192      # the summary's tokens, its thinking included
-COMPACT_PROMPT = """Internal almond context compaction request. This is not a user request.
-Write a durable task-state summary of the conversation so far. Preserve only facts that matter for continuing the work:
-- user goals, constraints, and preferences
-- files inspected or edited
-- commands run and important results
-- decisions, rejected approaches, known bugs, and pending next steps
-- reloadable bulky data with exact paths/ranges/commands when available
+COMPACT_PROMPT = """[Almond, not the user] The conversation is about to be shortened: everything above will be \
+replaced by your notes, and only the latest messages will stay as they are. Write those notes now, so that you can \
+carry on the work from them alone.
 
-Do not invent facts. Do not include generic narration. Do not include raw file contents unless they were essential \
-to a conclusion. Do not solve unfinished tasks, calculate new results, or finish incomplete code in the summary. \
-Record the user's requirements and what actually happened, leaving unfinished work pending.
-Write it in the language of the conversation. After the summary, stop. Do not continue the user task and do not call \
-tools. Output only the compact summary."""
-COMPACT_HEAD = "[almond compacted the earlier conversation. Durable task-state summary follows.]\n"
-COMPACT_TAIL = "\n[End of the compacted summary. The recent conversation continues verbatim below.]"
+Put in them:
+1. What the user wants: the task, the requirements, the preferences they stated.
+2. Where things stand: what is done, what is half done, what is next.
+3. The files: each one read or changed, with its path, and the lines when only part was read.
+4. The commands that mattered, with what they printed or the error they gave.
+5. What was decided and why, what was tried and dropped, the problems still open.
+6. How to get back anything large instead of copying it: the path, the line range, the command or the address.
+
+Keep to what happened in this conversation: no guesses, no new results, no finished versions of unfinished work. \
+Quote file contents only where a conclusion rests on them. Use the conversation's language. Write the notes and \
+nothing else: no tool calls, no answer to the user, no next step carried out."""
+COMPACT_HEAD = "[Notes on the earlier part of this conversation, which was shortened]\n"
+COMPACT_TAIL = "\n[End of the notes; the latest messages follow as they were]"
 
 
 def _tool(name, doc, **params):
@@ -1007,7 +1009,7 @@ class Chat:
         say(f"\n{MAGENTA}COMPACTING{RESET} {DIM}({reason}){RESET}")
         before, used = len(self.messages), self.ctx_used
         tail = self.tail_start()
-        req = COMPACT_PROMPT + (f"\n\nCompaction reason: {reason}" if reason else "")
+        req = COMPACT_PROMPT + (f"\n\nWhy now: {reason}" if reason else "")
         hist = self.wire()
         if hist and hist[-1].get("tool_calls"):   # a call still waiting for its results: in the tail, not summarized
             hist = hist[:-1]
