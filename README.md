@@ -169,7 +169,16 @@ instead.
 - Conversations: `/new` (the current one saved first), `/save [NAME]`, `/sessions`, `/load N|NAME`, `/rename`,
   `/delete` (to the trash); they live in `local/chats/`, leaving saves too, `./almond -c` resumes the last one
   (`./almond -m qwen27 -c` that model's last, `./almond -c NAME` a given one); `./almond --chats [-m MODEL]` lists
-  them from the shell without starting anything. A
+  them from the shell without starting anything.
+- Compaction: before a new turn when the conversation fills 85% of the
+  context or leaves at most 8192 tokens, and at once when a tool result would leave no room for the answer, the model
+  writes a durable task-state summary (goals, files, commands and results, decisions, next steps) at the end of the
+  conversation it already holds - same system prompt, tools and thinking level, so the server reads only the request -
+  and the conversation becomes that summary plus the recent part verbatim (10% of the context, at most 50,000 tokens,
+  from a user message when one starts within twice that); `/compact [NOTE]` asks for it. The full history goes to
+  `local/chats/compacted/`. Checked with Qwen3.8-27B at an 8K context: the summary request reused 6,727 of 6,928
+  tokens (0.44 s), the conversation went from ~6,700 to ~1,700 tokens, and the next answer still knew the first
+  question, the files read (with their line ranges) and the answer given. A
   conversation the engine still keeps is not read again.
 - `/retry`, `/undo`, `/edit` (the last exchange: again, dropped, your message back to edit), `/export [FILE]`
   (Markdown), `/status`, `/cd DIR` (the agent's directory).
