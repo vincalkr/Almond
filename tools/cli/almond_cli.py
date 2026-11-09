@@ -726,6 +726,9 @@ class Chat:
         self.ctx_used = 0
         self.bar = Bar(api)
         self.web = not a.no_web
+        # the agent prompt's date: the day the conversation started, kept with it - today's date in a resumed
+        # conversation changed its first lines, and the engine read the whole conversation again (143K tokens)
+        self.date = time.strftime("%Y-%m-%d")
         self.agent = Agent(a.yes, self.web) if a.agent else None
         self.yes, self.stopped = a.yes, False
         self.name = None                        # the conversation's name in local/chats/ once saved
@@ -910,7 +913,7 @@ class Chat:
         return calls
 
     def wire(self) -> list:
-        text = self.system or (AGENT_PROMPT.format(os=agent_os(), cwd=self.agent.root, date=time.strftime("%Y-%m-%d"))
+        text = self.system or (AGENT_PROMPT.format(os=agent_os(), cwd=self.agent.root, date=self.date)
                                + (AGENT_WEB_PROMPT if self.agent.web else "") if self.agent else None)
         sys_msg = [{"role": "system", "content": text}] if text else []
         # the reasoning goes back too: the model's template keeps it for the turn in progress (an agent's chain of tool
@@ -1025,6 +1028,7 @@ class Chat:
             if self.messages:
                 say(f"{DIM}saved as {self.save()}{RESET}")
             self.messages, self.ctx_used, self.name = [], 0, None
+            self.date = time.strftime("%Y-%m-%d")
             say(f"{DIM}a new conversation{RESET}")
         elif cmd == "save":
             say(f"{DIM}saved as {self.save(arg or None)}{RESET}" if self.messages else f"{DIM}nothing to save{RESET}")
@@ -1143,7 +1147,8 @@ class Chat:
         CHATS.mkdir(parents=True, exist_ok=True)
         data = {"model": self.model["id"], "level": self.level, "sampling": self.sampling, "system": self.system,
                 "cwd": str(self.agent.root if self.agent else Path.cwd()), "ctx_used": self.ctx_used,
-                "agent": bool(self.agent), "web": bool(self.agent and self.agent.web), "messages": self.messages}
+                "agent": bool(self.agent), "web": bool(self.agent and self.agent.web), "date": self.date,
+                "messages": self.messages}
         (CHATS / f"{self.name}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         return self.name
 
@@ -1176,6 +1181,9 @@ class Chat:
             except (SystemExit, RuntimeError) as e:
                 say(f"{RED}{e}; it goes on with {self.model['id']}{RESET}")
         self.messages, self.system = d.get("messages") or [], d.get("system")
+        # the day it started: kept since "date" is saved; before, the name's YYYYMMDD- (the save's own day)
+        m = re.match(r"(\d{4})(\d{2})(\d{2})-", f.stem)
+        self.date = d.get("date") or (f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else time.strftime("%Y-%m-%d"))
         # an agent conversation goes on as one: without its tools the prompt changes from the system turn on, and the
         # engine would read the whole conversation again (conversations saved before "agent" was kept: their tool
         # messages tell)
