@@ -507,8 +507,10 @@ class Agent:
         if not outside and (self.yes or name in self.always):
             return True
         while True:
+            # outside the working directory there is no "always" (it would open the whole disk): only y / n, said so
+            opts = "[y/n] (outside the working directory it asks each time; /cd DIR moves it)" if outside else "[y/n/a]"
             try:
-                a = input(f"{BOLD}{what}{RESET} - allow? [y/n/a] " if TTY else f"{what} - allow? [y/n/a] ").strip().lower()
+                a = input(f"{BOLD}{what}{RESET} - allow? {opts} " if TTY else f"{what} - allow? {opts} ").strip().lower()
             except EOFError:
                 return False
             if a in ("y", "yes", "s", "si"):
