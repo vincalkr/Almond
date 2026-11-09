@@ -167,7 +167,9 @@ instead.
   short English system prompt (`AGENT_PROMPT` in `tools/cli/almond_cli.py`): the machine and directory, how to use the
   tools, and to report figures as the tools printed them.
 - Conversations: `/new` (the current one saved first), `/save [NAME]`, `/sessions`, `/load N|NAME`, `/rename`,
-  `/delete` (to the trash); they live in `local/chats/`, leaving saves too, `./almond -c` resumes the last one. A
+  `/delete` (to the trash); they live in `local/chats/`, leaving saves too, `./almond -c` resumes the last one
+  (`./almond -m qwen27 -c` that model's last, `./almond -c NAME` a given one); `./almond --chats [-m MODEL]` lists
+  them from the shell without starting anything. A
   conversation the engine still keeps is not read again.
 - `/retry`, `/undo`, `/edit` (the last exchange: again, dropped, your message back to edit), `/export [FILE]`
   (Markdown), `/status`, `/cd DIR` (the agent's directory).
@@ -223,7 +225,8 @@ up to 32 GiB), so a restarted server resumes a session instead of reading it aga
 keeps its conversations in `local/glm-slots` (`ALMOND_GLM_SLOT_KEEP`, docs/MODELS.md, "Sessions on disk"). Qwen's
 parks up to 4 conversations in RAM (8 GiB at most, sized from the free RAM; `--conversation-cache-mib`) and resumes the
 one a request continues.
-`./almond --sessions` shows both folders and their size, `./almond --clear-sessions` moves them to the trash (with no
+`./almond --sessions` shows those folders and their size (the engines' own caches, files named by a hash of their
+prompt, which a server reuses by itself when a conversation comes back; the chats to resume are `./almond --chats`), `./almond --clear-sessions` moves them to the trash (with no
 engine running), and `--monitor` shows them too.
 
 ## Power-tune (optional, root)

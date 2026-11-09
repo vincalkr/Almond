@@ -3,16 +3,19 @@
 
   ./almond                       a conversation (starts the router if nothing answers at --url, stops it on /quit)
   ./almond -p "question"         one prompt, the answer on stdout, then exit
-  ./almond -m glm                the model (a name from /models, or the start of one: glm, deepseek, qwen)
+  ./almond -m glm                the model (a name from /models, or the start of one: glm, deepseek, qwen, qwen27,
+                                 qwen27-dflash)
   ./almond --ctx 1m              the context window of the models it starts (tokens, or 128k / 256k / 1m; a running
                                  server keeps its own)
   ./almond serve [--router]      a server without the chat: one model (--model glm / qwen, DeepSeek by default) or
                                  the router; ./almond serve --help for its options (tools/cli/launch.py)
   ./almond stop [--force]        stop this folder's servers (./stop.sh)
+  ./almond --chats [-m MODEL]    the saved conversations (local/chats/), newest first, without starting anything
+  ./almond -c [NAME]             resume the last saved conversation (with -m MODEL: that model's last), or NAME
 
 Thinking: --nothink, --think (the model's default), --think-max, --think-level LEVEL - the levels are the model's own
 (GLM-5.3-Flash: low / high / max, it always thinks; DeepSeek-V4.1: off / low / high / max = 0 / 50 / 75 / 100;
-Qwen3.8-Flash-Next: off / low / medium / xhigh).  In the conversation:
+Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium / xhigh).  In the conversation:
 
   /help  /quit  /models  /model NAME  /think [LEVEL]  /nothink  /read FILE  /system TEXT  /ctx  /status
   /new               a new conversation (the current one is saved first; /clear is the same)
@@ -27,8 +30,9 @@ Qwen3.8-Flash-Next: off / low / medium / xhigh).  In the conversation:
   /stats             what the server's monitor shows: speed, GPUs, VRAM, CPU, RAM, disk, context, experts, requests
   /forget            clear the conversation cache the engine keeps
   /hide /show        the thinking
-  /agent [on|off]    the agent: the model reads, writes and edits files and runs commands in the working directory;
-                     a write, an edit, a command or a path outside it asks y / n / a (a: always, for that tool)
+  /agent [on|off]    the agent: the model reads, writes and edits files, runs commands in the working directory and
+                     searches and reads the web (--no-web: not the web); a write, an edit, a command, a search, a
+                     page or a path outside it asks y / n / a (a: always, for that tool)
 
 On a terminal the last line is a status bar: the prompt's reading, the answer's speed, idle the last request's numbers.
 
@@ -1139,7 +1143,7 @@ class Chat:
         CHATS.mkdir(parents=True, exist_ok=True)
         data = {"model": self.model["id"], "level": self.level, "sampling": self.sampling, "system": self.system,
                 "cwd": str(self.agent.root if self.agent else Path.cwd()), "ctx_used": self.ctx_used,
-                "messages": self.messages}
+                "agent": bool(self.agent), "web": bool(self.agent and self.agent.web), "messages": self.messages}
         (CHATS / f"{self.name}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         return self.name
 
@@ -1172,6 +1176,17 @@ class Chat:
             except (SystemExit, RuntimeError) as e:
                 say(f"{RED}{e}; it goes on with {self.model['id']}{RESET}")
         self.messages, self.system = d.get("messages") or [], d.get("system")
+        # an agent conversation goes on as one: without its tools the prompt changes from the system turn on, and the
+        # engine would read the whole conversation again (conversations saved before "agent" was kept: their tool
+        # messages tell)
+        was_agent = d.get("agent")
+        if was_agent is None:
+            was_agent = any(m.get("role") == "tool" or m.get("tool_calls") for m in self.messages)
+        if was_agent and not self.agent:
+            web = d.get("web", self.web)
+            self.agent = Agent(self.yes, web)   # its directory: the conversation's (below)
+            say(f"{DIM}an agent conversation: the agent is on (tools{' and web' if web else ''}, in {self.agent.root}); "
+                f"/agent off turns it off{RESET}")
         self.ctx_used, self.name = d.get("ctx_used", 0), f.stem
         self.sampling = d.get("sampling") or self.sampling
         if d.get("level") in self.values():
@@ -1388,6 +1403,40 @@ def sessions_text() -> str:
     return "\n".join(lines)
 
 
+CHAT_ALIASES = {"ds41": "deepseek", "ds4": "deepseek", "qwen": "qwen3.8-flash-next", "qwen27": "qwen3.8-27b",
+                "qwen27-dflash": "qwen3.8-27b-dflash"}
+
+
+def chat_model_match(model_id: str, name: str | None, ids: set) -> bool:
+    """A saved chat's model against -m: the exact id or alias when some chat has it, else its start."""
+    if not name:
+        return True
+    n = name.lower()
+    want = CHAT_ALIASES.get(n, n)
+    exact = {x for x in ids if x.lower() in (n, want)}
+    return model_id.lower() in {x.lower() for x in exact} if exact else model_id.lower().startswith(want)
+
+
+def chats_text(model: str | None = None) -> str:
+    """--chats: the conversations in local/chats/, newest first (as /sessions shows them)."""
+    rows = []
+    for f in sorted(CHATS.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True) if CHATS.is_dir() else []:
+        try:
+            rows.append((f, json.loads(f.read_text(encoding="utf-8"))))
+        except (OSError, ValueError):
+            pass
+    ids = {d.get("model", "") for _, d in rows}
+    rows = [(f, d) for f, d in rows if chat_model_match(d.get("model", ""), model, ids)]
+    if not rows:
+        return f"no saved conversations{' of ' + model if model else ''} ({CHATS})"
+    out, w = [], max(len(f.stem) for f, _ in rows)
+    for i, (f, d) in enumerate(rows, 1):
+        n = sum(1 for m in d.get("messages", []) if m.get("role") == "user")
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(f.stat().st_mtime))
+        out.append(f" {i:>3}  {f.stem:<{w}}  {d.get('model', '?'):<24} {n:>3} turns  {d.get('ctx_used', 0):>7} tokens  {when}")
+    return "\n".join(out) + "\n\n./almond -c NAME (or the start of it) resumes one; ./almond -m MODEL -c that model's last"
+
+
 def clear_sessions() -> int:
     """Move every model's kept conversations to the trash (gio trash); only with no engine running, which holds them."""
     busy = subprocess.run(["pgrep", "-f", "almond-engine"], capture_output=True).returncode == 0
@@ -1529,9 +1578,16 @@ def main() -> int:
                     help="the context window of the models this starts (default: each configuration's); a server "
                          "already running keeps its own")
     ap.add_argument("--monitor", action="store_true", help="what the server's monitor shows, refreshed every second")
-    ap.add_argument("--sessions", action="store_true", help="the conversations kept on disk, per model")
+    ap.add_argument("--sessions", action="store_true",
+                    help="the engines' conversation caches on disk, per model (local/*-slots, ...: state files named "
+                         "by a hash of their prompt, which a server reuses by itself when a conversation comes back; "
+                         "not the saved chats: --chats)")
     ap.add_argument("--clear-sessions", action="store_true",
-                    help="move the conversations kept on disk to the trash (no engine may be running)")
+                    help="move the engines' conversation caches to the trash (no engine may be running; the saved "
+                         "chats stay)")
+    ap.add_argument("--chats", action="store_true",
+                    help="the saved conversations (local/chats/), newest first, with -m only that model's; then "
+                         "./almond -c NAME resumes one")
     ap.add_argument("--system", default=None, help="a system prompt")
     ap.add_argument("--agent", action="store_true",
                     help="the model may read and edit files and run commands in the working directory (it asks first)")
@@ -1540,7 +1596,8 @@ def main() -> int:
                          "Brave API with BRAVE_API_KEY, else DuckDuckGo; each asks before it runs unless --yes or 'a')")
     ap.add_argument("--yes", action="store_true", help="with --agent: do not ask before a write, an edit or a command (a path outside the directory still asks)")
     ap.add_argument("-c", "--resume", nargs="?", const="", default=None, metavar="NAME",
-                    help="resume the last saved conversation (or NAME, from /sessions)")
+                    help="resume the last saved conversation (with -m: that model's last), or NAME (from --chats or "
+                         "/sessions)")
     ap.add_argument("--hide-thinking", action="store_true", help="do not print the thinking")
     ap.add_argument("--no-start", action="store_true", help="never start the router")
     ap.add_argument("--keep", action="store_true", help="leave a router this started running on exit")
@@ -1548,6 +1605,9 @@ def main() -> int:
 
     if a.sessions:
         print(sessions_text())
+        return 0
+    if a.chats:
+        print(chats_text(a.model))
         return 0
     if a.clear_sessions:
         return clear_sessions()
@@ -1579,7 +1639,9 @@ def main() -> int:
                 a.prompt = sys.stdin.read()
             return 0 if chat.ask(a.prompt) else 1
         if a.resume is not None:
-            f = chat.saved_one(a.resume) if a.resume else next((f for f, _ in chat.saved()), None)
+            # -c alone: the last saved conversation; with -m, that model's last
+            f = chat.saved_one(a.resume) if a.resume else next(
+                (f for f, d in chat.saved() if not a.model or d.get("model") == chat.model["id"]), None)
             if f:
                 chat.load(f)
             elif not a.resume:
