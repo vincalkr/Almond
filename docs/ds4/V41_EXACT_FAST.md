@@ -177,6 +177,41 @@ against it (`rco-iq2xxs-fp8eng-q6k-routerfuse`). Off: the rest of the attention'
 before the flash attention, ~10 a layer, and the shared expert's clamps) would each win about as much, ~1 ms a token,
 inside the same spread; not built.
 
+**The expert kernels on the cards are not bound by VRAM bandwidth** (2026-11-10). A rocprofv3 kernel trace of the
+configuration (Promessi Sposi, 80 tokens forced, medians per kernel; one kernel of the run lasted 1.08 s, a wait
+caught by the profiler, so per-token sums of that trace are not used) gives the bytes of the pack over each kernel's
+time. ggml's Q5_K products on card 0 read at 670-920 GB/s (`output` 455 MB in 496 us, 917; `attn_output_b` 28.8 MB
+in 35 us, ~820; `attn_q_b` ~735; `attn_output_a` ~720; the shared expert ~665-700). The engine's
+`native_gu_multi_kernel` / `native_down_multi_kernel`, 1-6 experts a launch, read less:
+
+| on card 0 | IQ1_M | IQ2_XXS | IQ2_XS |
+| --- | ---: | ---: | ---: |
+| gate + up | 305-481 GB/s | 417-489 | 434-512 |
+| down | 213-359 GB/s | 273-328 | 323-359 |
+
+(card 1, 1-2 experts a launch: 105-217 GB/s.) Whether that is the layout of the blocks (llama.cpp gfx906 forks
+repack K-quant blocks at load for coalesced reads, 58% -> 89% of HBM on an MI50) or the arithmetic was settled
+without hardware counters: on gfx1100 rocprofv3 returns 0 for every SQ, GL2C and MemUnit counter (only
+`SQ_BUSY_CYCLES` reads), and the `FETCH_SIZE` pass aborted. `local/bench-v41/bench-expert-hotcold.sh` runs
+`native_expert_grouped` on the pack's blobs, one decode token's call (6 experts, one entry each), with the weights
+hot (the same 6 experts every call, 50-60 MB, inside the 96 MB Infinity Cache) or cold (48 experts rotated, ~430 MB,
+from VRAM), 300 calls each, card 0, 3 rounds with the order of the arms alternated (the first round's first arm
+paid the clock ramp and is left out):
+
+| gate+up / down | gu hot | gu cold | down hot | down cold | cold / hot |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| IQ2_XXS / IQ2_XXS | 81 us | 84-94 us | 54 us | 55-56 us | 1.00-1.15 |
+| IQ2_XS / IQ2_XS | 85 us | 88-91 us | 55 us | 56-57 us | 1.01-1.07 |
+| IQ1_M / IQ1_M | 62-63 us | 68 us | 40-41 us | 42-43 us | 1.02-1.10 |
+
+(the other 13 format classes the same; gu includes the SwiGLU and q8_1 kernels.) Weights read from the cache are
+1-15% faster, so the kernels are bound by their arithmetic and latency, not by the reads: a repacked layout would win
+little here. The time follows the format more than the bytes (down: IQ1_M 15.5 MB in 40 us, IQ2_XXS 18 MB in 55 us).
+At DeepSeek's shapes both kernels take the generic path, a 32-lane warp per row; down's rows are 72 items, so the
+last of three rounds keeps 8 of 32 lanes busy (75% on average). The 16- and 8-lane sub-warp paths exist only for
+Qwen's shapes (n_embd 2560, n_ff 640). The ceiling of any of this: the experts keep card 0 busy ~3.9 ms a token and
+card 1 ~1.1 ms (same trace), so a faster kernel wins at most ~1-2 ms a token, 2-4% of the decode. Not built.
+
 ### A rotated-INT4 copy of the experts for prompts: not built (2026-11-06)
 
 RDNA3's `v_wmma_i32_16x16x16_iu4` runs at twice the rate of the INT8 instruction ggml's MMQ uses; a block-Hadamard
