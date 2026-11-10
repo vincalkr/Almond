@@ -130,6 +130,7 @@ local/vision-memory.json
 local/.run-ctx-*
 local/session-log/
 local/chats/
+local/jobs/
 # measurement outputs and their inputs, made by the tools (the documents they come from are tracked)
 local/glm-ref/*.log
 local/glm-ref/*.f32
