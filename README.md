@@ -80,7 +80,11 @@ local/fetch.sh                                                        # the mode
 
 - `./setup.sh --check` only says what is there. `local/fetch.sh` lists the models with their state in `models/` and
   asks which to download (DeepSeek's pack and FP8 Engram rows through their own scripts, GLM, its MTP block, both
-  image encoders); `local/fetch.sh --list` only lists.
+  image encoders, the Qwen models); `local/fetch.sh --list` only lists. The quantization is chosen there: a model's
+  quantizations are separate items (`glm` 3.5 bit or `glm-3.0`; `qwen27` IQ3_S or `qwen27-q8` Q8_0), each with its
+  own configuration and name in the router (`./almond -m glm-3.0`, `./almond -m qwen27-q8`). The list starts with
+  this machine's cards, RAM and free disk, marks what does not fit (`[needs 2 cards of 24 GB]`) and ends with a
+  suggestion for the machine.
 - `local/fetch-rco-1017.sh` downloads the four shards and the pack's Engram IQ4_NL GGUF with `aria2c` (4 connections,
   `CONN`), checks each sha256, and writes the geometry overlay `local/rco-iq2xxs-meta/meta.gguf` with
   `tools/v41/ds41_pack_meta.py` (its reference geometry is `local/rco-iq2xxs-meta/geometry-keys.json`, 8 KB, in the
@@ -109,7 +113,7 @@ path of
 the same executable in `src/glm`, MIT: `src/glm/LICENSE`) and Qwen3.8-Flash-Next (`./almond serve --model qwen`,
 `src/qwen`,
 MIT: `src/qwen/LICENSE`), and the dense Qwen3.8-27B (`./almond serve --model qwen27`, `src/qwen35`; its files in
-`models/qwen38-27b`, not in `local/fetch.sh` yet); `local/fetch.sh` downloads and prepares the others' files.
+`models/qwen38-27b`); `local/fetch.sh` downloads and prepares their files.
 `./almond serve --router` puts every model of `local/router.json` behind one address, as llama-server's
 router mode does: `GET /v1/models` lists them with their status (loaded / loading / unloaded), context and thinking
 levels (`reasoning_levels`, `reasoning_default`); `POST /models/load` / `/models/unload {"model": NAME}`; a request that

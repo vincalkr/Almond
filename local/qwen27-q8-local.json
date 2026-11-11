@@ -1,0 +1,33 @@
+{
+  "exe": "build-hip-fused/almond-engine",
+  "args": [
+    "--qwen35",
+    "-m",
+    "models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf",
+    "--gpus",
+    "0,1",
+    "--max-context",
+    "262144",
+    "--kv",
+    "q8_0",
+    "--mtp",
+    "3"
+  ],
+  "env": {},
+  "cwd": ".",
+  "tokenizer": "models/qwen38-27b/tokenizer",
+  "model_name": "qwen3.8-27b-q8",
+  "log": "local/serve-qwen27-q8-engine.log",
+  "port": 8150,
+  "backend": "hip",
+  "gpu": "0,1",
+  "sampling": {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20
+  },
+  "loop_guard": true,
+  "fit_max_tokens": true,
+  "conversation_dir": "local/qwen27-q8-slots",
+  "conversation_dir_gib": 16
+}

@@ -1,10 +1,12 @@
 {
   "models": [
     {"model": "glm"},
+    {"model": "glm", "config": "local/glm-3.0-local.json"},
     {"model": "ds41"},
     {"model": "qwen"},
     {"model": "qwen27"},
-    {"model": "qwen27", "config": "local/qwen27-local-dflash.json"}
+    {"model": "qwen27", "config": "local/qwen27-local-dflash.json"},
+    {"model": "qwen27", "config": "local/qwen27-q8-local.json"}
   ],
   "default": "glm"
 }

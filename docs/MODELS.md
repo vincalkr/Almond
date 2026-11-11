@@ -196,7 +196,9 @@ The same author's 3.5-bit build (`pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF`, 137.07 
 +4.49% PPL over Q8_0 against +9.07%, KL 0.071 against 0.142). `local/glm-pack.sh 3.5` makes its pack
 (`models/glm53-gsq-rco/pack-3.5` then). It is GLM's model since 2026-11-02: the 3.0bit GGUF, its pack and kept
 slots went to the trash, and `local/glm-pack.sh`, `local/fetch.sh glm`, `./almond serve --model glm` take the 3.5bit
-(the expert profile it learned in these runs kept). On the two 7900 XTX, power-tune on: 35.5 GB of experts on the cards as with 3.0, 84.6 GB
+(the expert profile it learned in these runs kept). Since 2026-11-11 the 3.0bit is an option again, chosen at download: `local/fetch.sh glm-3.0`
+(the GGUF and `local/glm-pack.sh 3.0` into `models/glm53-gsq-rco/pack-3.0`), `local/glm-3.0-local.json`, router name
+`glm-5.3-flash-3.0bit`, `./almond -m glm-3.0`, its own slot folder `local/glm-3.0-slots`. On the two 7900 XTX, power-tune on: 35.5 GB of experts on the cards as with 3.0, 84.6 GB
 pinned in RAM (76 with 3.0), the rest read from the NVMe.
 
 | | 3.0 bit | 3.5 bit |
@@ -354,7 +356,25 @@ a dense SwiGLU FFN of 17408, its nextn block in the same file) runs on its own p
 graphs on the vendored ggml (HIP), `./almond serve --model qwen27` (`local/qwen27-local.json`; the server shim is
 Flash-Next's `serve_qwen.py`, the tokenizer is Flash-Next's with the 27B's own chat template in
 `models/qwen38-27b/tokenizer`). Model files: `models/qwen38-27b/` (the ISTA-DASLab IQ3_S + MTP GGUF, 11.28 GiB, and
-optionally z-lab's DFlash2 Q8_0 drafter, 1.92 GiB, and the BF16 mmproj, 0.87 GiB).
+optionally z-lab's DFlash2 Q8_0 drafter, 1.92 GiB, and the BF16 mmproj, 0.87 GiB). `local/fetch.sh qwen27` (and
+`qwen27-q8`, `qwen27-dflash`, `qwen27-vision`) downloads them; the tokenizer folder is exported from the GGUF
+(`tools/almond_tokenizer.py`: vocab, merges and token types identical to the folder above) with the official chat
+template kept in `tools/qwen/data/qwen27_chat_template.jinja` (unsloth's Q8_0 carries a copy without a `| safe`).
+
+Q8_0 (unsloth's `Qwen3.8-27B-Q8_0.gguf`, 27.04 GiB, the same 866 tensors with its nextn block):
+`local/qwen27-q8-local.json`, `./almond -m qwen27-q8` (router name `qwen3.8-27b-q8`), cards 0 and 1 (layers 0-29
+on card 0), 262144 context, q8_0 KV, MTP 3, its own conversation folder `local/qwen27-q8-slots`. Measured
+2026-11-11 against the IQ3_S, `--bench 512` (the fixed prompt, 512 tokens, greedy):
+
+| | IQ3_S, card 0 | Q8_0, cards 0 and 1 |
+| --- | ---: | ---: |
+| no drafts | 41.7 tok/s | 23.2 tok/s |
+| MTP 3 | 101.9 tok/s | 64.8 tok/s |
+| MTP drafts accepted | 379 / 399 | 382 / 396 |
+| prompt (512 tokens) | ~1030 tok/s | ~965 tok/s |
+
+The Q8_0 reads 2.4x the bytes per token; it is the choice for the closest answers to the original weights, the
+IQ3_S for speed and one card.
 
 Images (`local/qwen27-local-vision.json`, picked by `./almond serve --model qwen27` when the mmproj is there and
 `almond-vision` is built): the encoder runs on the CPU (`almond-vision`, 12 threads, at most 300 image tokens), the

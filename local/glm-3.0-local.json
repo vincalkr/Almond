@@ -1,0 +1,53 @@
+{
+  "exe": "build-hip-fused/almond-engine",
+  "args": [
+    "--glm-pack",
+    "models/glm53-gsq-rco/pack-3.0",
+    "--max-context",
+    "262144",
+    "--prefill",
+    "auto",
+    "--vram-reserve-mib",
+    "576",
+    "--expert-profile",
+    "local/glm-expert-profile.bin",
+    "--expert-profile-save",
+    "local/glm-expert-profile.bin"
+  ],
+  "env": {
+    "ALMOND_GLM_RESERVE_MB": "576",
+    "ALMOND_GLM_RAM_HEADROOM_GB": "16",
+    "ALMOND_GLM_PREFILL_SUB": "1024",
+    "ALMOND_GLM_PREFILL_MB": "4096",
+    "ALMOND_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-glm-hipblaslt-100401-local.txt",
+    "ALMOND_GLM_MTP_GGUF": "models/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf",
+    "ALMOND_GLM_SLOT_KEEP": "1",
+    "ALMOND_GLM_SLOT_DIR": "local/glm-3.0-slots",
+    "ALMOND_GLM_MISS_SKIP_W": "0.16",
+    "ALMOND_GLM_MISS_SKIP_FROM": "23",
+    "ALMOND_GLM_CKPT_IMAGES": "1",
+    "ALMOND_GLM_CKPT_USER": "1",
+    "ALMOND_GLM_CKPT_WHY": "1",
+    "ALMOND_GLM_SLOT_SKIP_TAIL": "8192",
+    "ALMOND_GLM_SLOT_SKIP_SAME": "0.85",
+    "ALMOND_GLM_CKPT_TRACE": "1"
+  },
+  "cwd": ".",
+  "tokenizer": "models/glm53-gsq-rco/pack-3.0/tokenizer",
+  "model_name": "glm-5.3-flash-3.0bit",
+  "log": "local/serve-glm-3.0-engine.log",
+  "port": 8150,
+  "backend": "hip",
+  "gpu": [
+    0,
+    1
+  ],
+  "sampling": {
+    "temperature": 1.0,
+    "top_p": 0.95
+  },
+  "loop_guard": true,
+  "reasoning_loop_recovery": "close",
+  "fit_max_tokens": true,
+  "min_max_tokens": 32768
+}

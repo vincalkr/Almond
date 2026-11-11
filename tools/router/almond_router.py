@@ -56,6 +56,9 @@ class Models:
         for e in entries:
             run = ["--model", e.get("model", "ds41")] + (["--config", e["config"]] if e.get("config") else [])
             info = describe(run)
+            if info is None:            # its files are not in models/ (local/fetch.sh): left out of the listing
+                print(f"router: skipped {' '.join(run)}: its model files are not downloaded (local/fetch.sh)", flush=True)
+                continue
             mid = e.get("id") or info["model"]
             self.models[mid] = {"run": run, "info": info, "failed": None}
             print(f"router: {mid} ({' '.join(run)}): context {info.get('max_context')}, thinking "
@@ -160,13 +163,15 @@ class Models:
                 self.loading = None
 
 
-def describe(run: list) -> dict:
+def describe(run: list) -> dict | None:
     out = subprocess.run([sys.executable, str(LAUNCH), *run, "--describe"], cwd=ROOT, capture_output=True, text=True,
                          timeout=120)
     line = (out.stdout.strip().splitlines() or [""])[-1]
     try:
         return json.loads(line)
     except ValueError:
+        if "missing for" in out.stderr:
+            return None
         raise SystemExit(f"router: launch.py {' '.join(run)} --describe failed:\n{out.stdout}{out.stderr}")
 
 
