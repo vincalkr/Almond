@@ -35,7 +35,9 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
 - Qwen: `local/qwen-local.json` on card 0 (`local/qwen-local-vision.json` with its encoder,
   `models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf`, read on the CPU): the GGUF's two shards in
   `models/qwen38-iq3s`, its pack in `models/qwen38-iq3s-pack` (`tools/qwen/iq_pack.py`), the MTP block in
-  `models/qwen38-mtp` (`tools/qwen/mtp_fetch.py`, `mtp_pack.py`, `mtp_rt.py`).
+  `models/qwen38-mtp` (`tools/qwen/mtp_fetch.py`, `mtp_pack.py`, `mtp_rt.py`); `local/qwen-q8-local.json` unsloth's
+  Q8_0 on two cards with at most 56 GiB of experts in RAM (`./almond -m qwen-q8`, ~16 tok/s; a whole-RAM arena
+  stalled the machine).
 - The model files live in `models/`, inside this folder (gitignored); `local/fetch.sh` downloads and prepares them,
   `./setup.sh` walks a new installation.
 

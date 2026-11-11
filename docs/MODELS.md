@@ -509,3 +509,27 @@ Engine bench on card 0 (`--bench 512 --prompt-ids` of the rendered prompt, think
 the same text as MTP's on all four; DSpine alone the same on three (the story parts at a near tie, as MTP and DFlash2
 do). Configurations: `local/qwen27-local-dspine.json` (`./almond -m qwen27-dspine`, 131072) and
 `local/qwen27-q8-local-dspine.json` (`./almond -m qwen27-q8-dspine`, two cards); the defaults keep MTP.
+
+## Qwen3.8-Flash-Next Q8_0 (unsloth, 2026-11-11)
+
+`unsloth/Qwen3.8-Flash-Next-GGUF` Q8_0 (six shards, 188 GB; experts 128.3 GB, 5.2 MB each; the PLE table, 54 GB, in
+shard 3), `local/fetch.sh qwen-q8` (its pack with `--compat-bf16`: the hyper-connection projections are Q8_0 in this
+GGUF and the engine reads them as BF16), `local/qwen-q8-local.json`, `./almond -m qwen-q8` (router name
+`qwen3.8-flash-next-q8`): card 0 with 3291 expert slots (16 GiB), card 1 as the peer expert tier, the MTP block of
+`models/qwen38-mtp`.
+
+The resident arena does not fit this machine: the engine asked for 119.5 GiB of RAM with 88.9 available, only warns
+about it and goes on, and pinning that much stalled the whole machine. The configuration reads the experts through
+the page cache instead and keeps the most used in RAM (`--mmap-experts --resident-budget-gib 56`). Between these two
+cards a peer copy arrives wrong (a host bridge, no real P2P), so the second card's rows take the host route.
+
+Greedy, thinking off, the server's four prompts, power-tune on (tok/s; the share of routed experts found in VRAM):
+
+| | Python function | technical | story (Italian) | bash script | mean |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `--resident-budget-gib 56` | 17.9 (76.1%) | 20.2 (76.9%) | 14.0 (85.0%) | 13.6 (71.3%) | 16.4 |
+| `--resident-budget-gib 66` | 17.6 (81.7%) | 15.6 (78.2%) | 13.4 (85.6%) | 15.9 (72.3%) | 15.4 |
+
+10 GiB more in RAM bought nothing measurable and left 21 GiB of the machine's RAM available instead of 29: 56 stays.
+The IQ3_S on card 0 runs the same prompts at 50-78 tok/s; the Q8_0 is for the closest answers to the original
+weights at about a quarter of the speed.

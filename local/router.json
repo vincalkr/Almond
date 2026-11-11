@@ -4,6 +4,7 @@
     {"model": "glm", "config": "local/glm-3.0-local.json"},
     {"model": "ds41"},
     {"model": "qwen"},
+    {"model": "qwen", "config": "local/qwen-q8-local.json"},
     {"model": "qwen27"},
     {"model": "qwen27", "config": "local/qwen27-q8-local.json"},
     {"model": "qwen27", "config": "local/qwen27-local-dspine.json"},

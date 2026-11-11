@@ -27,9 +27,11 @@ QWEN_SHARDS=$(for i in 1 2; do echo "$M/qwen38-iq3s/Qwen3.8-Flash-Next-GSQ-RCO-I
 Q27_REPO=ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF
 Q27_Q8_REPO=unsloth/Qwen3.8-27B-GGUF
 Q27=$M/qwen38-27b
+QWEN_Q8_REPO=unsloth/Qwen3.8-Flash-Next-GGUF
+QWEN_Q8_SHARDS=$(for i in 1 2 3 4 5 6; do echo "$M/qwen38-q8/Qwen3.8-Flash-Next-Q8_0-0000$i-of-00006.gguf"; done)
 DS_SHARDS=$(for i in 1 2 3 4; do echo "$M/rco-iq2xxs/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-0000$i-of-00004.gguf"; done)
 
-ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-3.0 glm-mtp glm-vision qwen qwen-mtp qwen-vision
+ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-3.0 glm-mtp glm-vision qwen qwen-q8 qwen-mtp qwen-vision
        qwen27 qwen27-q8 qwen27-dspine qwen27-vision)
 desc() {
     case $1 in
@@ -41,6 +43,7 @@ desc() {
         glm-mtp)             echo "GLM MTP draft block (from an IQ2_S quant's shard 3, 20.5 GB download, kept 3.6 GB)";;
         glm-vision)          echo "GLM image encoder (mmproj F16 + vocab)                                               1.1 GB";;
         qwen)                echo "Qwen3.8-Flash-Next GSQ-RCO IQ3_S (ISTA-DASLab) + its pack                       85 GB";;
+        qwen-q8)             echo "Qwen3.8-Flash-Next Q8_0 (unsloth) + its pack: two cards, ~16 tok/s           188 GB";;
         qwen-mtp)            echo "Qwen MTP draft block (the BF16 checkpoint's mtp.* tensors, 5.2 GB read, kept 0.8 GB)";;
         qwen-vision)         echo "Qwen image encoder (mmproj BF16)                                                     0.9 GB";;
         qwen27)              echo "Qwen3.8-27B dense, GSQ-RCO IQ3_S + MTP block (ISTA-DASLab), one card           12.1 GB";;
@@ -59,6 +62,7 @@ files() {   # the files that make the item present
         glm-mtp)             echo "$M/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf";;
         glm-vision)          echo "$M/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf"; echo "$M/glm53-vision/GLM-5.3-Flash-vocab.gguf";;
         qwen)                echo "$QWEN_SHARDS"; echo "$M/qwen38-iq3s-pack/native_experts.txt";;
+        qwen-q8)             echo "$QWEN_Q8_SHARDS"; echo "$M/qwen38-q8-pack/native_experts.txt";;
         qwen-mtp)            echo "$M/qwen38-mtp/experts.bin"; echo "$M/qwen38-mtp/draft_vocab.bin";;
         qwen-vision)         echo "$M/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf";;
         qwen27)              echo "$Q27/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"; echo "$Q27/tokenizer";;
@@ -119,6 +123,9 @@ fetch() {
                              [ "$DRY_RUN" = 1 ] || [ -s "$M/qwen38-iq3s-pack/native_experts.txt" ] ||
                                  "$PY" "$R/tools/qwen/iq_pack.py" --gguf "$M/qwen38-iq3s/$(basename "$(echo "$QWEN_SHARDS" | head -1)")" \
                                      --out "$M/qwen38-iq3s-pack";;
+        qwen-q8)             for f in $QWEN_Q8_SHARDS; do get $QWEN_Q8_REPO Q8_0/$(basename "$f") "$f"; done
+                             [ "$DRY_RUN" = 1 ] || [ -s "$M/qwen38-q8-pack/native_experts.txt" ] ||
+                                 "$PY" "$R/tools/qwen/iq_pack.py" --gguf "$(echo "$QWEN_Q8_SHARDS" | head -1)" --out "$M/qwen38-q8-pack" --compat-bf16;;
         qwen-mtp)            [ -s "$M/qwen38-mtp/experts.bin" ] && { echo "have   qwen38-mtp"; return; }
                              [ "$DRY_RUN" = 1 ] && { echo "get    Qwen/Qwen3.8-Flash-Next mtp.* tensors (5.2 GB of range reads)"; return; }
                              # the checkpoint's 31 mtp.* tensors (HTTP ranges of 28 shards, SHA256-checked), packed with
@@ -156,7 +163,7 @@ fit() {   # why an item does not fit this machine, or nothing
     case $1 in
         glm|glm-3.0)         cards=2; ram=100;;   # the layers over both cards, the experts in pinned RAM
         deepseek|qwen)       ram=100;;            # the 80 GiB pinned arena (README, Requirements: 128 GB class)
-        qwen27-q8)           cards=2;;            # 29 GB of weights
+        qwen27-q8|qwen-q8)   cards=2;;            # 29 GB of weights; Flash-Next Q8_0: 128 GB of experts
     esac
     [ "$CARDS" -lt $cards ] && { echo "needs $cards cards of 24 GB"; return; }
     [ "$RAM_GB" -lt $ram ] && { echo "needs ~128 GB of RAM"; return; }
@@ -184,6 +191,7 @@ show() {
     else
         echo "  no 24 GB card found (rocm-smi): Almond needs at least one RX 7900 XT / XTX"
     fi
+    [ "$CARDS" -ge 2 ] && echo "  Qwen3.8-Flash-Next: qwen (IQ3_S, 50-78 tok/s); qwen-q8 (Q8_0, the closest to the original weights, ~16 tok/s)"
     [ "$RAM_GB" -lt 100 ] && echo "  with $RAM_GB GB of RAM: the dense Qwen3.8-27B; the MoE models want ~128 GB"
     return 0
 }
