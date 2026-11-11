@@ -13646,7 +13646,8 @@ int qwen_main(int argc, char** argv) {
                 almond::qwen::core::conversation_park_join();   // (ALMOND_PARK_ASYNC: the last park's K/V)
                 if (path.empty()) { refuse("missing path"); continue; }
                 if (!stages.empty() || multi_gpu) { refuse("session files do not support --layer-split"); continue; }
-                if (o.peer_device >= 1) { refuse("session files do not support --peer-device"); continue; }
+                // --peer-device: the second card holds only an expert-cache tier; the K/V and the running state a session
+                // file carries live on the primary, so save and restore need nothing from it
                 if (o.batch > 0) { refuse("session files do not support --batch (parallel requests)"); continue; }
                 if (o.prompt_cache <= 0) { refuse("session files need --prompt-cache > 0"); continue; }
                 if (!ver.wait_commit(err)) {
