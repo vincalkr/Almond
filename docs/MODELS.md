@@ -465,3 +465,46 @@ buffers of a prompt window that deep, so the default configuration is one card a
 `local/qwen27-local-256k.json` splits the layers over two cards for the full 262144 (slower at any length: every
 token crosses both cards). Past ~100K the decode slows down: with a q8_0 KV the verify window's attention converts the
 cache it reads to f16.
+
+### DSpine drafter inside code, MTP elsewhere (`--spec auto`, 2026-11-11)
+
+Tencent's DSpine (`tencent/Qwen3.8-27B-DSpine-b16`; the GGUF `aj9o9/Qwen3.8-27B-DSpine-b16-GGUF` Q4_K_M, 1.16 GiB,
+`local/fetch.sh qwen27-dspine`) is the DFlash frame without the convolutions and the selector: 5 layers reading the
+trunk at layers 2, 17, 32, 47, 62, causal inside the block, an 8192-token window (the KV ring is 16384 cells), and
+after every layer a code bridge (each row reads a unit code from its hidden state, the first row takes its token's
+codebook row, row t gets a gated message from row t-1's code); the candidates are scored by redoing the last bridge
+once per predecessor candidate (top 16). The engine reads it through `--dflash` (the GGUF says which drafter it is),
+at most 7 drafts (the verify window's 8 DeltaNet snapshots).
+
+Measured first in llama.cpp (a fork with DSpine support, same prompts, greedy, 512 tokens): it gains on code and
+loses on prose, more with longer drafts.
+
+| IQ3_S, tok/s | MTP 3 | DSpine 3 | DSpine 7 | DSpine 15 |
+| --- | ---: | ---: | ---: | ---: |
+| Python function with tests | 90.8 | 88.3 | 106.9 | 117.2 |
+| technical explanation | 74.9 | 70.9 | 57.4 | 54.2 |
+| short story in Italian | 54.4 | 40.8 | 28.6 | 23.0 |
+| bash script, explained | 84.3 | 83.4 | 87.3 | 75.0 |
+
+(Q8_0 on two cards: Python 59.6 with MTP 3 against 97.9 with DSpine 15; the story 36.2 against 19.1.)
+
+So `--spec auto` (with `--mtp 3` and the drafter) follows the generated text: inside a ``` block or a `<tool_call>`
+the block drafter drafts, elsewhere MTP; the MTP block is caught up every round either way and the drafter's ring is
+filled by every verify window. Inside code, when the drafter's tokens per millisecond fall below 0.9x MTP's (measured
+on the text before), MTP drafts until the block ends (`ALMOND_Q35_AUTO_GIVEUP`). An earlier rule that chose by the two
+drafters' moving rates with trial rounds (MTP and DFlash2) was slower than MTP alone (62.9 against 66.6 tok/s over the
+four prompts) and was dropped.
+
+Engine bench on card 0 (`--bench 512 --prompt-ids` of the rendered prompt, thinking off, decode only):
+
+| IQ3_S, tok/s | MTP 3 | DSpine 7 | `--spec auto` (rounds MTP / DSpine) |
+| --- | ---: | ---: | ---: |
+| Python function with tests | 79.7 | 109.3 | 104.3 (0 / 83) |
+| technical explanation | 63.2, 71.6 | 55.1 | 70.2, 70.5 (183 / 0) |
+| short story in Italian | 50.4, 56.5 | 29.4 | 54.9, 54.9 (236 / 0) |
+| bash script, explained | 88.6 | 88.9 | 85.8 (92 / 38) |
+
+(two values: two runs; the card's run-to-run spread is ~10%.) Greedy, the server's answers with `--spec auto` were
+the same text as MTP's on all four; DSpine alone the same on three (the story parts at a near tie, as MTP and DFlash2
+do). Configurations: `local/qwen27-local-dspine.json` (`./almond -m qwen27-dspine`, 131072) and
+`local/qwen27-q8-local-dspine.json` (`./almond -m qwen27-q8-dspine`, two cards); the defaults keep MTP.

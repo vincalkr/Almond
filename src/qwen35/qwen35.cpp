@@ -5,7 +5,7 @@
 // unchanged.  almond-engine runs it when its arguments name --qwen35 (src/engine_main.cpp).
 //
 //   almond-engine --qwen35 -m <27B.gguf> [--gpus 0[,1]] [--max-context N] [--kv f16|q8_0] [--ubatch N]
-//                 [--mtp N] [--spec-min-p P] [--dflash <DFlash2 GGUF> [--dflash-n N]]
+//                 [--mtp N] [--spec-min-p P] [--dflash <DFlash2 GGUF> [--dflash-n N]] [--spec auto]
 //                 [--serve | --bench N | --ppl ids.i32 --ppl-ctx N]
 //
 // The recurrent state: each DeltaNet layer keeps its conv window (the last W columns of the conv input, W = KSNAP+2)
@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 #include <deque>
 #include <fcntl.h>
 #include <map>
@@ -95,6 +96,8 @@ struct Opts {
     std::string dflash;             // --dflash <DFlash2 GGUF>: block drafts in place of the MTP block
     int dflash_n = 5;               // drafts per block (block = 1 + this, at most the drafter's block size - 1):
                                     // 5 measured best over code / technical / free prose (7 only on code)
+    bool spec_auto = false;         // --spec auto (with --dflash and --mtp): per round the drafter whose recent
+                                    // tokens per millisecond are higher; the other one is tried every few rounds
     bool serve = false;
     int bench = 0;
     std::string ppl_file;
@@ -107,17 +110,30 @@ struct Opts {
 // whose K/V context is the trunk's residual stream at five of its layers (fc + norm, injected at every position the
 // trunk reads), two-tap dynamic convolutions around attention and FFN, the trunk's embeddings and head, and a
 // selector that scores top-16 candidates per block position with pairwise transitions (walked on the CPU).
-constexpr int DF_RING = 4096;   // the drafter's KV: a ring of cells by position (its attention window is 2048)
+//
+// DSpine (tencent/Qwen3.8-27B-DSpine-b16) is the same frame without the convolutions and the selector: causal inside
+// the block, an 8192-token window, and after every layer a "code bridge" (each row reads a unit code from its hidden
+// state, the block's first row takes its token's codebook row, and row t gets a gated message from row t-1's code);
+// its candidates are scored by redoing the last layer's bridge once per exact predecessor candidate.
 struct DfLayer {
-    ggml_tensor *attn_norm, *wq, *wk, *wv, *wo, *q_norm, *k_norm, *attn_conv_base, *attn_conv_proj;
-    ggml_tensor *ffn_norm, *ffn_gate, *ffn_up, *ffn_down, *ffn_conv_base, *ffn_conv_proj;
-    ggml_tensor *k_ring = nullptr, *v_ring = nullptr;   // [kv_dim, DF_RING] f16
+    ggml_tensor *attn_norm, *wq, *wk, *wv, *wo, *q_norm, *k_norm;
+    ggml_tensor *attn_conv_base = nullptr, *attn_conv_proj = nullptr;
+    ggml_tensor *ffn_norm, *ffn_gate, *ffn_up, *ffn_down;
+    ggml_tensor *ffn_conv_base = nullptr, *ffn_conv_proj = nullptr;
+    ggml_tensor *sp_read = nullptr, *sp_write = nullptr;   // DSpine: [n_embd -> code], [rank -> n_embd]
+    ggml_tensor *k_ring = nullptr, *v_ring = nullptr;      // [kv_dim, ring] f16
 };
 struct Drafter {
     gguf_context* gguf = nullptr;
     ggml_context* meta = nullptr;
     int n_layer = 0, n_embd = 0, n_head = 0, n_head_kv = 0, head_dim = 0, block = 8, conv_k = 2, conv_g = 16,
         rank = 256, top_k = 16, swa = 2048;
+    int ring = 4096;          // the KV ring's cells, by position: at least the window + a block + a verify window
+    bool dspine = false;      // DSpine (code bridge, causal block) rather than DFlash2 (convolutions, selector)
+    bool causal = false;
+    int sp_code = 0, sp_rank = 0;
+    ggml_tensor *sp_codebook = nullptr, *sp_gate = nullptr, *sp_gate_b = nullptr, *sp_pred_gate = nullptr,
+                *sp_prev = nullptr;
     float eps = 1e-6f, rope_base = 1e7f;
     int32_t mask_id = 248070;
     std::vector<int> target_layers;
@@ -394,9 +410,9 @@ void load_drafter(Model& m) {
     d->n_head_kv = (int) u("dflash.attention.head_count_kv");
     d->head_dim = (int) u("dflash.attention.key_length");
     d->block = (int) u("dflash.block_size");
-    d->conv_k = (int) u("dflash.conv_kernel_size");
-    d->conv_g = (int) u("dflash.conv_group_size");
-    d->rank = (int) u("dflash.selector_rank");
+    d->conv_k = (int) u("dflash.conv_kernel_size", false, 2);
+    d->conv_g = (int) u("dflash.conv_group_size", false, 16);
+    d->rank = (int) u("dflash.selector_rank", false, 0);
     d->top_k = (int) u("dflash.selector_top_k");
     d->swa = (int) u("dflash.attention.sliding_window", false, 2048);
     d->eps = kv_f32(d->gguf, "dflash.attention.layer_norm_rms_epsilon");
@@ -410,12 +426,19 @@ void load_drafter(Model& m) {
         const int32_t* v = (const int32_t*) gguf_get_arr_data(d->gguf, id);
         d->target_layers.assign(v, v + n);
     }
+    d->dspine = ggml_get_tensor(d->meta, "dspine_codebook.weight") != nullptr;
+    {
+        const int64_t id = gguf_find_key(d->gguf, "dflash.attention.causal");
+        d->causal = id >= 0 && gguf_get_val_bool(d->gguf, id);
+    }
     if (d->n_embd != m.hp.n_embd) die("the drafter's width is not the model's");
-    if (d->conv_k != 2 || d->top_k < 2 || d->top_k > 64) die("a DFlash2 drafter with conv kernel 2 is expected");
+    if (d->top_k < 2 || d->top_k > 64) die("the drafter's top-k is outside 2..64");
+    if (!d->dspine && d->conv_k != 2) die("a DFlash2 drafter with conv kernel 2 is expected");
+    d->ring = 4096;
+    while (d->ring < d->swa + d->block + KSNAP) d->ring *= 2;
     for (int t : d->target_layers)
         if (t < 0 || t >= m.hp.n_layer) die("the drafter reads a layer the model does not have");
     m.o.dflash_n = std::clamp(m.o.dflash_n, 1, std::min(d->block - 1, KSNAP - 1));
-    if (d->swa + d->block + KSNAP > DF_RING) die("the drafter's window does not fit the ring");
     const int dev = (int) m.gpu.size() - 1;
     ggml_init_params ip = {ggml_tensor_overhead() * 256, nullptr, true};
     ggml_context* wc = ggml_init(ip);
@@ -429,9 +452,19 @@ void load_drafter(Model& m) {
     d->fc = P("fc.weight");
     d->enc_norm = P("enc.output_norm.weight");
     d->out_norm = P("output_norm.weight");
-    d->sel_hidden = P("selector_hidden.weight");
-    d->sel_prev = P("selector_predecessor.weight");
-    d->sel_next = P("selector_successor.weight");
+    if (d->dspine) {
+        d->sp_codebook = P("dspine_codebook.weight");
+        d->sp_gate = P("dspine_gate.weight");
+        d->sp_gate_b = P("dspine_gate.bias");
+        d->sp_pred_gate = P("dspine_pred_gate.weight");
+        d->sp_prev = P("dspine_prev.weight");
+        d->sp_code = (int) d->sp_codebook->ne[0];
+        d->sp_rank = (int) d->sp_gate->ne[1];
+    } else {
+        d->sel_hidden = P("selector_hidden.weight");
+        d->sel_prev = P("selector_predecessor.weight");
+        d->sel_next = P("selector_successor.weight");
+    }
     d->L.resize(d->n_layer);
     for (int il = 0; il < d->n_layer; ++il) {
         DfLayer& l = d->L[il];
@@ -443,14 +476,19 @@ void load_drafter(Model& m) {
         l.wo = B("attn_output.weight");
         l.q_norm = B("attn_q_norm.weight");
         l.k_norm = B("attn_k_norm.weight");
-        l.attn_conv_base = B("attn_conv_base");
-        l.attn_conv_proj = B("attn_conv_proj.weight");
+        if (!d->dspine) {
+            l.attn_conv_base = B("attn_conv_base");
+            l.attn_conv_proj = B("attn_conv_proj.weight");
+            l.ffn_conv_base = B("ffn_conv_base");
+            l.ffn_conv_proj = B("ffn_conv_proj.weight");
+        } else {
+            l.sp_read = B("dspine_read.weight");
+            l.sp_write = B("dspine_write.weight");
+        }
         l.ffn_norm = B("ffn_norm.weight");
         l.ffn_gate = B("ffn_gate.weight");
         l.ffn_up = B("ffn_up.weight");
         l.ffn_down = B("ffn_down.weight");
-        l.ffn_conv_base = B("ffn_conv_base");
-        l.ffn_conv_proj = B("ffn_conv_proj.weight");
     }
     ggml_backend_buffer_t b = ggml_backend_alloc_ctx_tensors_from_buft(wc, ggml_backend_get_default_buffer_type(m.gpu[dev]));
     if (!b) die("cannot allocate the drafter's weights");
@@ -472,20 +510,22 @@ void load_drafter(Model& m) {
     ggml_init_params sp = {ggml_tensor_overhead() * 64, nullptr, true};
     ggml_context* sc = ggml_init(sp);
     for (DfLayer& l : d->L) {
-        l.k_ring = ggml_new_tensor_2d(sc, GGML_TYPE_F16, d->kv_dim(), DF_RING);
-        l.v_ring = ggml_new_tensor_2d(sc, GGML_TYPE_F16, d->kv_dim(), DF_RING);
+        l.k_ring = ggml_new_tensor_2d(sc, GGML_TYPE_F16, d->kv_dim(), d->ring);
+        l.v_ring = ggml_new_tensor_2d(sc, GGML_TYPE_F16, d->kv_dim(), d->ring);
     }
     ggml_backend_buffer_t rb = ggml_backend_alloc_ctx_tensors(sc, m.gpu[dev]);
     if (!rb) die("cannot allocate the drafter's KV ring");
     ggml_backend_buffer_clear(rb, 0);
     m.bufs.push_back(rb);
-    d->ring_pos.assign(DF_RING, -1);
-    std::fprintf(stderr, "qwen35: DFlash2 drafter %d layers, block %d (%d drafts), top-%d selector, window %d, reads "
-                         "layers", d->n_layer, d->block, m.o.dflash_n, d->top_k, d->swa);
+    d->ring_pos.assign(d->ring, -1);
+    std::fprintf(stderr, "qwen35: %s drafter %d layers, block %d (%d drafts), top-%d %s, window %d (ring %d), reads "
+                         "layers", d->dspine ? "DSpine" : "DFlash2", d->n_layer, d->block, m.o.dflash_n, d->top_k,
+                 d->dspine ? "lattice" : "selector", d->swa, d->ring);
     for (int t : d->target_layers) std::fprintf(stderr, " %d", t);
     std::fprintf(stderr, "; %.2f GiB\n", total / 1073741824.0);
     m.df = std::move(d);
-    m.o.mtp = 0;   // one drafter at a time
+    if (!m.o.spec_auto) m.o.mtp = 0;   // one drafter at a time, unless --spec auto keeps both
+    else if (m.o.mtp <= 0) m.o.spec_auto = false;
 }
 
 // ---------------------------------------------------------------------------------------------------------------- graphs
@@ -834,17 +874,45 @@ Built& df_graph(Model& m, Graphs& G, int B) {
     Inputs& in = b.in;
     in.tok = ggml_new_tensor_1d(c, GGML_TYPE_I32, B);
     in.pos = ggml_new_tensor_1d(c, GGML_TYPE_I32, (int64_t) B * 4);
-    in.mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, DF_RING, B);
+    in.mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, d.ring, B);
     in.ring_idx = ggml_new_tensor_1d(c, GGML_TYPE_I64, B);
     in.anchor = ggml_new_tensor_2d(c, GGML_TYPE_I32, d.top_k, 1);
     for (ggml_tensor* t : {in.tok, in.pos, in.mask, in.ring_idx, in.anchor}) ggml_set_input(t);
     int sec[4] = {d.head_dim / 2, 0, 0, 0};
     const int D = d.head_dim;
+    const float sq_code = std::sqrt((float) d.sp_code);
+    // DSpine's code bridge after a layer (see the Drafter comment); the last layer's pre-bridge state is kept for the
+    // lattice: its rows, their rms and their own codes' gate projection
+    ggml_tensor *st_raw = nullptr, *st_rms = nullptr, *st_q = nullptr;
+    auto bridge = [&](const DfLayer& l, ggml_tensor* x, bool last) -> ggml_tensor* {
+        if (B < 2) return x;
+        ggml_tensor* rv = ggml_sqrt(c, ggml_scale(c, ggml_sum_rows(c, ggml_sqr(c, x)), 1.0f / d.n_embd));   // [1, B]
+        ggml_tensor* codes = ggml_mul_mat(c, l.sp_read, ggml_rms_norm(c, x, d.eps));                       // [code, B]
+        codes = ggml_scale(c, ggml_l2_norm(c, codes, d.eps), sq_code);
+        ggml_tensor* anc = ggml_scale(c, ggml_get_rows(c, d.sp_codebook, ggml_view_1d(c, in.tok, 1, 0)), sq_code);
+        codes = ggml_concat(c, anc, ggml_cont(c, ggml_view_2d(c, codes, d.sp_code, B - 1, codes->nb[1], codes->nb[1])), 1);
+        ggml_tensor* q = ggml_mul_mat(c, d.sp_gate, codes);        // [rank, B]
+        ggml_tensor* sg = ggml_mul_mat(c, d.sp_pred_gate, codes);
+        ggml_tensor* v = ggml_mul_mat(c, d.sp_prev, codes);
+        auto rows = [&](ggml_tensor* t, int from) {
+            return ggml_cont(c, ggml_view_2d(c, t, t->ne[0], B - 1, t->nb[1], (size_t) from * t->nb[1]));
+        };
+        // message(t) = sigmoid(Wg c_t + Wp c_(t-1) + b) * (Wv c_(t-1)); none for the first row
+        ggml_tensor* gate = ggml_sigmoid(c, ggml_add(c, ggml_add(c, rows(q, 1), rows(sg, 0)), d.sp_gate_b));
+        ggml_tensor* delta = ggml_mul_mat(c, l.sp_write, ggml_mul(c, gate, rows(v, 0)));   // [E, B-1]
+        delta = ggml_mul(c, ggml_pad_ext(c, delta, 0, 0, 1, 0, 0, 0, 0, 0), rv);
+        if (last) { st_raw = x; st_rms = rv; st_q = q; }
+        return ggml_add(c, x, delta);
+    };
     ggml_tensor* x = ggml_get_rows(c, m.tok_embd, in.tok);
-    for (const DfLayer& l : d.L) {
+    for (size_t il = 0; il < d.L.size(); ++il) {
+        const DfLayer& l = d.L[il];
         ggml_tensor* nn = rms(c, x, l.attn_norm, d.eps);
-        ggml_tensor* adyn = ggml_mul_mat(c, l.attn_conv_proj, nn);
-        nn = df_conv(c, d, nn, adyn, l.attn_conv_base, 0, B);
+        ggml_tensor* adyn = nullptr;
+        if (l.attn_conv_proj) {
+            adyn = ggml_mul_mat(c, l.attn_conv_proj, nn);
+            nn = df_conv(c, d, nn, adyn, l.attn_conv_base, 0, B);
+        }
         ggml_tensor* q = ggml_reshape_3d(c, ggml_mul_mat(c, l.wq, nn), D, d.n_head, B);
         ggml_tensor* k = ggml_reshape_3d(c, ggml_mul_mat(c, l.wk, nn), D, d.n_head_kv, B);
         ggml_tensor* v = ggml_mul_mat(c, l.wv, nn);
@@ -857,41 +925,67 @@ Built& df_graph(Model& m, Graphs& G, int B) {
         ggml_build_forward_expand(gf, ggml_set_rows(c, l.k_ring, ggml_reshape_2d(c, k, d.kv_dim(), B), in.ring_idx));
         ggml_build_forward_expand(gf, ggml_set_rows(c, l.v_ring, v, in.ring_idx));
         const size_t row = ggml_row_size(GGML_TYPE_F16, d.kv_dim()), hrow = ggml_row_size(GGML_TYPE_F16, D);
-        ggml_tensor* kk = ggml_permute(c, ggml_view_3d(c, l.k_ring, D, d.n_head_kv, DF_RING, hrow, row, 0), 0, 2, 1, 3);
-        ggml_tensor* vv = ggml_permute(c, ggml_view_3d(c, l.v_ring, D, d.n_head_kv, DF_RING, hrow, row, 0), 0, 2, 1, 3);
+        ggml_tensor* kk = ggml_permute(c, ggml_view_3d(c, l.k_ring, D, d.n_head_kv, d.ring, hrow, row, 0), 0, 2, 1, 3);
+        ggml_tensor* vv = ggml_permute(c, ggml_view_3d(c, l.v_ring, D, d.n_head_kv, d.ring, hrow, row, 0), 0, 2, 1, 3);
         ggml_tensor* o = ggml_flash_attn_ext(c, ggml_permute(c, q, 0, 2, 1, 3), kk, vv, in.mask,
                                              1.0f / std::sqrt((float) D), 0.0f, 0.0f);
         o = ggml_mul_mat(c, l.wo, ggml_reshape_2d(c, o, D * d.n_head, B));
-        o = df_conv(c, d, o, adyn, l.attn_conv_base, 1, B);
+        if (adyn) o = df_conv(c, d, o, adyn, l.attn_conv_base, 1, B);
         ggml_tensor* fi = ggml_add(c, o, x);
         ggml_tensor* cur = rms(c, fi, l.ffn_norm, d.eps);
-        ggml_tensor* fdyn = ggml_mul_mat(c, l.ffn_conv_proj, cur);
-        cur = df_conv(c, d, cur, fdyn, l.ffn_conv_base, 0, B);
+        ggml_tensor* fdyn = nullptr;
+        if (l.ffn_conv_proj) {
+            fdyn = ggml_mul_mat(c, l.ffn_conv_proj, cur);
+            cur = df_conv(c, d, cur, fdyn, l.ffn_conv_base, 0, B);
+        }
         cur = ggml_mul_mat(c, l.ffn_down, ggml_swiglu_split(c, ggml_mul_mat(c, l.ffn_gate, cur),
                                                            ggml_mul_mat(c, l.ffn_up, cur)));
-        cur = df_conv(c, d, cur, fdyn, l.ffn_conv_base, 1, B);
+        if (fdyn) cur = df_conv(c, d, cur, fdyn, l.ffn_conv_base, 1, B);
         x = ggml_add(c, cur, fi);
+        if (l.sp_write) x = bridge(l, x, il + 1 == d.L.size());
     }
     ggml_tensor* emb = rms(c, x, d.out_norm, d.eps);
     ggml_tensor* logits = ggml_mul_mat(c, m.output, emb);                      // [V, B]
     const int K = d.top_k, R = d.rank, P = B - 1;
     ggml_tensor* cand = ggml_top_k(c, logits, K);                               // [K, B] i32
-    ggml_tensor* unary = ggml_reshape_2d(c, ggml_get_rows(c, ggml_reshape_3d(c, logits, 1, logits->ne[0], B), cand),
-                                         K, B);                                  // [K, B]
-    ggml_tensor* gate = ggml_mul_mat(c, d.sel_hidden, emb);                    // [R, B]
     // rows 1..B-1: successors = their own candidates, predecessors = row 1: the anchor; rows 2..: row-1's candidates
     ggml_tensor* succ_ids = ggml_cont(c, ggml_view_2d(c, cand, K, P, cand->nb[1], cand->nb[1]));
     ggml_tensor* pred_ids = P > 1 ? ggml_concat(c, in.anchor, ggml_cont(c, ggml_view_2d(c, cand, K, P - 1, cand->nb[1],
                                                                                       cand->nb[1])), 1)
                                   : in.anchor;
-    ggml_tensor* succ = ggml_reshape_3d(c, ggml_get_rows(c, d.sel_next, ggml_reshape_1d(c, succ_ids, K * P)), R, K, P);
-    ggml_tensor* pred = ggml_reshape_3d(c, ggml_get_rows(c, d.sel_prev, ggml_reshape_1d(c, ggml_cont(c, pred_ids), K * P)),
-                                        R, K, P);
-    ggml_tensor* g1 = ggml_reshape_3d(c, ggml_cont(c, ggml_view_2d(c, gate, R, P, gate->nb[1], gate->nb[1])), R, 1, P);
-    ggml_tensor* cond = ggml_mul(c, pred, g1);                                  // [R, K(pred), P]
-    ggml_tensor* score = ggml_mul_mat(c, succ, cond);                           // [K(succ), K(pred), P]
-    ggml_tensor* u1 = ggml_reshape_3d(c, ggml_cont(c, ggml_view_2d(c, unary, K, P, unary->nb[1], unary->nb[1])), K, 1, P);
-    score = ggml_add(c, score, u1);
+    ggml_tensor* score = nullptr;
+    if (d.dspine && st_raw) {
+        // the last bridge again, once per exact predecessor candidate; table[k][j] = the head's logit of candidate k
+        // after the bridge with predecessor candidate j
+        const int Rk = d.sp_rank;
+        ggml_tensor* pc = ggml_scale(c, ggml_get_rows(c, d.sp_codebook, ggml_reshape_1d(c, ggml_cont(c, pred_ids), K * P)),
+                                     sq_code);                                  // [code, K*P]
+        ggml_tensor* gp = ggml_reshape_3d(c, ggml_mul_mat(c, d.sp_pred_gate, pc), Rk, K, P);
+        ggml_tensor* pv = ggml_reshape_3d(c, ggml_mul_mat(c, d.sp_prev, pc), Rk, K, P);
+        auto rows3 = [&](ggml_tensor* t) {   // rows 1..B-1 as [ne0, 1, P]
+            return ggml_reshape_3d(c, ggml_cont(c, ggml_view_2d(c, t, t->ne[0], P, t->nb[1], t->nb[1])), t->ne[0], 1, P);
+        };
+        ggml_tensor* gate = ggml_sigmoid(c, ggml_add(c, ggml_add(c, gp, rows3(st_q)), d.sp_gate_b));
+        ggml_tensor* delta = ggml_mul_mat(c, d.L.back().sp_write, ggml_reshape_2d(c, ggml_mul(c, gate, pv), Rk, K * P));
+        delta = ggml_reshape_3d(c, delta, d.n_embd, K, P);
+        ggml_tensor* refined = ggml_add(c, ggml_mul(c, delta, rows3(st_rms)), rows3(st_raw));
+        refined = rms(c, refined, d.out_norm, d.eps);                          // [E, K(pred), P]
+        ggml_tensor* head = ggml_reshape_3d(c, ggml_get_rows(c, m.output, ggml_reshape_1d(c, succ_ids, K * P)),
+                                            d.n_embd, K, P);                    // [E, K(succ), P]
+        score = ggml_mul_mat(c, head, refined);                                 // [K(succ), K(pred), P]
+    } else {
+        ggml_tensor* unary = ggml_reshape_2d(c, ggml_get_rows(c, ggml_reshape_3d(c, logits, 1, logits->ne[0], B), cand),
+                                             K, B);                              // [K, B]
+        ggml_tensor* gate = ggml_mul_mat(c, d.sel_hidden, emb);                // [R, B]
+        ggml_tensor* succ = ggml_reshape_3d(c, ggml_get_rows(c, d.sel_next, ggml_reshape_1d(c, succ_ids, K * P)), R, K, P);
+        ggml_tensor* pred = ggml_reshape_3d(c, ggml_get_rows(c, d.sel_prev, ggml_reshape_1d(c, ggml_cont(c, pred_ids), K * P)),
+                                            R, K, P);
+        ggml_tensor* g1 = ggml_reshape_3d(c, ggml_cont(c, ggml_view_2d(c, gate, R, P, gate->nb[1], gate->nb[1])), R, 1, P);
+        ggml_tensor* cond = ggml_mul(c, pred, g1);                              // [R, K(pred), P]
+        score = ggml_mul_mat(c, succ, cond);                                    // [K(succ), K(pred), P]
+        ggml_tensor* u1 = ggml_reshape_3d(c, ggml_cont(c, ggml_view_2d(c, unary, K, P, unary->nb[1], unary->nb[1])), K, 1, P);
+        score = ggml_add(c, score, u1);
+    }
     b.argmax = cand;   // the candidates
     b.probs = score;   // the transition scores
     ggml_set_output(cand);
@@ -1037,6 +1131,40 @@ struct Engine {
     int kept_prev = 0;                  // the last trunk window's rows whose MTP pairs are not made yet (hbuf 0..)
     std::atomic<bool>* stop = nullptr;
     int64_t drafts_offered = 0, drafts_accepted = 0;
+    int64_t auto_rounds[2] = {0, 0};    // --spec auto: rounds drafted by MTP, by the block drafter
+    // --spec auto follows the generated text: inside a ``` block or a <tool_call> the block drafter drafts, elsewhere
+    // MTP.  The tokens that hold a backtick (68 of the vocabulary), as their text, and the tool-call markers.
+    std::unordered_map<int32_t, std::string> tick_tok;
+    int32_t tool_open = -1, tool_close = -1;
+    bool in_fence = false, in_tool = false;
+    int tick_run = 0;
+    void code_scan_init() {
+        const int64_t id = gguf_find_key(m.gguf, "tokenizer.ggml.tokens");
+        if (id < 0) return;
+        const size_t n = gguf_get_arr_n(m.gguf, id);
+        for (size_t i = 0; i < n; ++i) {
+            const char* t = gguf_get_arr_str(m.gguf, id, i);
+            if (std::strchr(t, '`')) tick_tok[(int32_t) i] = t;
+            if (!std::strcmp(t, "<tool_call>")) tool_open = (int32_t) i;
+            if (!std::strcmp(t, "</tool_call>")) tool_close = (int32_t) i;
+        }
+    }
+    void code_scan(int32_t y) {   // a run of three or more backticks opens or closes a fence
+        if (y == tool_open) in_tool = true;
+        if (y == tool_close) in_tool = false;
+        auto it = tick_tok.find(y);
+        if (it == tick_tok.end()) {
+            if (tick_run >= 3) in_fence = !in_fence;
+            tick_run = 0;
+            return;
+        }
+        for (char ch : it->second) {
+            if (ch == '`') { ++tick_run; continue; }
+            if (tick_run >= 3) in_fence = !in_fence;
+            tick_run = 0;
+        }
+    }
+    bool in_code() const { return in_fence || in_tool || tick_run >= 3; }
     // ALMOND_Q35_PROF=1: time per trunk window size and per MTP call, printed at the end of a request
     bool prof = std::getenv("ALMOND_Q35_PROF") != nullptr;
     std::map<std::string, std::pair<int64_t, double>> pt;
@@ -1083,7 +1211,7 @@ struct Engine {
         if (b.in.ring_idx) {   // the drafter's context rows go to the ring cells of their positions
             std::vector<int64_t> ri(n);
             for (int i = 0; i < n; ++i) {
-                ri[i] = (pos0 + i) % DF_RING;
+                ri[i] = (pos0 + i) % m.df->ring;
                 m.df->ring_pos[ri[i]] = pos0 + i;
             }
             ggml_backend_tensor_set(b.in.ring_idx, ri.data(), 0, ri.size() * 8);
@@ -1190,17 +1318,18 @@ struct Engine {
         for (int i = 0; i < B; ++i) {
             pos[i] = pos[B + i] = pos[2 * B + i] = next_p + i;
             pos[3 * B + i] = 0;
-            ri[i] = (L + i) % DF_RING;
+            ri[i] = (L + i) % d.ring;
             d.ring_pos[ri[i]] = L + i;
         }
-        std::vector<ggml_fp16_t> mask((size_t) DF_RING * B);
+        std::vector<ggml_fp16_t> mask((size_t) d.ring * B);
         const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
         for (int i = 0; i < B; ++i) {
             const int64_t q = L + i;
-            ggml_fp16_t* row = mask.data() + (size_t) i * DF_RING;
-            for (int cidx = 0; cidx < DF_RING; ++cidx) {
+            ggml_fp16_t* row = mask.data() + (size_t) i * d.ring;
+            for (int cidx = 0; cidx < d.ring; ++cidx) {
                 const int64_t p = d.ring_pos[cidx];
-                row[cidx] = (p >= 0 && p <= L + B - 1 && q - p < d.swa) ? zero : ninf;   // non-causal in the block
+                // DFlash2: non-causal in the block; DSpine: causal
+                row[cidx] = (p >= 0 && p <= (d.causal ? q : L + B - 1) && q - p < d.swa) ? zero : ninf;
             }
         }
         ggml_backend_tensor_set(b.in.tok, tok.data(), 0, tok.size() * 4);
@@ -1242,7 +1371,7 @@ struct Engine {
             if (l.k_cache) n += 2 * (uint64_t) h.len * l.k_cache->nb[1];
         }
         n += (uint64_t) (h.kept_prev + 1) * h.n_embd * 4;
-        if (m.df) n += (uint64_t) DF_RING * 8 + (uint64_t) m.df->L.size() * 2 * DF_RING * m.df->kv_dim() * 2;
+        if (m.df) n += (uint64_t) m.df->ring * 8 + (uint64_t) m.df->L.size() * 2 * m.df->ring * m.df->kv_dim() * 2;
         return n;
     }
     SessHead sess_head() const {
@@ -1319,7 +1448,7 @@ struct Engine {
         if (!sess_io(f, m.hbuf, (size_t) m.pend_col() * m.hbuf->nb[1], (size_t) h.n_embd * 4, save, done, total))
             return false;
         if (m.df) {
-            if (!sess_host(f, m.df->ring_pos.data(), DF_RING * 8, save, done)) return false;
+            if (!sess_host(f, m.df->ring_pos.data(), (size_t) m.df->ring * 8, save, done)) return false;
             for (DfLayer& l : m.df->L)
                 if (!sess_io(f, l.k_ring, 0, ggml_nbytes(l.k_ring), save, done, total) ||
                     !sess_io(f, l.v_ring, 0, ggml_nbytes(l.v_ring), save, done, total))
@@ -1627,6 +1756,82 @@ GenResult generate(Engine& E, int32_t first, const Sampling& s, int max_new, Emi
     if (!out(t)) { gr.ms = ms_since(t0); return gr; }
     std::vector<int32_t> am;
     std::vector<float> lg;
+    if (m.df && m.o.spec_auto && m.o.mtp > 0) {
+        // Both drafters, chosen by the text: inside a ``` block or a <tool_call> (Engine::code_scan) the block drafter
+        // drafts, elsewhere MTP.  The MTP block is caught up every round (its pairs must follow the cache whichever
+        // drafter drafts; the catch-up also gives its first draft); the block drafter's ring is filled by every trunk
+        // window.  Each drafter's rate (tokens kept per millisecond of the round, a moving average) is kept: inside
+        // code, when the block drafter's falls below MTP's, MTP drafts until the code ends.
+        const int D = m.o.mtp;
+        const int R = std::max(D, m.o.dflash_n) + 2;   // catch-up rows: up to dflash_n + 1 kept, then t
+        static const double alpha = 0.25;
+        static const double give_up = std::getenv("ALMOND_Q35_AUTO_GIVEUP") ? std::atof(std::getenv("ALMOND_Q35_AUTO_GIVEUP")) : 0.9;
+        double rate[2] = {-1.0, -1.0};                 // 0 = MTP, 1 = the block drafter
+        bool gave_up = false;
+        if (E.tick_tok.empty()) E.code_scan_init();
+        E.in_fence = E.in_tool = false;
+        E.tick_run = 0;
+        E.code_scan(t);
+        int mode = E.in_code() ? 1 : 0;
+        std::vector<int32_t> win, catchup, acc, drafts;
+        for (;;) {
+            const auto tr = Clock::now();
+            const int64_t L = (int64_t) E.cache.size();
+            const int kp = E.kept_prev;
+            catchup.assign(E.cache.end() - kp, E.cache.end());
+            catchup.push_back(t);
+            float p = 1.0f;
+            const int32_t d = E.mtp_catch(catchup.data(), (int) catchup.size(), L - kp, E.cols(1, 0, kp),
+                                          kp > 0 ? kp - 1 : m.pend_col(), R, &p);
+            win.assign(1, t);
+            if (mode == 1) {
+                E.df_draft(t, L, drafts);
+                win.insert(win.end(), drafts.begin(), drafts.end());
+            } else {
+                if (p >= m.o.spec_min_p) win.push_back(d);
+                while ((int) win.size() <= D && win.size() > 1) {
+                    const int32_t d2 = E.mtp_step(win.back(), L + (int64_t) win.size() - 1, &p);
+                    if (p < m.o.spec_min_p) break;
+                    win.push_back(d2);
+                }
+            }
+            const int n = (int) win.size();
+            E.trunk(win.data(), n, n, n > 1 ? KSNAP : 1, &am, greedy ? nullptr : &lg);
+            acc.clear();
+            for (int i = 0; i < n; ++i) {
+                const int32_t y = greedy ? am[i] : E.smp.sample(lg.data() + (size_t) i * V, V, s, hist);
+                acc.push_back(y);
+                if (!(i + 1 < n && y == win[i + 1])) break;
+                hist.push_back(y);
+            }
+            hist.resize(hist.size() - (acc.size() - 1));
+            const int keep = (int) acc.size();
+            E.drafts_offered += n - 1;
+            E.drafts_accepted += keep - 1;
+            if (n > 1) E.keep_window(n, keep);
+            E.kept_prev = keep;
+            E.auto_rounds[mode]++;
+            // the round's rate, into its drafter's average
+            const double r = keep / std::max(1e-3, ms_since(tr));
+            rate[mode] = rate[mode] < 0 ? r : (1 - alpha) * rate[mode] + alpha * r;
+            for (int i = 0; i < keep; ++i) E.code_scan(acc[i]);
+            // the next round's drafter: the text's, unless the block drafter did worse than MTP inside this code
+            const bool code = E.in_code();
+            if (!code) {
+                gave_up = false;
+                rate[1] = -1.0;   // each block of code measures it again
+            } else if (mode == 1 && rate[0] > 0 && rate[1] > 0 && rate[1] < give_up * rate[0]) {
+                gave_up = true;
+            }
+            mode = code && !gave_up ? 1 : 0;
+            bool go = true;
+            for (int i = 0; i < keep && go; ++i) go = out(acc[i]);
+            if (!go) break;
+            t = acc.back();
+        }
+        gr.ms = ms_since(t0);
+        return gr;
+    }
     if (m.df) {
         // DFlash2 rounds: a block of drafts from (t, L), one verify window, the agreeing prefix plus the trunk's token
         std::vector<int32_t> drafts, win, acc;
@@ -1954,6 +2159,11 @@ int serve(Engine& E) {
                                std::printf("T %d\n", y);
                                std::fflush(stdout);
                            });
+        if (m.o.spec_auto) {
+            std::fprintf(stderr, "qwen35: --spec auto rounds: MTP %lld, DFlash2 %lld\n", (long long) E.auto_rounds[0],
+                         (long long) E.auto_rounds[1]);
+            E.auto_rounds[0] = E.auto_rounds[1] = 0;
+        }
         std::printf("DONE %lld %zu %.1f %.1f %s %lld %lld %lld\n", (long long) gr.produced, ids.size(), po.ms, gr.ms,
                     gr.finish.c_str(), (long long) E.drafts_accepted, (long long) E.drafts_offered,
                     (long long) po.reused);
@@ -2034,6 +2244,7 @@ int bench(Engine& E) {
     for (int rep = 0; rep < reps; ++rep) {
         E.clear();
         E.drafts_offered = E.drafts_accepted = 0;
+        E.auto_rounds[0] = E.auto_rounds[1] = 0;
         std::vector<float> lg;
         int32_t am = 0;
         auto po = E.prompt(ids, true, lg, am, false);
@@ -2044,6 +2255,10 @@ int bench(Engine& E) {
                     "%lld/%lld\n",
                     ids.size(), po.ms, ids.size() / (po.ms / 1000), (long long) gr.produced, gr.ms,
                     (gr.produced - 1) / (gr.ms / 1000), (long long) E.drafts_accepted, (long long) E.drafts_offered);
+        E.prof_print();
+        if (m.o.spec_auto)
+            std::printf("bench: --spec auto rounds: MTP %lld, DFlash2 %lld\n", (long long) E.auto_rounds[0],
+                        (long long) E.auto_rounds[1]);
         if (rep == 0) {
             std::printf("ids:");
             for (size_t i = 0; i < std::min<size_t>(outv.size(), 48); ++i) std::printf(" %d", outv[i]);
@@ -2091,6 +2306,11 @@ int qwen35_main(int argc, char** argv) {
         else if (a == "--spec-min-p") o.spec_min_p = (float) std::atof(next().c_str());
         else if (a == "--dflash") o.dflash = next();
         else if (a == "--dflash-n") o.dflash_n = std::atoi(next().c_str());
+        else if (a == "--spec") {
+            const std::string k = next();
+            if (k == "auto") o.spec_auto = true;
+            else if (k != "fixed") die("--spec: auto or fixed");
+        }
         else if (a == "--serve") o.serve = true;
         else if (a == "--bench") o.bench = std::atoi(next().c_str());
         else if (a == "--prompt-ids") o.prompt_ids = next();

@@ -6,7 +6,9 @@
     {"model": "qwen"},
     {"model": "qwen27"},
     {"model": "qwen27", "config": "local/qwen27-local-dflash.json"},
-    {"model": "qwen27", "config": "local/qwen27-q8-local.json"}
+    {"model": "qwen27", "config": "local/qwen27-q8-local.json"},
+    {"model": "qwen27", "config": "local/qwen27-local-dspine.json"},
+    {"model": "qwen27", "config": "local/qwen27-q8-local-dspine.json"}
   ],
   "default": "glm"
 }

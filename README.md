@@ -81,7 +81,8 @@ local/fetch.sh                                                        # the mode
 - `./setup.sh --check` only says what is there. `local/fetch.sh` lists the models with their state in `models/` and
   asks which to download (DeepSeek's pack and FP8 Engram rows through their own scripts, GLM, its MTP block, both
   image encoders, the Qwen models); `local/fetch.sh --list` only lists. The quantization is chosen there: a model's
-  quantizations are separate items (`glm` 3.5 bit or `glm-3.0`; `qwen27` IQ3_S or `qwen27-q8` Q8_0), each with its
+  quantizations are separate items (`glm` 3.5 bit or `glm-3.0`; `qwen27` IQ3_S or `qwen27-q8` Q8_0, and
+  `qwen27-dspine`, Tencent's DSpine drafter used inside code: +31% there on the IQ3_S), each with its
   own configuration and name in the router (`./almond -m glm-3.0`, `./almond -m qwen27-q8`). The list starts with
   this machine's cards, RAM and free disk, marks what does not fit (`[needs 2 cards of 24 GB]`) and ends with a
   suggestion for the machine.
