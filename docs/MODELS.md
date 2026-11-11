@@ -519,7 +519,11 @@ GGUF and the engine reads them as BF16), `local/qwen-q8-local.json`, `./almond -
 `models/qwen38-mtp`.
 
 The resident arena does not fit this machine: the engine asked for 119.5 GiB of RAM with 88.9 available, only warns
-about it and goes on, and pinning that much stalled the whole machine. The configuration reads the experts through
+about it and goes on, and pinning that much stalled the whole machine. Since then the engine refuses an arena that does not fit with
+`ALMOND_ARENA_HEADROOM_GIB` (default 8) left over, and names a `--mmap-experts --resident-budget-gib` that does (the
+available RAM less the headroom and 16 GiB: a budget of N used about N + 7-10 GiB here); `ALMOND_ARENA_FORCE=1`
+loads it anyway. Checked: the Q8_0 without the budget stops at once with 92.8 GiB available; the IQ3_S (a 46 GiB
+arena) loads and generates as before. The configuration reads the experts through
 the page cache instead and keeps the most used in RAM (`--mmap-experts --resident-budget-gib 56`). Between these two
 cards a peer copy arrives wrong (a host bridge, no real P2P), so the second card's rows take the host route.
 

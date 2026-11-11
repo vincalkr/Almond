@@ -5904,6 +5904,32 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
                                          "expert arena\n", (double) avail / gib, waited);
                 hm.available = avail;
             }
+            // #4051 (2026-11-11): a whole-RAM arena that does not fit is refused, not loaded with a warning - pinning
+            // 119.5 GiB with 88.9 GiB available (Flash-Next's Q8_0 on a 122 GiB machine) stalled the machine.  The
+            // arena must fit with ALMOND_ARENA_HEADROOM_GIB (default 8) left over; the message names the setting that
+            // fits.  ALMOND_ARENA_FORCE=1 loads it anyway, as before.
+            {
+                double headroom_gib = 8.0;
+                if (const char* h = std::getenv("ALMOND_ARENA_HEADROOM_GIB"); h != nullptr && h[0] != '\0') {
+                    char* end = nullptr;
+                    const double v = std::strtod(h, &end);
+                    if (end != h && *end == '\0' && v >= 0.0 && v <= 1024.0) headroom_gib = v;
+                }
+                const char* force = std::getenv("ALMOND_ARENA_FORCE");
+                const uint64_t headroom = (uint64_t) (headroom_gib * gib);
+                if (!(force && force[0] == '1') && hm.available < need + headroom) {
+                    const double fit = (double) hm.available / gib - headroom_gib - 16.0;   // measured: a budget of N used ~N + 7-10 GiB
+                    std::snprintf(buf, sizeof buf,
+                                  "the expert arena needs %.2f GiB of RAM and %.2f GiB is available: with %.0f GiB left "
+                                  "for the system it does not fit, and pinning it could stall the machine. Run with "
+                                  "--mmap-experts --resident-budget-gib %.0f (the experts read through the page cache, "
+                                  "the most used kept in RAM), close other programs, or set ALMOND_ARENA_FORCE=1 to "
+                                  "load it anyway",
+                                  (double) need / gib, (double) hm.available / gib, headroom_gib, fit > 4.0 ? fit : 4.0);
+                    err = buf;
+                    return false;
+                }
+            }
             if (hm.available < need) {
                 std::snprintf(buf, sizeof buf,
                               "the expert arena needs %.2f GiB of RAM but %.2f GiB is available (%.2f GiB short%s): the "
