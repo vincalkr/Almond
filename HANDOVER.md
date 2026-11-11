@@ -26,10 +26,13 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
   and the same 64 greedy ids one-shot). Levels none / low / medium / xhigh. Images on the CPU (`almond-vision`).
 - **Qwen3.8-27B (dense):** the GSQ-RCO IQ3_S GGUF (11.28 GiB, MTP block included) on its own path (`src/qwen35`,
   `--qwen35`, ggml graphs), `./almond serve --model qwen27`: one card, 192K, q8_0 KV, MTP 3 by default. 73.3 tok/s
-  mean greedy over three prompts (llama.cpp 75.5), PPL 6.1552 (llama.cpp 6.1542); z-lab's DFlash2 drafter opt-in
-  (`local/qwen27-local-dflash.json`: faster on code, slower on free prose); 256K on two cards
-  (`local/qwen27-local-256k.json`). Its own chat template (the GGUF's); levels off / low / medium / xhigh, each checked
-  through the server. On branch `qwen35-27b`.
+  mean greedy over three prompts (llama.cpp 75.5), PPL 6.1552 (llama.cpp 6.1542); 256K on two cards
+  (`local/qwen27-local-256k.json`); the Q8_0 on two cards (`qwen27-q8`, 64.8 tok/s with MTP 3 against 101.9 for the
+  IQ3_S); Tencent's DSpine drafter inside ``` blocks and tool calls, MTP elsewhere (`--spec auto`, `qwen27-dspine`,
+  `qwen27-q8-dspine`: +31% on code, prose as MTP). z-lab's DFlash2 drafter was removed on 2026-11-11 (its
+  configuration and download; the engine still reads the format, the frame DSpine shares). Its own chat template (the GGUF's); levels off / low / medium / xhigh, each checked
+  through the server. The quantization of every model is chosen in `local/fetch.sh` (separate items, a suggestion
+  from the machine's cards and RAM): GLM 3.5 or 3.0 bit, the 27B IQ3_S or Q8_0.
 - **Images:** DeepSeek and GLM, each encoder in VRAM only for a request with pictures (DeepSeek's loaded and freed; GLM's
   in 2.78 GB the engine lends it, at up to 1,024 image tokens since its memory is measured without flash attention).
 - **Conversations:** each kept in RAM and on disk and resumed from the longest prefix (`local/conv-cache-rco`,

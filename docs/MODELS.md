@@ -356,8 +356,8 @@ a dense SwiGLU FFN of 17408, its nextn block in the same file) runs on its own p
 graphs on the vendored ggml (HIP), `./almond serve --model qwen27` (`local/qwen27-local.json`; the server shim is
 Flash-Next's `serve_qwen.py`, the tokenizer is Flash-Next's with the 27B's own chat template in
 `models/qwen38-27b/tokenizer`). Model files: `models/qwen38-27b/` (the ISTA-DASLab IQ3_S + MTP GGUF, 11.28 GiB, and
-optionally z-lab's DFlash2 Q8_0 drafter, 1.92 GiB, and the BF16 mmproj, 0.87 GiB). `local/fetch.sh qwen27` (and
-`qwen27-q8`, `qwen27-dflash`, `qwen27-vision`) downloads them; the tokenizer folder is exported from the GGUF
+optionally Tencent's DSpine drafter, 1.16 GiB, and the BF16 mmproj, 0.87 GiB). `local/fetch.sh qwen27` (and
+`qwen27-q8`, `qwen27-dspine`, `qwen27-vision`) downloads them; the tokenizer folder is exported from the GGUF
 (`tools/almond_tokenizer.py`: vocab, merges and token types identical to the folder above) with the official chat
 template kept in `tools/qwen/data/qwen27_chat_template.jinja` (unsloth's Q8_0 carries a copy without a `| safe`).
 
@@ -424,13 +424,14 @@ comparison:
 | no drafts, q8_0 KV | 42.2 | | | |
 | MTP 3 (default), q8_0 KV | 96.1 | 73.0 | 57.6 | 73.3 |
 | MTP 3, f16 KV | 99.6 | 73.9 | 56.6 | 73.5 |
-| DFlash2, 5 drafts (`local/qwen27-local-dflash.json`) | 105.4 | 81.3 | 44.5 | 67.6 |
+| DFlash2, 5 drafts | 105.4 | 81.3 | 44.5 | 67.6 |
 | DFlash2, 7 drafts | 106.7 | 72.9 | 36.9 | 59.6 |
 | llama.cpp, no drafts | 43.7 | | | |
 | llama.cpp, MTP 3 | 102.8 | 77.2 | 58.7 | 75.5 |
 | llama.cpp, DFlash2 7 | 116.2 | 70.0 | 39.4 | 62.2 |
 
-MTP 3 stays the default: DFlash2 is ahead on code and technical prose and far behind on free prose, where its
+(z-lab's DFlash2 drafter was removed on 2026-11-11: its configuration, router entry and download; DSpine inside code,
+below, took its place.) MTP 3 stays the default: DFlash2 is ahead on code and technical prose and far behind on free prose, where its
 8-token verify windows (47.8 ms against 23.8 ms for one token) are mostly rejected. A draft probability floor
 (`--spec-min-p`) measured worse at every value tried (0.3 / 0.5 / 0.7 with 3, 4 and 5 drafts): a shorter window is
 another graph shape to build. The q8_0 KV (the default) costs nothing measurable against f16 here. Where the time

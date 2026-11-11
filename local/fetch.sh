@@ -26,12 +26,11 @@ QWEN_REPO=ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
 QWEN_SHARDS=$(for i in 1 2; do echo "$M/qwen38-iq3s/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-0000$i-of-00002.gguf"; done)
 Q27_REPO=ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF
 Q27_Q8_REPO=unsloth/Qwen3.8-27B-GGUF
-Q27_DF_REPO=z-lab/Qwen3.8-27B-DFlash2-GGUF
 Q27=$M/qwen38-27b
 DS_SHARDS=$(for i in 1 2 3 4; do echo "$M/rco-iq2xxs/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-0000$i-of-00004.gguf"; done)
 
 ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-3.0 glm-mtp glm-vision qwen qwen-mtp qwen-vision
-       qwen27 qwen27-q8 qwen27-dflash qwen27-dspine qwen27-vision)
+       qwen27 qwen27-q8 qwen27-dspine qwen27-vision)
 desc() {
     case $1 in
         deepseek)            echo "DeepSeek-V4.1-Flash-1017, GSQ-RCO IQ2_XXS pack + Engram IQ4_NL (ISTA-DASLab)   ~249 GB";;
@@ -46,7 +45,6 @@ desc() {
         qwen-vision)         echo "Qwen image encoder (mmproj BF16)                                                     0.9 GB";;
         qwen27)              echo "Qwen3.8-27B dense, GSQ-RCO IQ3_S + MTP block (ISTA-DASLab), one card           12.1 GB";;
         qwen27-q8)           echo "Qwen3.8-27B dense, Q8_0 + MTP block (unsloth), two cards                       29.0 GB";;
-        qwen27-dflash)       echo "Qwen3.8-27B DFlash2 drafter Q8_0 (z-lab)                                          2.1 GB";;
         qwen27-dspine)       echo "Qwen3.8-27B DSpine drafter Q4_K_M (aj9o9 of tencent): drafts inside code         1.3 GB";;
         qwen27-vision)       echo "Qwen3.8-27B image encoder (mmproj BF16)                                          0.9 GB";;
     esac
@@ -65,7 +63,6 @@ files() {   # the files that make the item present
         qwen-vision)         echo "$M/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf";;
         qwen27)              echo "$Q27/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"; echo "$Q27/tokenizer";;
         qwen27-q8)           echo "$Q27/Qwen3.8-27B-Q8_0.gguf"; echo "$Q27/tokenizer";;
-        qwen27-dflash)       echo "$Q27/Qwen3.8-27B-DFlash2-Q8_0.gguf";;
         qwen27-dspine)       echo "$Q27/Qwen3.8-27B-DSpine-b16-Q4_K_M.gguf";;
         qwen27-vision)       echo "$Q27/mmproj-Qwen3.8-27B-BF16.gguf";;
     esac
@@ -136,7 +133,6 @@ fetch() {
                              tok27 "$Q27/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf";;
         qwen27-q8)           get $Q27_Q8_REPO Qwen3.8-27B-Q8_0.gguf "$Q27/Qwen3.8-27B-Q8_0.gguf"
                              tok27 "$Q27/Qwen3.8-27B-Q8_0.gguf";;
-        qwen27-dflash)       get $Q27_DF_REPO Qwen3.8-27B-DFlash2-Q8_0.gguf "$Q27/Qwen3.8-27B-DFlash2-Q8_0.gguf";;
         qwen27-dspine)       get aj9o9/Qwen3.8-27B-DSpine-b16-GGUF Qwen3.8-27B-DSpine-b16-Q4_K_M.gguf "$Q27/Qwen3.8-27B-DSpine-b16-Q4_K_M.gguf";;
         qwen27-vision)       get $Q27_REPO mmproj-Qwen3.8-27B-BF16.gguf "$Q27/mmproj-Qwen3.8-27B-BF16.gguf";;
         *) echo "fetch: no item '$1' (${ITEMS[*]})" >&2; exit 2;;
@@ -180,7 +176,7 @@ show() {
     if [ "$CARDS" -ge 2 ]; then
         echo "  Qwen3.8-27B: qwen27 (IQ3_S, one card, the fastest, 192K context) or qwen27-q8 (Q8_0, the closest to the"
         echo "               original weights, both cards, 256K); qwen27-dspine: DSpine drafts inside code blocks and tool calls (+31%
-               on code with qwen27), MTP elsewhere; qwen27-dflash adds the DFlash2 drafter to qwen27"
+               on code with qwen27), MTP elsewhere"
         echo "  GLM-5.3-Flash: glm (3.5 bit, better answers) or glm-3.0 (3.0 bit, +16% decode, 20 GB less on disk)"
     elif [ "$CARDS" = 1 ]; then
         echo "  Qwen3.8-27B: qwen27 (IQ3_S, fits one card with its MTP block); qwen27-q8 needs two cards"

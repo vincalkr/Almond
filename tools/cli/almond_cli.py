@@ -4,7 +4,7 @@
   ./almond                       a conversation (starts the router if nothing answers at --url, stops it on /quit)
   ./almond -p "question"         one prompt, the answer on stdout, then exit
   ./almond -m glm                the model (a name from /models, or the start of one: glm, deepseek, qwen, qwen27,
-                                 qwen27-dflash, qwen27-q8, qwen27-dspine, glm-3.0)
+                                 qwen27-q8, qwen27-dspine, glm-3.0)
   ./almond --ctx 1m              the context window of the models it starts (tokens, or 128k / 256k / 1m; a running
                                  server keeps its own)
   ./almond serve [--router]      a server without the chat: one model (--model glm / qwen, DeepSeek by default) or
@@ -951,7 +951,7 @@ class Chat:
         n = name.lower()
         # the launcher's model names; "qwen" would otherwise also match the two Qwen3.8-27B entries
         alias = {"ds41": "deepseek", "ds4": "deepseek", "qwen": "qwen3.8-flash-next", "qwen27": "qwen3.8-27b",
-                 "qwen27-dflash": "qwen3.8-27b-dflash", "qwen27-q8": "qwen3.8-27b-q8", "qwen27-dspine": "qwen3.8-27b-dspine", "qwen27-q8-dspine": "qwen3.8-27b-q8-dspine",
+                 "qwen27-q8": "qwen3.8-27b-q8", "qwen27-dspine": "qwen3.8-27b-dspine", "qwen27-q8-dspine": "qwen3.8-27b-q8-dspine",
                  "glm": "glm-5.3-flash", "glm-3.0": "glm-5.3-flash-3.0bit"}.get(n, n)
         for want in (n, alias):
             for m in self.models:
@@ -1777,7 +1777,7 @@ def sessions_text() -> str:
 
 
 CHAT_ALIASES = {"ds41": "deepseek", "ds4": "deepseek", "qwen": "qwen3.8-flash-next", "qwen27": "qwen3.8-27b",
-                "qwen27-dflash": "qwen3.8-27b-dflash", "qwen27-q8": "qwen3.8-27b-q8", "qwen27-dspine": "qwen3.8-27b-dspine", "qwen27-q8-dspine": "qwen3.8-27b-q8-dspine",
+                "qwen27-q8": "qwen3.8-27b-q8", "qwen27-dspine": "qwen3.8-27b-dspine", "qwen27-q8-dspine": "qwen3.8-27b-q8-dspine",
                 "glm": "glm-5.3-flash", "glm-3.0": "glm-5.3-flash-3.0bit"}
 
 
@@ -1941,7 +1941,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-p", "--prompt", help="one prompt: the answer on stdout, then exit")
     ap.add_argument("-m", "--model", help="the model (a name from /models or its start: glm, deepseek, qwen, qwen27, "
-                                                 "qwen27-dflash, qwen27-q8, qwen27-dspine, glm-3.0)")
+                                                 "qwen27-q8, qwen27-dspine, glm-3.0)")
     ap.add_argument("--url", default=os.environ.get("ALMOND_URL", "http://127.0.0.1:8150"))
     ap.add_argument("--api-key", default=os.environ.get("ALMOND_API_KEY", ""))
     t = ap.add_mutually_exclusive_group()

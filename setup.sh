@@ -5,7 +5,8 @@
 #   2. .venv from requirements.txt
 #   3. the models: local/fetch.sh shows what is in models/ and asks what to download (and builds what derives from
 #      the downloads: DeepSeek's geometry overlay and pack map, its FP8 Engram rows, GLM's and Qwen's packs and MTP
-#      blocks)
+#      blocks); a model's quantizations are separate items there (GLM 3.5 / 3.0 bit, Qwen3.8-27B IQ3_S / Q8_0), with
+#      a suggestion from this machine's cards and RAM
 #   4. ./build.sh: the engine (DeepSeek's, GLM's and Qwen's paths) and the image encoder GLM and Qwen use
 #   5. power-tune (optional, sudo once): NVMe and CPU idle states off while a server runs (local/install-power-tune.sh)
 #   6. each model's context, written into its configurations

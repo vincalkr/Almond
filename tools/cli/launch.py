@@ -12,7 +12,9 @@
   ./almond serve --model qwen    Qwen3.8-Flash-Next (GSQ-RCO IQ3_S) on Almond's engine (src/qwen, --qwen):
                                  local/qwen-local.json, tools/qwen/serve/serve_qwen.py
   ./almond serve --model qwen27  the dense Qwen3.8-27B (GSQ-RCO IQ3_S + its MTP block) on src/qwen35 (--qwen35):
-                                 local/qwen27-local.json (-vision with its encoder), tools/qwen/serve/serve_qwen.py
+                                 local/qwen27-local.json (-vision with its encoder), tools/qwen/serve/serve_qwen.py;
+                                 --config local/qwen27-q8-local.json the Q8_0 on two cards, the -dspine
+                                 configurations with Tencent's DSpine drafter inside code (--spec auto)
   ./almond serve --ctx 1m        the context window (tokens, or 128k / 256k / 1m), in a copy of the configuration
                                  (ALMOND_CTX the same; the router's models inherit it)
 

@@ -15,7 +15,7 @@ Anthropic-compatible server, a router that serves every model at one address, an
   (two shards, 83.6 GB) with its MTP draft block from the BF16 checkpoint (`src/qwen`).
 - **Qwen3.8-27B** (dense) as the [ISTA-DASLab GSQ-RCO IQ3_S GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF)
   (11.28 GiB, its MTP block in the same file) on ggml graphs (`src/qwen35`), with images on its encoder, optionally
-  with z-lab's DFlash2 drafter.
+  with Tencent's DSpine drafter inside code (`qwen27-dspine`).
 
 How each model is set up and measured: [docs/MODELS.md](docs/MODELS.md); the one-engine work:
 [docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md).
@@ -47,8 +47,8 @@ Qwen3.8-Flash-Next (GSQ-RCO IQ3_S), one card, through the server (the same three
 decode with its MTP drafts, 79-100 per prompt (docs/MODELS.md, "Qwen3.8-Flash-Next").
 
 Qwen3.8-27B (GSQ-RCO IQ3_S), card 0, greedy, the same three prompts (code / technical / story), 512 tokens: 42.2 tok/s
-without drafts, 73.3 with its MTP block (96.1 / 73.0 / 57.6; llama.cpp on the same GGUF 75.5), 105.4 / 81.3 / 44.5
-with the DFlash2 drafter; PPL 6.1552 against llama.cpp's 6.1542 on the same text. One card to 192K context, two for
+without drafts, 73.3 with its MTP block (96.1 / 73.0 / 57.6; llama.cpp on the same GGUF 75.5); with DSpine inside code
+104.3 against MTP's 79.7 on a code prompt (engine bench); PPL 6.1552 against llama.cpp's 6.1542 on the same text. One card to 192K context, two for
 256K (docs/MODELS.md, "Qwen3.8-27B").
 
 ## Requirements
