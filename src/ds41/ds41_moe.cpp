@@ -5657,6 +5657,13 @@ bool Ds41MoeTier::lend_cache(int64_t bytes, std::string& err) {
     const std::vector<int64_t> holders = cache.slot_holders();
     Gpu& gp = *im.gpu;
     const bool demote = im.cfg.arena_adapt && gp.arena.built && gp.arena.base != nullptr;
+    // ALMOND_PEER_ADAPT: a peer copy still in flight reads its expert's ARENA slot, and the demote below overwrites
+    // victims' slots (ALMOND_ARENA_EVICT_PEER picks exactly the peer-held ones first): every pending copy lands and is
+    // published first, as gpu_run's peer_poll does for its layer.  Without this the peer kept another expert's bytes
+    // under the victim's name for the rest of the server's life (2026-11-11: garbled output after a lent batch, still
+    // garbled after a full re-prefill and a re-seed).
+    if (demote && peer_adapt_on() && gp.peer && gp.peer->built)
+        for (int64_t l = 0; l < im.g.n_layers && !gp.peer->pend.empty(); ++l) peer_poll(im, l);
     std::vector<std::vector<int32_t>> taken(demote ? (size_t) im.g.n_layers : 0);
     std::vector<std::array<int64_t, 3>> swaps;   // layer, expert, victim: published after the copies land
     int64_t demoted = 0;
