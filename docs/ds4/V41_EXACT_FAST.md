@@ -59,6 +59,7 @@ state tensors), `ALMOND_SUM_ZEROCOPY=1` (the weighted sum of a layer's experts r
 their pinned host buffers), `ALMOND_PRESTAGE_GIB=1.5` / `ALMOND_PRESTAGE_MIN=512` (a device region the prompt path
 stages the next layer's experts into), `ALMOND_VRAM_BG=1`, `ALMOND_PF_NO_DUMMY=1`, `ALMOND_NO_LARGEPAGES=1`, the
 peer switches above, `ALMOND_SERVE_STEP_MAX=96` (up to 96 new prompt tokens run as decode passes, more as a batch),
+`ALMOND_SERVE_BATCH_KEEP=1024` (a batch of up to 1,024 new tokens keeps the VRAM cache, lending its tail: docs/SPEED_LEVERS.md, 2026-11-11),
 `ALMOND_SERVE_PASS_BATCH=1`, `ALMOND_SERVE_PASS_BIAS=0`.
 
 ## Speed (2026-10-26)

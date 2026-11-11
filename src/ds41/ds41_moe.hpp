@@ -327,6 +327,10 @@ struct Ds41MoeConfig {
     /// Prompt chunks: while layer l's experts compute (and the caller runs layer l+1's dense half), DMA layer l+1's
     /// arena experts into the other device half, which is then sized to a whole layer.  Off with arena_adapt.
     bool chunk_prestage = false;
+    /// The VRAM cache as a segmented arena (#533, the driver's virtual memory management, CUDA or HIP): segments of
+    /// this size behind one address range, so `lend_cache` can give the tail's VRAM back for a small prompt batch and
+    /// `reclaim_cache` take it again, every slot keeping its address.  0 (the default): one cudaMalloc.
+    int64_t cache_segment_mib = 0;
     /// Prompt chunks: while layer l computes, a background reader pool fills a pinned host slab with layer l+1's
     /// FILE-TIER experts (neither VRAM-resident nor in the RAM arena), so run_chunk(l+1) DMAs straight out of the slab
     /// instead of reading on its own critical path.  Two slabs ping-pong; a layer that fits neither falls back to
@@ -535,6 +539,18 @@ public:
     /// expert until the next seed_from_ranked, which reopens the cache (sized by set_slot_gib) and refills it; the
     /// arena is kept (an LRU-demoted expert stays in the arena slot it took).  No-op without a cache.
     void release_cache();
+    /// The cache LOAN (2026-11-10, docs/SPEED_LEVERS.md): a small prompt batch runs with the VRAM cache open - its
+    /// resident experts computed in place by run_chunk, no re-seed after - and takes the VRAM its buffers need from
+    /// the cache's tail instead.  `cache_elastic()`: the cache is open and segmented (cache_segment_mib).
+    /// `lend_cache(bytes)`: evicts the experts in the last slots (they are arena / file-tier experts meanwhile),
+    /// unmaps whole segments worth at least `bytes`, caps the chunk's device halves and skips the prestage for the
+    /// batch.  `reclaim_cache()`: maps the segments again and puts the same experts back (from the arena where it
+    /// holds them, else the file), their LRU age as it was.  Both false (nothing changed, or `err`) without a
+    /// segmented cache; a failed reclaim leaves the cache shrunk (the experts stay out until release + seed).
+    bool cache_elastic() const;
+    bool lend_cache(int64_t bytes, std::string& err);
+    bool reclaim_cache(std::string& err);
+    int64_t lent_bytes() const;
     /// REAP accumulators (Ds41MoeConfig::saliency), [layer * n_experts + expert]; empty when off.
     const std::vector<double>& saliency_sum() const;
     const std::vector<int64_t>& saliency_count() const;

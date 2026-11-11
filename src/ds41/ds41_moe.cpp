@@ -700,6 +700,11 @@ struct Ds41MoeImpl {
     double pcie_carry = 0.0, pf_carry = 0.0;
     int32_t pf_e[Ds41MoeConfig::kMaxPf] = {};
     int pf_n = 0;                     ///< staging slots the last prefetch() filled
+    /// the cache loan (lend_cache / reclaim_cache): the experts put out of the tail slots - slot, layer, expert, their
+    /// vlast - the bytes unmapped, and the cap on the chunk's device halves while it lasts (0: none)
+    std::vector<std::array<int64_t, 4>> lent;
+    int64_t lent_bytes = 0;
+    int64_t chunk_half_cap = 0;
     std::unique_ptr<Gpu> gpu;         ///< null in a CPU-only tier
     std::vector<int64_t> last_use;    ///< arena_adapt: (layer, expert) -> the run() call that last used it
     int64_t tick = 0;
@@ -2086,7 +2091,20 @@ bool Ds41MoeTier::seed_from_ranked(const std::vector<std::pair<int32_t, int32_t>
         }
         if (!sizes.empty()) {
             im_->gpu->cache.reset(new almond::core::ExpertCache());
-            if (!im_->gpu->cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, err)) return false;
+            if (im_->cfg.cache_segment_mib > 0) {   // the loanable cache; a driver without VMM gets the plain one
+                im_->gpu->cache->set_segment_bytes(im_->cfg.cache_segment_mib << 20);
+                std::string e;
+                if (im_->gpu->cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, e)) {
+                    std::fprintf(stderr, "vram cache: segmented (%lld MiB segments, %lld of them) - loanable\n",
+                                 (long long) im_->cfg.cache_segment_mib,
+                                 (long long) ((im_->gpu->cache->full_bytes() + (im_->cfg.cache_segment_mib << 20) - 1) /
+                                              (im_->cfg.cache_segment_mib << 20)));
+                } else {
+                    std::fprintf(stderr, "vram cache: segmented open failed (%s) - one allocation instead\n", e.c_str());
+                    im_->gpu->cache.reset(new almond::core::ExpertCache());
+                    if (!im_->gpu->cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, err)) return false;
+                }
+            } else if (!im_->gpu->cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, err)) return false;
         }
     }
     // uniform blobs with defer_cache: the cache opens now (after the prompt chunks gave their VRAM back), its slot
@@ -2678,8 +2696,12 @@ bool gpu_run(Ds41MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w
         // a peer-held expert is not a use of its arena copy (the peer computes it): leaving it old lets the arena
         // swap it out for a file-tier expert, so RAM stops duplicating the peer's store
         const bool pskip = gp.peer && gp.peer->built && !(std::getenv("ALMOND_PEER_HOT") && std::getenv("ALMOND_PEER_HOT")[0] == '1');
+        // ... nor is a VRAM-resident expert's (the duplicate an LRU promotion or a cache loan leaves behind under
+        // arena_skip_resident): it ages out and gives its slot to a file-tier expert
+        const bool rskip = im.cfg.arena_skip_resident && gp.cache && !im.cfg.no_cache;
         for (int64_t k = 0; k < K; ++k)
-            if (!(pskip && gp.peer->ptr(layer, ids6[k]))) im.last_use[(size_t) (layer * NX + ids6[k])] = im.tick;
+            if (!(pskip && gp.peer->ptr(layer, ids6[k])) && !(rskip && gp.cache->slot_of(layer, ids6[k]) >= 0))
+                im.last_use[(size_t) (layer * NX + ids6[k])] = im.tick;
     }
     const double t0 = now_ms();
     Ds41MoeStats st;
@@ -4829,6 +4851,8 @@ bool gpu_run_chunk(Ds41MoeImpl& im, int64_t layer, int n, const int32_t* ids, co
                 }
             }
         }
+        if (im.chunk_half_cap > 0)   // the cache loan: small halves, so the loan stays small
+            gp.c_half = std::max<int64_t>(im.blob, std::min<int64_t>(gp.c_half, im.chunk_half_cap));
         if (gp.c_bhalf <= 0) gp.c_bhalf = gp.c_half;   // the pinned bounce halves persist; keep their size
         else gp.c_bhalf = std::min<int64_t>(gp.c_bhalf, gp.c_half);   // a stage smaller than the bounce would overflow it
         // prestage: one device half holds a whole layer (every expert at the MMQ stride, <= blob + 1 MiB each)
@@ -5595,8 +5619,157 @@ void Ds41MoeTier::release_cache() {
     }
     im_->gpu->cache.reset();
     im_->admitted = 0;
+    im_->lent.clear();         // a loan ends with the cache
+    im_->lent_bytes = 0;
+    im_->chunk_half_cap = 0;
     im_->pf_n = 0;             // staged prefetches are keyed by expert, not slot - but they belong to the old decode
     im_->vlast.clear();        // the LRU order restarts from the next seed (lru_seed_order)
+#endif
+}
+
+bool Ds41MoeTier::cache_elastic() const {
+#if defined(DS4_MOE_CUDA)
+    return im_ && im_->gpu && im_->gpu->cache && !im_->cfg.no_cache && im_->gpu->cache->segmented();
+#else
+    return false;
+#endif
+}
+
+int64_t Ds41MoeTier::lent_bytes() const { return im_ ? im_->lent_bytes : 0; }
+
+bool Ds41MoeTier::lend_cache(int64_t bytes, std::string& err) {
+#if defined(DS4_MOE_CUDA)
+    if (!cache_elastic()) { err = "the VRAM cache is not segmented"; return false; }
+    if (!im_->lent.empty() || im_->lent_bytes > 0) { err = "the VRAM cache is lent already"; return false; }
+    if (bytes <= 0) { err = "nothing to lend"; return false; }
+    Ds41MoeImpl& im = *im_;
+    almond::core::ExpertCache& cache = *im.gpu->cache;
+    const int64_t NX = im.g.n_experts;
+    const int64_t keep = std::max<int64_t>(0, cache.full_bytes() - bytes);
+    const int64_t live_after = cache.slots_after_shrink(keep), live_now = cache.slots();
+    if (live_after >= live_now) { err = "the loan asks for less than one segment"; return false; }
+    // the experts in the slots that go: out of the residency table, their LRU age kept for the reclaim.  With
+    // arena_adapt each is first DEMOTED into the arena (its bytes copied device -> host into the slot of the layer's
+    // least recently used arena expert, which becomes a file-tier expert): the batch then streams it over PCIe like
+    // any arena expert instead of reading it from the NVMe, and the reclaim copies it back host -> device (measured
+    // 2026-11-11 without this: 596 of 616 experts read from the file, 3.0 s a reclaim).  An expert the arena has no
+    // room for is a file-tier expert meanwhile.
+    const std::vector<int64_t> holders = cache.slot_holders();
+    Gpu& gp = *im.gpu;
+    const bool demote = im.cfg.arena_adapt && gp.arena.built && gp.arena.base != nullptr;
+    std::vector<std::vector<int32_t>> taken(demote ? (size_t) im.g.n_layers : 0);
+    std::vector<std::array<int64_t, 3>> swaps;   // layer, expert, victim: published after the copies land
+    int64_t demoted = 0;
+    for (int64_t s = live_after; s < live_now; ++s) {
+        const int64_t le = holders[(size_t) s];
+        if (le < 0) continue;
+        const int64_t l = le / NX, e = le % NX;
+        const int64_t v = im.vlast.empty() ? -1 : im.vlast[(size_t) le];
+        im.lent.push_back({s, l, e, v});
+        if (demote && !gp.arena.ptr(l, e)) {
+            const int64_t bytes = im.bl[(size_t) im.g.cls(l, e)];
+            std::vector<int32_t>& tk = taken[(size_t) l];
+            const int32_t victim = arena_victim(im, l, (uint64_t) bytes, tk.data(), (int) tk.size());
+            if (victim >= 0) {
+                const int32_t vs = gp.arena.slot_of[(size_t) (l * NX + victim)];
+                ck(cudaMemcpyAsync((uint8_t*) gp.arena.base + gp.arena.off[(size_t) vs], cache.device_slot((int32_t) s),
+                                   (size_t) bytes, cudaMemcpyDeviceToHost, gp.s), "lend demote");
+                tk.push_back(victim);
+                swaps.push_back({l, e, victim});
+                ++demoted;
+            }
+        }
+    }
+    if (!swaps.empty()) {
+        ck(cudaStreamSynchronize(gp.s), "lend demote sync");
+        for (const auto& w : swaps) arena_publish_swap(im, w[0], (int32_t) w[1], (int32_t) w[2]);
+    }
+    for (const auto& t : im.lent) {
+        cache.evict(t[1], t[2]);
+        if (!im.vlast.empty()) im.vlast[(size_t) (t[1] * NX + t[2])] = -1;
+        --im.admitted;
+    }
+    std::fprintf(stderr, "vram cache: loan: %zu experts out of the last slots, %lld demoted into the arena\n", im.lent.size(),
+                 (long long) demoted);
+    im.pf_n = 0;   // the prefetch staging is keyed by expert: a lent expert must not be served from it
+    if (!cache.shrink(keep, err)) {   // the experts are out already: put them back into the slots still live
+        for (const auto& t : im.lent) {
+            if (t[0] < cache.slots() && cache.admit_slot(t[1], t[2], (int32_t) t[0])) {
+                if (!im.vlast.empty()) im.vlast[(size_t) (t[1] * NX + t[2])] = t[3];
+                ++im.admitted;
+            }
+        }
+        im.lent.clear();
+        return false;
+    }
+    im.lent_bytes = cache.full_bytes() - cache.bytes();
+    static const int64_t half_cap = (std::getenv("ALMOND_LEND_STAGE_MIB") ? std::atoll(std::getenv("ALMOND_LEND_STAGE_MIB")) : 256) << 20;
+    im.chunk_half_cap = half_cap;
+    im.gpu->p_off = true;   // no prestage region for this batch (release_chunk re-arms it)
+    return true;
+#else
+    (void) bytes;
+    err = "no GPU tier";
+    return false;
+#endif
+}
+
+bool Ds41MoeTier::reclaim_cache(std::string& err) {
+#if defined(DS4_MOE_CUDA)
+    if (!cache_elastic()) { err = "the VRAM cache is not segmented"; return false; }
+    Ds41MoeImpl& im = *im_;
+    almond::core::ExpertCache& cache = *im.gpu->cache;
+    im.chunk_half_cap = 0;
+    if (im.lent_bytes == 0 && im.lent.empty()) return true;
+    if (!cache.grow(cache.full_bytes(), err)) return false;   // the cache stays shrunk; the experts stay out
+    const int64_t NX = im.g.n_experts;
+    std::vector<std::array<int64_t, 3>> fjobs;   // slot, layer, expert: from the file
+    int64_t from_arena = 0;
+    for (const auto& t : im.lent) {
+        if (t[0] >= cache.slots()) continue;
+        if (!cache.admit_slot(t[1], t[2], (int32_t) t[0])) continue;
+        if (const uint8_t* p = im.gpu->arena.ptr(t[1], t[2])) {
+            if (!cache.fill_slot_queued((int32_t) t[0], p, err, im.bl[(size_t) im.g.cls(t[1], t[2])])) return false;
+            ++from_arena;
+        } else {
+            fjobs.push_back({t[0], t[1], t[2]});
+        }
+        if (!im.vlast.empty()) im.vlast[(size_t) (t[1] * NX + t[2])] = t[3];
+        ++im.admitted;
+    }
+    std::atomic<size_t> nx{0};
+    std::atomic<bool> bad{false};
+    std::mutex mu;
+    std::string terr;
+    std::vector<std::thread> th;
+    const double t0 = now_ms();
+    const int nth = (int) std::min<size_t>(8, fjobs.size());
+    for (int k = 0; k < nth; ++k)
+        th.emplace_back([&]() {
+            uint8_t* buf = nullptr;
+            if (cudaMallocHost((void**) &buf, (size_t) im.blob) != cudaSuccess) { bad = true; return; }
+            for (size_t q; !bad && (q = nx.fetch_add(1)) < fjobs.size();) {
+                const auto& j = fjobs[q];
+                im.blobs->read(j[1], j[2], buf);
+                std::lock_guard<std::mutex> lk(mu);
+                std::string e;
+                if (!cache.fill_slot_blocking((int32_t) j[0], buf, e, im.bl[(size_t) im.g.cls(j[1], j[2])])) { terr = e; bad = true; }
+            }
+            cudaFreeHost(buf);
+        });
+    for (auto& t : th) t.join();
+    if (cudaStreamSynchronize((cudaStream_t) 0) != cudaSuccess && !bad) { terr = "reclaim: queued fills failed"; bad = true; }
+    im.st.file_tier += (int64_t) fjobs.size();
+    im.st.file_ms += now_ms() - t0;
+    std::fprintf(stderr, "vram cache: reclaimed %.2f GiB, %lld experts back (%lld from the arena, %zu from the file)\n",
+                 (double) im.lent_bytes / 1073741824.0, (long long) im.lent.size(), (long long) from_arena, fjobs.size());
+    im.lent.clear();
+    im.lent_bytes = 0;
+    if (bad) { err = terr.empty() ? "reclaim: pinned buffer allocation failed" : terr; return false; }
+    return true;
+#else
+    err = "no GPU tier";
+    return false;
 #endif
 }
 

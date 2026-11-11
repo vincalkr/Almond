@@ -1,16 +1,20 @@
 // src/core/expert_cache.cpp - R4's slot storage and residency table.  Read the header first.
 #include "almond/core/expert_cache.hpp"
 
-// #533's segmented cache uses CUDA's virtual memory management (cuMem*): not on HIP, neither the RDNA backend nor
-// the gfx906 compat build (PR #638), which compiles this file as HIP without ALMOND_USE_HIP
-#if defined(ALMOND_USE_HIP) || defined(ALMOND_HIP_GFX906)
+// #533's segmented cache uses the driver's virtual memory management: CUDA's cuMem* (through the runtime's entry
+// points) or HIP's hipMem* (ROCm 6+, the RDNA backend); not the gfx906 compat build (PR #638), which compiles this
+// file as HIP without ALMOND_USE_HIP
+#if defined(ALMOND_HIP_GFX906)
 #define ALMOND_EC_NO_VMM 1
 #endif
 
 #include <cuda_runtime.h>
-#if !defined(ALMOND_EC_NO_VMM)
+#if defined(ALMOND_USE_HIP)
+#include <hip/hip_runtime_api.h>
+#elif !defined(ALMOND_EC_NO_VMM)
 #include <cuda.h>   // #533: the virtual memory management types (the functions come through the runtime's entry points)
 #endif
+#include <cstdint>
 
 #include <algorithm>
 #include <atomic>
@@ -211,12 +215,91 @@ bool write_expert_profile(const std::string& path, int64_t n_layers, int64_t n_e
 
 ExpertCache::~ExpertCache() { close(); }
 
-// ---- #533: the segmented arena (--vram-elastic).  The driver API's virtual memory functions, looked up through the
-// runtime (no link against the driver library): one address range for the whole arena, backed by physical segments,
-// and the tail's segments unmapped / mapped again later.  Nothing here runs unless a segment size was set.
+// ---- #533: the segmented arena (--vram-elastic).  One address range for the whole arena, backed by physical segments,
+// and the tail's segments unmapped / mapped again later.  On CUDA the driver API's virtual memory functions are looked
+// up through the runtime (no link against the driver library); on HIP (ROCm 6+) the same functions exist in the
+// runtime as hipMemAddressReserve / hipMemCreate / hipMemMap / hipMemSetAccess / hipMemUnmap / hipMemRelease /
+// hipMemAddressFree and are called directly (2026-11-10: DeepSeek's small-batch cache loan, docs/SPEED_LEVERS.md).
+// Nothing here runs unless a segment size was set.
 #if !defined(ALMOND_EC_NO_VMM)
 namespace {
+// the backend-neutral face of the virtual memory API: addresses as integers, handles as 64-bit words
 struct Vmm {
+    bool ok = false;
+    bool (*supported)(int dev) = nullptr;
+    bool (*granularity)(int dev, size_t* gran) = nullptr;
+    bool (*reserve)(uintptr_t* va, size_t bytes) = nullptr;
+    bool (*address_free)(uintptr_t va, size_t bytes) = nullptr;
+    bool (*create)(unsigned long long* handle, size_t bytes, int dev) = nullptr;
+    bool (*release)(unsigned long long handle) = nullptr;
+    bool (*map)(uintptr_t va, size_t bytes, unsigned long long handle) = nullptr;
+    bool (*unmap)(uintptr_t va, size_t bytes) = nullptr;
+    bool (*set_access)(uintptr_t va, size_t bytes, int dev) = nullptr;
+};
+
+#if defined(ALMOND_USE_HIP)
+hipMemAllocationProp hip_prop(int dev) {
+    hipMemAllocationProp prop{};
+    prop.type = hipMemAllocationTypePinned;
+    prop.location.type = hipMemLocationTypeDevice;
+    prop.location.id = dev;
+    return prop;
+}
+bool hip_supported(int dev) {
+    int v = 0;
+    return hipDeviceGetAttribute(&v, hipDeviceAttributeVirtualMemoryManagementSupported, dev) == hipSuccess && v != 0;
+}
+bool hip_granularity(int dev, size_t* gran) {
+    const hipMemAllocationProp prop = hip_prop(dev);
+    return hipMemGetAllocationGranularity(gran, &prop, hipMemAllocationGranularityRecommended) == hipSuccess && *gran > 0;
+}
+bool hip_reserve(uintptr_t* va, size_t bytes) {
+    void* p = nullptr;
+    if (hipMemAddressReserve(&p, bytes, 0, nullptr, 0) != hipSuccess) return false;
+    *va = reinterpret_cast<uintptr_t>(p);
+    return true;
+}
+bool hip_address_free(uintptr_t va, size_t bytes) { return hipMemAddressFree(reinterpret_cast<void*>(va), bytes) == hipSuccess; }
+bool hip_create(unsigned long long* handle, size_t bytes, int dev) {
+    const hipMemAllocationProp prop = hip_prop(dev);
+    hipMemGenericAllocationHandle_t h{};
+    if (hipMemCreate(&h, bytes, &prop, 0) != hipSuccess) return false;
+    *handle = reinterpret_cast<unsigned long long>(h);
+    return true;
+}
+bool hip_release(unsigned long long handle) {
+    return hipMemRelease(reinterpret_cast<hipMemGenericAllocationHandle_t>(handle)) == hipSuccess;
+}
+bool hip_map(uintptr_t va, size_t bytes, unsigned long long handle) {
+    return hipMemMap(reinterpret_cast<void*>(va), bytes, 0, reinterpret_cast<hipMemGenericAllocationHandle_t>(handle), 0) == hipSuccess;
+}
+bool hip_unmap(uintptr_t va, size_t bytes) { return hipMemUnmap(reinterpret_cast<void*>(va), bytes) == hipSuccess; }
+bool hip_set_access(uintptr_t va, size_t bytes, int dev) {
+    hipMemAccessDesc access{};
+    access.location.type = hipMemLocationTypeDevice;
+    access.location.id = dev;
+    access.flags = hipMemAccessFlagsProtReadWrite;
+    return hipMemSetAccess(reinterpret_cast<void*>(va), bytes, &access, 1) == hipSuccess;
+}
+const Vmm& vmm() {
+    static const Vmm v = [] {
+        Vmm x;
+        x.supported = hip_supported;
+        x.granularity = hip_granularity;
+        x.reserve = hip_reserve;
+        x.address_free = hip_address_free;
+        x.create = hip_create;
+        x.release = hip_release;
+        x.map = hip_map;
+        x.unmap = hip_unmap;
+        x.set_access = hip_set_access;
+        x.ok = true;
+        return x;
+    }();
+    return v;
+}
+#else
+struct CuApi {
     CUresult (CUDAAPI* device_get)(CUdevice*, int) = nullptr;
     CUresult (CUDAAPI* attribute)(int*, CUdevice_attribute, CUdevice) = nullptr;
     CUresult (CUDAAPI* granularity)(size_t*, const CUmemAllocationProp*, CUmemAllocationGranularity_flags) = nullptr;
@@ -247,9 +330,9 @@ template <class F> bool entry(const char* name, F& f) {
     return true;
 }
 
-const Vmm& vmm() {
-    static const Vmm v = [] {
-        Vmm x;
+const CuApi& cu() {
+    static const CuApi v = [] {
+        CuApi x;
         x.ok = entry("cuDeviceGet", x.device_get) && entry("cuDeviceGetAttribute", x.attribute) &&
                entry("cuMemGetAllocationGranularity", x.granularity) && entry("cuMemAddressReserve", x.reserve) &&
                entry("cuMemAddressFree", x.address_free) && entry("cuMemCreate", x.create) &&
@@ -267,26 +350,75 @@ CUmemAllocationProp device_prop(int dev) {
     prop.location.id = dev;
     return prop;
 }
-
-// one segment: a physical allocation mapped at `va`, readable and writable by this device
-bool map_segment(const Vmm& v, int dev, CUdeviceptr va, size_t bytes, unsigned long long& handle) {
+bool cu_supported(int dev) {
+    CUdevice d = 0;
+    int v = 0;
+    return cu().device_get(&d, dev) == CUDA_SUCCESS &&
+           cu().attribute(&v, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, d) == CUDA_SUCCESS && v != 0;
+}
+bool cu_granularity(int dev, size_t* gran) {
+    const CUmemAllocationProp prop = device_prop(dev);
+    return cu().granularity(gran, &prop, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED) == CUDA_SUCCESS && *gran > 0;
+}
+bool cu_reserve(uintptr_t* va, size_t bytes) {
+    CUdeviceptr p = 0;
+    if (cu().reserve(&p, bytes, 0, 0, 0) != CUDA_SUCCESS) return false;
+    *va = (uintptr_t) p;
+    return true;
+}
+bool cu_address_free(uintptr_t va, size_t bytes) { return cu().address_free((CUdeviceptr) va, bytes) == CUDA_SUCCESS; }
+bool cu_create(unsigned long long* handle, size_t bytes, int dev) {
     const CUmemAllocationProp prop = device_prop(dev);
     CUmemGenericAllocationHandle h = 0;
-    if (v.create(&h, bytes, &prop, 0) != CUDA_SUCCESS) return false;
-    if (v.map(va, bytes, 0, h, 0) != CUDA_SUCCESS) {
-        v.release(h);
-        return false;
-    }
+    if (cu().create(&h, bytes, &prop, 0) != CUDA_SUCCESS) return false;
+    *handle = (unsigned long long) h;
+    return true;
+}
+bool cu_release(unsigned long long handle) { return cu().release((CUmemGenericAllocationHandle) handle) == CUDA_SUCCESS; }
+bool cu_map(uintptr_t va, size_t bytes, unsigned long long handle) {
+    return cu().map((CUdeviceptr) va, bytes, 0, (CUmemGenericAllocationHandle) handle, 0) == CUDA_SUCCESS;
+}
+bool cu_unmap(uintptr_t va, size_t bytes) { return cu().unmap((CUdeviceptr) va, bytes) == CUDA_SUCCESS; }
+bool cu_set_access(uintptr_t va, size_t bytes, int dev) {
     CUmemAccessDesc access{};
     access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     access.location.id = dev;
     access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-    if (v.set_access(va, bytes, &access, 1) != CUDA_SUCCESS) {
+    return cu().set_access((CUdeviceptr) va, bytes, &access, 1) == CUDA_SUCCESS;
+}
+const Vmm& vmm() {
+    static const Vmm v = [] {
+        Vmm x;
+        x.ok = cu().ok;
+        x.supported = cu_supported;
+        x.granularity = cu_granularity;
+        x.reserve = cu_reserve;
+        x.address_free = cu_address_free;
+        x.create = cu_create;
+        x.release = cu_release;
+        x.map = cu_map;
+        x.unmap = cu_unmap;
+        x.set_access = cu_set_access;
+        return x;
+    }();
+    return v;
+}
+#endif
+
+// one segment: a physical allocation mapped at `va`, readable and writable by this device
+bool map_segment(const Vmm& v, int dev, uintptr_t va, size_t bytes, unsigned long long& handle) {
+    unsigned long long h = 0;
+    if (!v.create(&h, bytes, dev)) return false;
+    if (!v.map(va, bytes, h)) {
+        v.release(h);
+        return false;
+    }
+    if (!v.set_access(va, bytes, dev)) {
         v.unmap(va, bytes);
         v.release(h);
         return false;
     }
-    handle = (unsigned long long) h;
+    handle = h;
     return true;
 }
 }  // namespace
@@ -295,30 +427,26 @@ bool map_segment(const Vmm& v, int dev, CUdeviceptr va, size_t bytes, unsigned l
 bool ExpertCache::open_segmented(uint64_t want, std::string& err) {
 #if defined(ALMOND_EC_NO_VMM)
     (void) want;
-    err = "ExpertCache: --vram-elastic (a segmented expert cache) is CUDA-only for now";
+    err = "ExpertCache: --vram-elastic (a segmented expert cache) needs CUDA or HIP";
     return false;
 #else
     const Vmm& v = vmm();
-    int dev = 0, supported = 0;
-    CUdevice cu = 0;
-    if (!v.ok || cudaGetDevice(&dev) != cudaSuccess || v.device_get(&cu, dev) != CUDA_SUCCESS ||
-        v.attribute(&supported, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, cu) != CUDA_SUCCESS ||
-        !supported) {
+    int dev = 0;
+    if (!v.ok || cudaGetDevice(&dev) != cudaSuccess || !v.supported(dev)) {
         err = "ExpertCache: --vram-elastic needs the driver's virtual memory management, which this GPU or driver "
               "does not offer";
         return false;
     }
-    const CUmemAllocationProp prop = device_prop(dev);
     size_t gran = 0;
-    if (v.granularity(&gran, &prop, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED) != CUDA_SUCCESS || gran == 0) {
+    if (!v.granularity(dev, &gran)) {
         err = "ExpertCache: cannot read the driver's allocation granularity";
         return false;
     }
     const uint64_t g = (uint64_t) gran;
     const uint64_t total = (want + g - 1) / g * g;
     seg_ = (int64_t) (((uint64_t) seg_req_ + g - 1) / g * g);
-    CUdeviceptr va = 0;
-    if (v.reserve(&va, (size_t) total, 0, 0, 0) != CUDA_SUCCESS) {
+    uintptr_t va = 0;
+    if (!v.reserve(&va, (size_t) total)) {
         err = "ExpertCache: cannot reserve the address range of the segmented expert cache";
         return false;
     }
@@ -329,8 +457,7 @@ bool ExpertCache::open_segmented(uint64_t want, std::string& err) {
         seg_size_.push_back((int64_t) std::min<uint64_t>((uint64_t) seg_, total - at));
     }
     for (size_t i = 0; i < segs_.size(); ++i) {
-        if (!map_segment(v, dev, va + (CUdeviceptr) ((uint64_t) i * (uint64_t) seg_), (size_t) seg_size_[i],
-                         segs_[i])) {
+        if (!map_segment(v, dev, va + (uintptr_t) ((uint64_t) i * (uint64_t) seg_), (size_t) seg_size_[i], segs_[i])) {
             char buf[200];
             std::snprintf(buf, sizeof buf, "ExpertCache: cudaMalloc failed: segment %zu of %zu (%.2f GiB) of the "
                           "segmented cache could not be allocated", i + 1, segs_.size(),
@@ -349,11 +476,11 @@ void ExpertCache::release_segmented() {
 #if !defined(ALMOND_EC_NO_VMM)
     const Vmm& v = vmm();
     if (base_ != nullptr) cudaDeviceSynchronize();
-    const CUdeviceptr va = reinterpret_cast<CUdeviceptr>(base_);
+    const uintptr_t va = reinterpret_cast<uintptr_t>(base_);
     for (size_t i = 0; i < segs_.size(); ++i)
         if (segs_[i] != 0) {
-            v.unmap(va + (CUdeviceptr) ((uint64_t) i * (uint64_t) seg_), (size_t) seg_size_[i]);
-            v.release((CUmemGenericAllocationHandle) segs_[i]);
+            v.unmap(va + (uintptr_t) ((uint64_t) i * (uint64_t) seg_), (size_t) seg_size_[i]);
+            v.release(segs_[i]);
         }
     if (base_ != nullptr && reserved_ > 0) v.address_free(va, (size_t) reserved_);
 #endif
@@ -396,11 +523,10 @@ bool ExpertCache::shrink(int64_t keep_bytes, std::string& err) {
         err = std::string("the device failed before the cache shrank: ") + cudaGetErrorString(cudaGetLastError());
         return false;
     }
-    const CUdeviceptr va = reinterpret_cast<CUdeviceptr>(base_);
+    const uintptr_t va = reinterpret_cast<uintptr_t>(base_);
     for (int64_t i = mapped_segs_ - 1; i >= keep; --i) {
-        const CUdeviceptr p = va + (CUdeviceptr) ((uint64_t) i * (uint64_t) seg_);
-        if (v.unmap(p, (size_t) seg_size_[(size_t) i]) != CUDA_SUCCESS ||
-            v.release((CUmemGenericAllocationHandle) segs_[(size_t) i]) != CUDA_SUCCESS) {
+        const uintptr_t p = va + (uintptr_t) ((uint64_t) i * (uint64_t) seg_);
+        if (!v.unmap(p, (size_t) seg_size_[(size_t) i]) || !v.release(segs_[(size_t) i])) {
             err = "the driver refused to release an expert-cache segment";
             live_slots_ = slots_within(mapped_bytes());
             return false;
@@ -425,11 +551,11 @@ bool ExpertCache::grow(int64_t want_bytes, std::string& err) {
     const Vmm& v = vmm();
     int dev = 0;
     cudaGetDevice(&dev);
-    const CUdeviceptr va = reinterpret_cast<CUdeviceptr>(base_);
+    const uintptr_t va = reinterpret_cast<uintptr_t>(base_);
     int64_t at = mapped_bytes();
     while (mapped_segs_ < (int64_t) segs_.size() && at + seg_size_[(size_t) mapped_segs_] <= want_bytes) {
         const size_t i = (size_t) mapped_segs_;
-        if (!map_segment(v, dev, va + (CUdeviceptr) ((uint64_t) i * (uint64_t) seg_), (size_t) seg_size_[i],
+        if (!map_segment(v, dev, va + (uintptr_t) ((uint64_t) i * (uint64_t) seg_), (size_t) seg_size_[i],
                          segs_[i])) {
             (void) cudaGetLastError();
             err = "the driver has no VRAM for another expert-cache segment";
@@ -547,6 +673,7 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert, int6
     next_free_ = 0;
     fills_ = 0;
     admitted_ = 0;
+    evicted_ = 0;
     // R4.2g: each layer starts at the bottom of its own range.  Built here rather than lazily so `admit`
     // stays allocation-free on the token path.
     layer_next_.assign((size_t) (n_layers > 0 ? n_layers : 0), 0);
@@ -616,6 +743,7 @@ void ExpertCache::close() {
     next_free_ = 0;
     fills_ = 0;
     admitted_ = 0;
+    evicted_ = 0;
     layer_next_.clear();
 }
 
@@ -653,6 +781,37 @@ int32_t ExpertCache::admit(int64_t layer, int64_t expert) {
     if (next_free_ >= slots_) return kNotResident;   // full: no eviction, deliberately - see the header
     residency_[at] = (int32_t) next_free_;
     return (int32_t) next_free_++;
+}
+
+void ExpertCache::evict(int64_t layer, int64_t expert) {
+    if (layer < 0 || layer >= n_layers_ || expert < 0 || expert >= n_expert_) return;
+    int32_t& r = residency_[(size_t) (layer * n_expert_ + expert)];
+    if (r == kNotResident) return;
+    r = kNotResident;
+    ++evicted_;
+}
+
+bool ExpertCache::admit_slot(int64_t layer, int64_t expert, int32_t slot) {
+    if (layer < 0 || layer >= n_layers_ || expert < 0 || expert >= n_expert_ || slot < 0 || slot >= live_slots_) return false;
+    int32_t& r = residency_[(size_t) (layer * n_expert_ + expert)];
+    if (r != kNotResident) return r == slot;
+    r = slot;
+    if (evicted_ > 0) --evicted_;
+    return true;
+}
+
+std::vector<int64_t> ExpertCache::slot_holders() const {
+    std::vector<int64_t> h((size_t) (slots_ > 0 ? slots_ : 0), -1);
+    for (size_t i = 0; i < residency_.size(); ++i)
+        if (residency_[i] >= 0 && residency_[i] < slots_) h[(size_t) residency_[i]] = (int64_t) i;
+    return h;
+}
+
+int64_t ExpertCache::slots_after_shrink(int64_t keep_bytes) const {
+    if (segs_.empty()) return live_slots_;
+    int64_t keep = 0, at = 0;
+    while (keep < (int64_t) segs_.size() && at < keep_bytes) at += seg_size_[(size_t) keep++];
+    return slots_within(at);
 }
 
 uint8_t* ExpertCache::device_slot(int32_t slot) {

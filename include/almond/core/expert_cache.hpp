@@ -105,7 +105,7 @@ public:
     int64_t full_slots() const { return slots_; }
     /// Slots actually claimed.  Not the same as `slots()` - the cache does not evict, so a run that routes
     /// fewer distinct experts than there are slots leaves the rest empty.
-    int64_t resident() const { return per_layer_ ? admitted_ : next_free_; }
+    int64_t resident() const { return (per_layer_ ? admitted_ : next_free_) - evicted_; }
     /// The bytes of `slots()` (all of the arena unless shrunk); `full_bytes()`: of every slot.
     int64_t bytes() const { return slot_end(live_slots_); }
     int64_t full_bytes() const { return slot_end(slots_); }
@@ -133,6 +133,16 @@ public:
     bool grow(int64_t want_bytes, std::string& err);
     /// The number of leading slots that fit wholly inside the first `bytes` bytes.
     int64_t slots_within(int64_t bytes) const;
+    /// `slots()` after `shrink(keep_bytes)` (its rounding up to a segment boundary): what a caller must evict first.
+    int64_t slots_after_shrink(int64_t keep_bytes) const;
+
+    /// The cache loan (DeepSeek's small batches, 2026-11-10): `evict` drops `(layer, expert)` from the residency
+    /// table (its slot keeps the bytes until something else is written there; the caller shrinks or refills);
+    /// `admit_slot` puts an expert into a named slot below `slots()` (false when the slot is past the live range, or
+    /// the expert sits elsewhere); `slot_holders()` lists, per slot, `layer * n_expert + expert` or -1.
+    void evict(int64_t layer, int64_t expert);
+    bool admit_slot(int64_t layer, int64_t expert, int32_t slot);
+    std::vector<int64_t> slot_holders() const;
     /// The bytes the first `n` slots span.
     int64_t bytes_of(int64_t n) const { return slot_end(n < 0 ? 0 : n > slots_ ? slots_ : n); }
 
@@ -240,6 +250,7 @@ private:
     std::vector<int32_t> layer_next_;   ///< [n_layers] -> that layer's next free slot
     std::vector<uint64_t> off_;         ///< plan v0.3 P6: slot offsets (slots + 1 entries) when sized
     int64_t admitted_ = 0;
+    int64_t evicted_ = 0;               ///< experts dropped by `evict` and not put back by `admit_slot` (resident())
 };
 
 }  // namespace almond::core

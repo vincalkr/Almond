@@ -188,6 +188,7 @@ struct Args {
     int  enc_replay = 2560;       // --enc-replay N: the replay window (window_size * (n_layer - cand_layer) = 128*20)
     float skip_miss = 0.0f, skip_file = 0.0f;
     int64_t skip_from = 0;
+    int64_t cache_segment_mib = 0;   // --cache-segment-mib: the VRAM cache in segments (the small-batch loan)
     double chunk_prefetch_gib = 0.0;
     /// --vision F (opt-in): image input through GENI, F = the vision GGUF (tools/v41/vision/make_vision_gguf.py).
     /// --vision-device N: the GPU that runs the encoder; default the --peer-device (its weights stay there from the
@@ -257,6 +258,7 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--chunk-prefetch") a.chunk_prefetch_gib = std::atof(next().c_str());
         else if (k == "--skip-miss") a.skip_miss = (float) std::atof(next().c_str());
         else if (k == "--skip-miss-from") a.skip_from = std::atoll(next().c_str());
+        else if (k == "--cache-segment-mib") a.cache_segment_mib = std::atoll(next().c_str());
         else if (k == "--skip-file") a.skip_file = (float) std::atof(next().c_str());
         else if (k == "--threads") a.threads = std::atoi(next().c_str());
         else if (k == "--ctx") a.ctx = std::atoll(next().c_str());
@@ -752,6 +754,11 @@ int ds41_main(int argc, char ** argv) {
     mc.chunk_prefetch_gib = a.chunk_prefetch_gib;
     mc.skip_miss = a.skip_miss;
     mc.skip_from = a.skip_from;
+    // ALMOND_SERVE_BATCH_KEEP=<tokens> (--serve, default 0 = off): a prompt batch of up to that many new tokens keeps the
+    // VRAM cache (lent, see below) - which needs the segmented cache; 256 MiB segments unless --cache-segment-mib says
+    static const int serve_batch_keep = std::getenv("ALMOND_SERVE_BATCH_KEEP") ? std::atoi(std::getenv("ALMOND_SERVE_BATCH_KEEP")) : 0;
+    if (a.serve && serve_batch_keep > 0 && a.cache_segment_mib == 0) a.cache_segment_mib = 256;
+    mc.cache_segment_mib = a.cache_segment_mib;
     mc.skip_file = a.skip_file;
     // soft / hard pruning: listed experts take no VRAM slot and no arena space;
     // with --prune-penalty X they keep a selection bias -X (still chosen when the router prefers them by more than X, then
@@ -1190,6 +1197,14 @@ int ds41_main(int argc, char ** argv) {
     // request).  The next request, if it reads by passes, opens the cache again into that room once.
     // ALMOND_VRAM_REGROW=0 leaves it as it was.
     bool regrow = false;
+    // The cache LOAN (ALMOND_SERVE_BATCH_KEEP, 2026-11-10, docs/SPEED_LEVERS.md): a batch of up to that many new tokens
+    // does not release the VRAM cache - its resident experts are computed in place and no re-seed follows - but has
+    // the tier unmap the cache's tail until ALMOND_SERVE_LEND_GIB (default 6.0) of VRAM is free for its buffers (the
+    // pass graphs, ~3.7 GiB at their peak while the allocator grows; the chunk halves capped at ALMOND_LEND_STAGE_MIB
+    // each, no prestage; measured 2026-11-11: 4.96 GiB free was not enough, 5.25 was); after the batch the pass buffers go back,
+    // the tail is mapped again and its experts put back.  A batch that cannot be lent to runs as before.
+    bool lent = false;
+    static const double lend_gib = std::getenv("ALMOND_SERVE_LEND_GIB") ? std::atof(std::getenv("ALMOND_SERVE_LEND_GIB")) : 6.0;
     static const bool regrow_on = !std::getenv("ALMOND_VRAM_REGROW") || std::atoi(std::getenv("ALMOND_VRAM_REGROW")) != 0;
     static const bool vram_trace = std::getenv("ALMOND_VRAM_TRACE") != nullptr;
     auto trace_free = [&](const char * where) {
@@ -1944,8 +1959,29 @@ int ds41_main(int argc, char ** argv) {
                 apply_bias();
             }
             if (!by_step && defer_vram && cache_open && dh >= 2) {
-                tier.release_cache();
-                cache_open = false;
+                bool keep = false;
+                if (serve_batch_keep > 0 && dh <= serve_batch_keep && sp_tail == 0 && bcap == 0 && !img_new && tier.cache_elastic()) {
+                    const double tl0 = now_ms();
+                    const int64_t before = tier.resident();
+                    // the loan: what the batch needs (lend_gib: its pass graphs peak at ~3.7 GiB while the allocator
+                    // grows, the chunk's buffers ~1.3 with 256 MiB halves) less what is free already
+                    size_t fr0 = 0, tt0 = 0;
+                    ggml_backend_dev_memory(ggml_backend_get_device(be), &fr0, &tt0);
+                    const int64_t lend_bytes = (int64_t) (lend_gib * 1073741824.0) - (int64_t) fr0;
+                    if (lend_bytes > 0 && tier.lend_cache(lend_bytes, err)) {
+                        keep = lent = true;
+                        std::fprintf(stderr, "serve: VRAM cache lent %.2f GiB for a %d-token batch: %lld of %lld experts out (%.2f s)\n",
+                                     tier.lent_bytes() / 1073741824.0, dh, (long long) (before - tier.resident()), (long long) before,
+                                     (now_ms() - tl0) / 1000.0);
+                        trace_free("after the loan");
+                    } else {
+                        std::fprintf(stderr, "serve: VRAM cache loan failed (%s) - released instead\n", err.c_str());
+                    }
+                }
+                if (!keep) {
+                    tier.release_cache();
+                    cache_open = false;
+                }
                 info_vram();
                 bias_now = a.bias_prompt > 0;
                 apply_bias();
@@ -2050,6 +2086,15 @@ int ds41_main(int argc, char ** argv) {
             bcap_n = bcap; bcap_got = 0;
             if (bcap > 0) bcap_vh.assign((size_t) bcap * 3 * n_embd, 0.0f);
             bool ok = total == reused || dh == 0 || (by_step ? feed_steps() : feed(ids.data() + reused, dh, reused, pp, nullptr));
+            if (!ok && lent) {   // a lent batch that did not fit (the pass graphs grow with the context): the old way
+                std::fprintf(stderr, "serve: the lent batch failed (%s) - the VRAM cache released, the batch run again\n", ferr.c_str());
+                lent = false;
+                tier.release_cache();   // forgets the loan too
+                cache_open = false;
+                info_vram();
+                ferr.clear();
+                ok = feed(ids.data() + reused, dh, reused, pp, nullptr);
+            }
             bcap_n = 0;
             double ph_feed = now_ms() - tph0, ph_open = 0, ph_tail = 0;   // the request's prompt phases (stderr)
             int sp_t = -1;   // DSpark: the first decode token (sampled from the last prompt row), its drafts in sp_ids
@@ -2121,6 +2166,11 @@ int ds41_main(int argc, char ** argv) {
                 hist.clear();
                 hist_key.clear();
                 snap_len = -1;
+                if (lent) {   // the loan must not outlive the request
+                    lent = false;
+                    dense.release_pass();
+                    if (!tier.reclaim_cache(err)) { tier.release_cache(); cache_open = false; }
+                }
                 continue;
             }
             hist = ids;
@@ -2143,6 +2193,24 @@ int ds41_main(int argc, char ** argv) {
                                  "%lld pcie / %lld file)\n", total, reused, by_step ? (exact_pass ? "exact passes" : "passes") : "batch", prompt_ms / 1000.0,
                          1000.0 * (total - reused) / std::max(prompt_ms, 1e-9), (long long) pst.hits, (long long) pst.cpu,
                          (long long) pst.pcie, (long long) pst.file_tier);
+            if (lent) {   // the loan ends: the batch's pass buffers go back, the cache's tail is mapped and filled again
+                const double tr0 = now_ms();
+                lent = false;
+                dense.release_pass();
+                trace_free("before the reclaim");
+                if (tier.reclaim_cache(err)) {
+                    bias_now = true;   // decode: route bias + file penalty on, as after a seed
+                    apply_bias();
+                    if (a.serve) info_vram();
+                    std::fprintf(stderr, "serve: VRAM cache reclaimed in %.2f s: %lld experts in VRAM\n",
+                                 (now_ms() - tr0) / 1000.0, (long long) tier.resident());
+                    trace_free("after the reclaim");
+                } else {
+                    std::fprintf(stderr, "serve: VRAM cache reclaim failed (%s) - released and seeded again\n", err.c_str());
+                    tier.release_cache();
+                    cache_open = false;
+                }
+            }
             if (defer_vram && !cache_open) {   // decode next: the VRAM cache opens into what the prompt freed
                 if (!open_cache()) {
                     std::printf("ERR VRAM seed failed: %s\n", err.c_str());

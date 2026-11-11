@@ -64,7 +64,8 @@
     "ALMOND_SERVE_STEP_MAX": "96",
     "ALMOND_SUM_ZEROCOPY": "1",
     "DS41_META": "local/rco-iq2xxs-meta/meta.gguf",
-    "DS41_VL_BIAS": "local/rco-iq2xxs-meta/vl-bias.gguf"
+    "DS41_VL_BIAS": "local/rco-iq2xxs-meta/vl-bias.gguf",
+    "ALMOND_SERVE_BATCH_KEEP": "1024"
   },
   "cwd": ".",
   "tokenizer": "models/rco-iq2xxs/tokenizer",
