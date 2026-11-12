@@ -12,7 +12,8 @@
     "--expert-profile",
     "local/glm-expert-profile.bin",
     "--expert-profile-save",
-    "local/glm-expert-profile.bin"
+    "local/glm-expert-profile.bin",
+    "--vision"
   ],
   "env": {
     "ALMOND_GLM_RESERVE_MB": "576",
@@ -49,5 +50,14 @@
   "loop_guard": true,
   "reasoning_loop_recovery": "close",
   "fit_max_tokens": true,
-  "min_max_tokens": 32768
+  "min_max_tokens": 32768,
+  "vision": {
+    "exe": "build-vision/build/bin/almond-vision",
+    "mmproj": "models/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf",
+    "model": "models/glm53-vision/GLM-5.3-Flash-vocab.gguf",
+    "gpu": true,
+    "no_flash_attn": true,
+    "cuda_device": 0,
+    "on_demand": true
+  }
 }
