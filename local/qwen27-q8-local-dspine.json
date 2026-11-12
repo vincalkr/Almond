@@ -35,5 +35,13 @@
   "loop_guard": true,
   "fit_max_tokens": true,
   "conversation_dir": "local/qwen27-q8-slots-dspine",
-  "conversation_dir_gib": 16
+  "conversation_dir_gib": 16,
+  "vision": {
+    "exe": "build-vision/build/bin/almond-vision",
+    "mmproj": "models/qwen38-27b/mmproj-Qwen3.8-27B-BF16.gguf",
+    "model": "models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf",
+    "gpu": false,
+    "max_tokens": 300,
+    "threads": 12
+  }
 }

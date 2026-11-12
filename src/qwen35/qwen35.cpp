@@ -2177,7 +2177,7 @@ int serve(Engine& E) {
                                std::fflush(stdout);
                            });
         if (m.o.spec_auto) {
-            std::fprintf(stderr, "qwen35: --spec auto rounds: MTP %lld, DFlash2 %lld\n", (long long) E.auto_rounds[0],
+            std::fprintf(stderr, "qwen35: --spec auto rounds: MTP %lld, %s %lld\n", (long long) E.auto_rounds[0], m.df->dspine ? "DSpine" : "DFlash2",
                          (long long) E.auto_rounds[1]);
             E.auto_rounds[0] = E.auto_rounds[1] = 0;
         }
