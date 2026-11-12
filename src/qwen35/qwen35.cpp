@@ -1774,6 +1774,8 @@ GenResult generate(Engine& E, int32_t first, const Sampling& s, int max_new, Emi
         E.code_scan(t);
         int mode = E.in_code() ? 1 : 0;
         std::fprintf(stderr, "qwen35: --spec auto: starts with %s\n", mode == 1 ? (m.df->dspine ? "DSpine" : "DFlash2") : "MTP");
+        // the server's console shows the drafter: a SPEC line on the protocol (servers that do not know it skip it)
+        std::printf("SPEC %s\n", mode == 1 ? (m.df->dspine ? "DSpine" : "DFlash2") : "MTP");
         std::vector<int32_t> win, catchup, acc, drafts;
         for (;;) {
             const auto tr = Clock::now();
@@ -1836,6 +1838,7 @@ GenResult generate(Engine& E, int32_t first, const Sampling& s, int max_new, Emi
                              mode == 1 ? (m.df->dspine ? "DSpine" : "DFlash2") : "MTP",
                              next == 1 ? (m.df->dspine ? "DSpine" : "DFlash2") : "MTP", (long long) (gr.produced + keep), why,
                              rate[0], m.df->dspine ? "DSpine" : "DFlash2", rate_blk);
+                std::printf("SPEC %s\n", next == 1 ? (m.df->dspine ? "DSpine" : "DFlash2") : "MTP");
             }
             mode = next;
             bool go = true;
