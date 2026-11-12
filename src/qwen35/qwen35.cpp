@@ -1773,6 +1773,7 @@ GenResult generate(Engine& E, int32_t first, const Sampling& s, int max_new, Emi
         E.tick_run = 0;
         E.code_scan(t);
         int mode = E.in_code() ? 1 : 0;
+        std::fprintf(stderr, "qwen35: --spec auto: starts with %s\n", mode == 1 ? (m.df->dspine ? "DSpine" : "DFlash2") : "MTP");
         std::vector<int32_t> win, catchup, acc, drafts;
         for (;;) {
             const auto tr = Clock::now();
@@ -1817,13 +1818,26 @@ GenResult generate(Engine& E, int32_t first, const Sampling& s, int max_new, Emi
             for (int i = 0; i < keep; ++i) E.code_scan(acc[i]);
             // the next round's drafter: the text's, unless the block drafter did worse than MTP inside this code
             const bool code = E.in_code();
+            const double rate_blk = rate[1];   // before a block's end resets it
             if (!code) {
                 gave_up = false;
                 rate[1] = -1.0;   // each block of code measures it again
             } else if (mode == 1 && rate[0] > 0 && rate[1] > 0 && rate[1] < give_up * rate[0]) {
                 gave_up = true;
             }
-            mode = code && !gave_up ? 1 : 0;
+            const bool was_gave_up = gave_up && mode == 1;
+            const int next = code && !gave_up ? 1 : 0;
+            if (next != mode) {
+                // the engine log (stderr): every switch, at which generated token and why
+                const char* why = next == 1 ? (E.in_tool ? "a tool call opened" : "a ``` block opened")
+                                  : was_gave_up ? "the block drafter fell below MTP's rate inside this code"
+                                  : "the code ended";
+                std::fprintf(stderr, "qwen35: --spec auto: %s -> %s at token %lld (%s; rates MTP %.3f, %s %.3f tok/ms)\n",
+                             mode == 1 ? (m.df->dspine ? "DSpine" : "DFlash2") : "MTP",
+                             next == 1 ? (m.df->dspine ? "DSpine" : "DFlash2") : "MTP", (long long) (gr.produced + keep), why,
+                             rate[0], m.df->dspine ? "DSpine" : "DFlash2", rate_blk);
+            }
+            mode = next;
             bool go = true;
             for (int i = 0; i < keep && go; ++i) go = out(acc[i]);
             if (!go) break;

@@ -492,7 +492,8 @@ loses on prose, more with longer drafts.
 So `--spec auto` (with `--mtp 3` and the drafter) follows the generated text: inside a ``` block or a `<tool_call>`
 the block drafter drafts, elsewhere MTP; the MTP block is caught up every round either way and the drafter's ring is
 filled by every verify window. Inside code, when the drafter's tokens per millisecond fall below 0.9x MTP's (measured
-on the text before), MTP drafts until the block ends (`ALMOND_Q35_AUTO_GIVEUP`). An earlier rule that chose by the two
+on the text before), MTP drafts until the block ends (`ALMOND_Q35_AUTO_GIVEUP`). Every switch is a line in the engine log
+(`qwen35: --spec auto: MTP -> DSpine at token N (a ``` block opened; rates ...)`), and each request's first drafter. An earlier rule that chose by the two
 drafters' moving rates with trial rounds (MTP and DFlash2) was slower than MTP alone (62.9 against 66.6 tok/s over the
 four prompts) and was dropped.
 
