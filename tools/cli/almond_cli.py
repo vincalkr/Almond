@@ -68,15 +68,9 @@ ROOT = Path(__file__).resolve().parents[2]
 TTY = sys.stdout.isatty()
 DIM, BOLD, CYAN, RED, RESET = (("\x1b[2m", "\x1b[1m", "\x1b[36m", "\x1b[31m", "\x1b[0m") if TTY else ("",) * 5)
 MAGENTA = "\x1b[1;95m" if TTY else ""   # COMPACTING
-LOGO = r"""
-    _    _     __  __  ___  _   _ ____
-   / \  | |   |  \/  |/ _ \| \ | |  _ \
-  / _ \ | |   | |\/| | | | |  \| | | | |
- / ___ \| |___| |  | | |_| | |\  | |_| |
-/_/   \_\_____|_|  |_|\___/|_| \_|____/
-"""
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import launch  # noqa: E402  (./almond serve)
+LOGO = launch.LOGO   # the header, the same at a server's start
 
 HISTORY = Path.home() / ".almond_history"
 CHATS = ROOT / "local" / "chats"

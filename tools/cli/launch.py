@@ -36,6 +36,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PT = "/usr/local/sbin/almond-power-tune"
+LOGO = r"""
+    _    _     __  __  ___  _   _ ____
+   / \  | |   |  \/  |/ _ \| \ | |  _ \
+  / _ \ | |   | |\/| | | | |  \| | | | |
+ / ___ \| |___| |  | | |_| | |\  | |_| |
+/_/   \_\_____|_|  |_|\___/|_| \_|____/
+"""
+
+
+def logo():
+    """The same header as the chat's, once per start from a terminal: not for the router's children (they inherit
+    ALMOND_NO_LOGO from it) nor for --describe."""
+    if os.environ.get("ALMOND_NO_LOGO") or not sys.stderr.isatty():
+        return
+    os.environ["ALMOND_NO_LOGO"] = "1"
+    print(f"\x1b[1;36m{LOGO}\x1b[0m", file=sys.stderr, flush=True)
+
+
 SHIMS = {"ds41": "tools/v41/serve/serve_ds41.py", "glm": "tools/glm/serve/serve_glm.py",
          "qwen": "tools/qwen/serve/serve_qwen.py", "qwen27": "tools/qwen/serve/serve_qwen.py"}
 SERVERS = r"tools/(v41/serve/serve_ds41|glm/serve/serve_glm|qwen/serve/serve_qwen|router/almond_router)[.]py"
@@ -204,6 +222,8 @@ def others_running() -> bool:
 
 def serve(argv: list) -> int:
     o, rest = parse(argv)
+    if "--describe" not in rest:
+        logo()
     os.chdir(ROOT)
     # ALMOND_HOME must be this repository: the shim imports serve/, tools/ and almond_tokenizer from it
     os.environ["ALMOND_HOME"] = str(ROOT)
