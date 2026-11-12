@@ -719,7 +719,7 @@ class AlmondEngine:
         self.info = {}                   # INFO key=value facts (engine 0.1.8+): kv, expert slots, ... (Monitor tab)
         self.prefill_tok_s_mean = None
         self.progress = None             # (read, total) prompt tokens while a prompt is read, from PP lines
-        self.spec = None                 # SPEC lines (qwen35 --spec auto): the drafter drafting now, for the console
+        self.spec = None                 # SPEC lines (qwen35 --spec auto): the drafter drafting now (a console line at a switch)
         self.progress_ms = 0             # PP's own milliseconds since the prompt started (its third field)
         self.reused = 0                  # RESUME: prompt tokens not read again (a client takes them out of the work)
         self.silent_note = None
@@ -1697,8 +1697,11 @@ class AlmondEngine:
                     if cancel.is_set():                   # lines reset the 10 s wait, so without this a long prompt
                         return                            # would send no keep-alives at all)
                     yield None
-                elif line.startswith("SPEC "):            # qwen35 --spec auto: the drafter now drafting (console)
-                    self.spec = line[5:].strip()
+                elif line.startswith("SPEC "):            # qwen35 --spec auto: the drafter now drafting
+                    new = line[5:].strip()                # the console says when the block drafter starts and stops
+                    if new != self.spec and not (self.spec is None and new == "MTP"):
+                        print(f"[almond] {new} on" if new != "MTP" else f"[almond] {self.spec} off, back to MTP", flush=True)
+                    self.spec = new
                 elif line.startswith("RESUME "):          # the reused tokens: the first chunk starts after them
                     try:
                         read_to = self.reused = int(line.split()[1])
@@ -1706,6 +1709,7 @@ class AlmondEngine:
                         pass
                 elif line.startswith("DONE"):
                     self._parse_done(line)
+                    self.spec = None                      # the next request's first SPEC is its start, not a switch
                     done = True
                     return
                 elif line.startswith("ERR"):
@@ -3832,9 +3836,8 @@ class Service:
                   flush=True)
         else:
             rate = s["generated"] / max(1e-6, now - s["first_token"])
-            spec = getattr(self.engine, "spec", None)            # qwen35 --spec auto: the drafter drafting now
             print(f"[{s.get('effort') or 'almond'}] {s['phase']}: {s['generated']} of max {s.get('max_tokens')} tokens, {rate:.1f} tok/s, "
-                  f"{el:.0f} s{', drafting with ' + spec if spec else ''}", flush=True)
+                  f"{el:.0f} s", flush=True)
         return now
 
     def run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
