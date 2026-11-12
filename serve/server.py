@@ -2299,6 +2299,11 @@ class Vision:
                 proc.wait(timeout=10)
             except (OSError, subprocess.TimeoutExpired):
                 pass
+        # the engine is gone: drop the pipe now, or its unflushed QUIT raises BrokenPipeError when Python finalizes it
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
         self.stopped = True
 
     def shutdown(self):
