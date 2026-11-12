@@ -31,7 +31,7 @@ QWEN_Q8_REPO=unsloth/Qwen3.8-Flash-Next-GGUF
 QWEN_Q8_SHARDS=$(for i in 1 2 3 4 5 6; do echo "$M/qwen38-q8/Qwen3.8-Flash-Next-Q8_0-0000$i-of-00006.gguf"; done)
 DS_SHARDS=$(for i in 1 2 3 4; do echo "$M/rco-iq2xxs/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-0000$i-of-00004.gguf"; done)
 
-ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-3.0 glm-mtp glm-vision qwen qwen-q8 qwen-mtp qwen-vision
+ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision qwen qwen-q8 qwen-mtp qwen-vision
        qwen27 qwen27-q8 qwen27-dspine qwen27-vision)
 desc() {
     case $1 in
@@ -39,7 +39,6 @@ desc() {
         deepseek-vision)     echo "DeepSeek image encoder (built from the 1017 checkpoint's vision tower)          0.9 GB";;
         deepseek-engram-fp8) echo "DeepSeek Engram, the checkpoint's FP8 rows (optional; ~570 GB while extracting) 203 GB";;
         glm)                 echo "GLM-5.3-Flash GSQ-RCO 3.5bit (pfeifferj) + its pack                           137 GB";;
-        glm-3.0)             echo "GLM-5.3-Flash GSQ-RCO 3.0bit + its pack: +16% decode, PPL 14.0 vs 13.4         118 GB";;
         glm-mtp)             echo "GLM MTP draft block (from an IQ2_S quant's shard 3, 20.5 GB download, kept 3.6 GB)";;
         glm-vision)          echo "GLM image encoder (mmproj F16 + vocab)                                               1.1 GB";;
         qwen)                echo "Qwen3.8-Flash-Next GSQ-RCO IQ3_S (ISTA-DASLab) + its pack                       85 GB";;
@@ -58,7 +57,6 @@ files() {   # the files that make the item present
         deepseek-vision)     echo "$M/vision-1017/DeepSeek-V4.1-Flash-1017-Vision.gguf";;
         deepseek-engram-fp8) echo "$M/engram-1017/layers1/engram-L1.safetensors"; echo "$M/engram-1017/layers14/engram-L14.safetensors";;
         glm)                 echo "$M/glm53-gsq-rco/GLM-5.3-Flash-GSQ-RCO-3.5bit.gguf"; echo "$M/glm53-gsq-rco/pack";;
-        glm-3.0)             echo "$M/glm53-gsq-rco/GLM-5.3-Flash-GSQ-RCO-3.0bit.gguf"; echo "$M/glm53-gsq-rco/pack-3.0";;
         glm-mtp)             echo "$M/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf";;
         glm-vision)          echo "$M/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf"; echo "$M/glm53-vision/GLM-5.3-Flash-vocab.gguf";;
         qwen)                echo "$QWEN_SHARDS"; echo "$M/qwen38-iq3s-pack/native_experts.txt";;
@@ -107,9 +105,6 @@ fetch() {
         glm)                 get $GLM_REPO GLM-5.3-Flash-GSQ-RCO-3.5bit.gguf "$M/glm53-gsq-rco/GLM-5.3-Flash-GSQ-RCO-3.5bit.gguf"
                              [ "$DRY_RUN" = 1 ] || [ -n "$(ls -A "$M/glm53-gsq-rco/pack" 2>/dev/null)" ] ||
                                  sh "$R/local/glm-pack.sh";;
-        glm-3.0)             get $GLM_REPO GLM-5.3-Flash-GSQ-RCO-3.0bit.gguf "$M/glm53-gsq-rco/GLM-5.3-Flash-GSQ-RCO-3.0bit.gguf"
-                             [ "$DRY_RUN" = 1 ] || [ -n "$(ls -A "$M/glm53-gsq-rco/pack-3.0" 2>/dev/null)" ] ||
-                                 sh "$R/local/glm-pack.sh" 3.0;;
         glm-mtp)             [ -s "$M/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf" ] && { echo "have   GLM-5.3-Flash-NextN.gguf"; return; }
                              local src=$M/glm53-gsq-rco/src/GLM-5.3-Flash-Maya-M-IQ2_S-00003-of-00003.gguf
                              get $GLM_SRC_REPO Maya-M/$(basename "$src") "$src"
@@ -161,7 +156,7 @@ RAM_GB=$(awk '/MemTotal/ {printf "%d", $2 / 1048576}' /proc/meminfo)
 fit() {   # why an item does not fit this machine, or nothing
     local cards=1 ram=0
     case $1 in
-        glm|glm-3.0)         cards=2; ram=100;;   # the layers over both cards, the experts in pinned RAM
+        glm)                 cards=2; ram=100;;   # the layers over both cards, the experts in pinned RAM
         deepseek|qwen)       ram=100;;            # the 80 GiB pinned arena (README, Requirements: 128 GB class)
         qwen27-q8|qwen-q8)   cards=2;;            # 29 GB of weights; Flash-Next Q8_0: 128 GB of experts
     esac
@@ -184,7 +179,6 @@ show() {
         echo "  Qwen3.8-27B: qwen27 (IQ3_S, one card, the fastest, 192K context) or qwen27-q8 (Q8_0, the closest to the"
         echo "               original weights, both cards, 256K); qwen27-dspine: DSpine drafts inside code blocks and tool calls (+31%
                on code with qwen27), MTP elsewhere"
-        echo "  GLM-5.3-Flash: glm (3.5 bit, better answers) or glm-3.0 (3.0 bit, +16% decode, 20 GB less on disk)"
     elif [ "$CARDS" = 1 ]; then
         echo "  Qwen3.8-27B: qwen27 (IQ3_S, fits one card with its MTP block); qwen27-q8 needs two cards"
         echo "  GLM-5.3-Flash needs two cards; DeepSeek and Qwen3.8-Flash-Next run on one"

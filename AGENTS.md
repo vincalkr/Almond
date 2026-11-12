@@ -26,8 +26,7 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   `tools/v41/ds41_pack_meta.py`). Engram rows: the checkpoint's FP8 rows (`models/engram-1017`, 203 GB,
   `local/fetch-model.sh`) or the pack's iq4_nl table (110.6 GB, `local/fetch-rco-1017.sh`), which the engine falls
   back to; both measured (docs/ds4/V41_EXACT_FAST.md).
-- GLM: `local/glm-local.json` (`local/glm-local-vision.json` with its encoder in `models/glm53-vision`);
-  `local/glm-3.0-local.json` the 3.0bit build (`local/fetch.sh glm-3.0`, `./almond -m glm-3.0`).
+- GLM: `local/glm-local.json` (`local/glm-local-vision.json` with its encoder in `models/glm53-vision`).
 - The quantization of a model is chosen in `local/fetch.sh` (separate items, each with its configuration and router
   entry); the router leaves out an entry whose files are not downloaded.
 - Qwen3.8-27B (dense): `local/qwen27-local.json` (`./almond serve --model qwen27`, `src/qwen35`, `--qwen35`: one

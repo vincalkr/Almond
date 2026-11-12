@@ -196,9 +196,8 @@ The same author's 3.5-bit build (`pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF`, 137.07 
 +4.49% PPL over Q8_0 against +9.07%, KL 0.071 against 0.142). `local/glm-pack.sh 3.5` makes its pack
 (`models/glm53-gsq-rco/pack-3.5` then). It is GLM's model since 2026-11-02: the 3.0bit GGUF, its pack and kept
 slots went to the trash, and `local/glm-pack.sh`, `local/fetch.sh glm`, `./almond serve --model glm` take the 3.5bit
-(the expert profile it learned in these runs kept). Since 2026-11-11 the 3.0bit is an option again, chosen at download: `local/fetch.sh glm-3.0`
-(the GGUF and `local/glm-pack.sh 3.0` into `models/glm53-gsq-rco/pack-3.0`), `local/glm-3.0-local.json`, router name
-`glm-5.3-flash-3.0bit`, `./almond -m glm-3.0`, its own slot folder `local/glm-3.0-slots`. On the two 7900 XTX, power-tune on: 35.5 GB of experts on the cards as with 3.0, 84.6 GB
+(the expert profile it learned in these runs kept). (On 2026-11-11 the 3.0bit came back as a download option
+for a day and was dropped again: GLM stays the 3.5bit build.) On the two 7900 XTX, power-tune on: 35.5 GB of experts on the cards as with 3.0, 84.6 GB
 pinned in RAM (76 with 3.0), the rest read from the NVMe.
 
 | | 3.0 bit | 3.5 bit |

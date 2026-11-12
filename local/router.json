@@ -1,7 +1,6 @@
 {
   "models": [
     {"model": "glm"},
-    {"model": "glm", "config": "local/glm-3.0-local.json"},
     {"model": "ds41"},
     {"model": "qwen"},
     {"model": "qwen", "config": "local/qwen-q8-local.json"},

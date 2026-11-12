@@ -1,9 +1,7 @@
 #!/bin/sh
 # The GLM engine's pack (the index of a glm5-next GGUF: the small float weights, about 1 GB, the tensor
 # index and the tokenizer with the model's chat template), next to the GSQ-RCO GGUF the engine reads the experts
-# from.  A few seconds.
-#   local/glm-pack.sh          the 3.5-bit GGUF -> models/glm53-gsq-rco/pack      (local/glm-local.json)
-#   local/glm-pack.sh 3.0      the 3.0-bit GGUF -> models/glm53-gsq-rco/pack-3.0  (local/glm-3.0-local.json)
+# from (the 3.5-bit GGUF -> models/glm53-gsq-rco/pack, local/glm-local.json).  A few seconds.
 set -e
 R=$(cd "$(dirname "$0")/.." && pwd)
 PY=${ALMOND_PY:-$R/.venv/bin/python}
