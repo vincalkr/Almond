@@ -42,7 +42,8 @@
     "1",
     "--mmap-experts",
     "--resident-budget-gib",
-    "56"
+    "56",
+    "--vision"
   ],
   "env": {
     "ALMOND_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-qwen-hipblaslt-100401-local.txt",
@@ -67,5 +68,13 @@
   "loop_guard": true,
   "fit_max_tokens": true,
   "conversation_dir": "local/qwen-q8-slots",
-  "conversation_dir_gib": 16
+  "conversation_dir_gib": 16,
+  "vision": {
+    "exe": "build-vision/build/bin/almond-vision",
+    "mmproj": "models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+    "model": "models/qwen38-q8/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf",
+    "gpu": false,
+    "max_tokens": 300,
+    "threads": 12
+  }
 }

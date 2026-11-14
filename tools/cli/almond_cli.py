@@ -36,6 +36,7 @@ Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium / xhigh).  In the convers
   /agent [on|off]    the agent: the model reads, writes and edits files, runs commands in the working directory and
                      searches and reads the web (--no-web: not the web); a write, an edit, a command, a search, a
                      page or a path outside it asks y / n / a (a: always, for that tool)
+  /todo [clear]      the agent's task list (todo_write); it asks you with ask_user when a decision is yours
   /jobs [stop N]     the agent's background commands (run_command with background): each one's state; stop N stops
                      one.  When one ends its exit code and last lines go to the model: with the next tool result
                      while it works, as a new turn while the prompt waits (what you were typing stays)
@@ -68,6 +69,195 @@ ROOT = Path(__file__).resolve().parents[2]
 TTY = sys.stdout.isatty()
 DIM, BOLD, CYAN, RED, RESET = (("\x1b[2m", "\x1b[1m", "\x1b[36m", "\x1b[31m", "\x1b[0m") if TTY else ("",) * 5)
 MAGENTA = "\x1b[1;95m" if TTY else ""   # COMPACTING
+GREEN = "\x1b[32m" if TTY else ""
+GRAY = "\x1b[90m" if TTY else ""
+# the prompt: readline counts what is between \001 and \002 as zero wide
+PROMPT = "\001\x1b[1;32m\002❯\001\x1b[0m\002 " if TTY else "> "
+
+
+def term_width() -> int:
+    try:
+        return max(20, os.get_terminal_size(sys.stdout.fileno()).columns - 1)
+    except OSError:
+        return 100
+
+
+class Render:
+    """A streamed block on the terminal: every line starts with a margin (first: the first line's, e.g. a marker),
+    words wrap at the terminal's width under the margin, and with md the answer's Markdown shows as styles instead of
+    marks: **bold**, `code`, # headings, ``` blocks, - / * lists as bullets.  write(text) pieces as they come, end()
+    at the end; it prints through write_fn (the status bar's lock)."""
+
+    def __init__(self, write_fn, margin: str = "  ", first: str | None = None, base: str = "", md: bool = True):
+        self.w, self.margin, self.first, self.base, self.md = write_fn, margin, first, base, md
+        self.width = term_width()
+        self.col, self.line_no, self.word, self.cur = 0, 0, [], None
+        self.bold = self.code = self.fence = self.head = False
+        self.hold, self.bol = "", True             # Markdown marks not decided yet; at a line's start (spaces only)
+
+    # ---- styles
+    def style(self) -> str:
+        if self.fence:
+            return "\x1b[0m" + "\x1b[33m"
+        st = "\x1b[0m" + self.base
+        if self.head:
+            st += "\x1b[1m\x1b[36m"
+        if self.bold:
+            st += "\x1b[1m"
+        if self.code:
+            st += "\x1b[33m"
+        return st
+
+    # ---- the visible characters: wrapped words under the margin
+    def _out(self, text: str):
+        self.w(text)
+
+    def _start_line(self):
+        m = self.first if (self.first is not None and self.line_no == 0) else self.margin
+        m += " " * getattr(self, "hang", 0)     # a list item's wrapped lines: under its text
+        self._out("\x1b[0m" + m)
+        self.col, self.cur = len(strip_ansi(m)), None
+
+    def _emit(self, ch: str, st: str):
+        if self.col == 0:
+            self._start_line()
+            if getattr(self, "pend", 0):        # the line's indentation, now that it has text
+                self._out(" " * self.pend)
+                self.col += self.pend
+            self.pend = 0
+        if st != self.cur:
+            self._out(st)
+            self.cur = st
+        self._out(ch)
+        self.col += 1
+
+    def _flush_word(self):
+        if not self.word:
+            return
+        n = len(self.word)
+        lm = len(strip_ansi(self.margin))
+        if self.col > lm and self.col + n > self.width:
+            self._newline()
+        for ch, st in self.word:
+            if self.col >= self.width:          # a word longer than the line: cut
+                self._newline()
+            self._emit(ch, st)
+        self.word = []
+
+    def _newline(self):
+        self._out("\x1b[0m\n")
+        self.col, self.cur = 0, None
+        self.line_no += 1
+
+    def _char(self, ch: str):
+        if ch == "\n":
+            self._flush_word()
+            if self.col == 0 and self.line_no == 0 and self.first is not None:
+                self._start_line()
+            self._newline()
+            self.hang = self.pend = 0
+        elif ch in " \t":
+            self._flush_word()
+            if self.col == 0:                   # indentation: written with the line's first character
+                self.pend = getattr(self, "pend", 0) + 1
+            elif self.col < self.width:
+                self._emit(" ", self.style())
+        else:
+            self.word.append((ch, self.style()))
+
+    # ---- the Markdown marks
+    def write(self, text: str):
+        for ch in text:
+            if not self.md:
+                self._char(ch)
+            else:
+                self._md(ch)
+
+    def _md(self, ch: str):
+        h = self.hold + ch
+        if self.fence and not (self.bol and "```".startswith(h.lstrip(" "))):
+            self.hold = ""
+            self._text(h)
+            return
+        if self.bol:
+            body = h.lstrip(" ")
+            if body == "" or "```".startswith(body) and len(body) < 3 or set(body) == {"#"} and len(body) <= 6 \
+                    or body in ("-", "*", "+"):
+                self.hold = h                    # not decided yet
+                return
+            if body == "```":
+                self.fence, self.hold, self.bol = not self.fence, "", False
+                self.skip = True                 # the fence's line (its language) is not shown
+                return
+            if body.startswith("#") and body.lstrip("#") == " ":
+                self.head, self.hold, self.bol = True, "", False
+                return
+            if body[:-1] in ("-", "*", "+") and body[-1] == " ":
+                self.hold, self.bol = "", False
+                for c in h[:len(h) - len(body)] + "• ":
+                    self._char(c)
+                self.hang = len(h) - len(body) + 2
+                return
+            self.hold, self.bol = "", False
+            if self.fence:
+                self._text(h)
+            else:
+                self._inline_all(h)
+            return
+        self.hold = ""
+        self._inline_all(h)
+
+    def _inline_all(self, h: str):
+        for c in h:
+            self._inline(c)
+
+    def _inline(self, ch: str):
+        if getattr(self, "skip", False):
+            if ch == "\n":
+                self.skip = False
+                self.bol = True
+            return
+        if getattr(self, "star", False):
+            self.star = False
+            if ch == "*":
+                self.bold = not self.bold
+                return
+            self._char("*")
+        if ch == "*" and not self.code:
+            self.star = True
+            return
+        if ch == "`" and not self.fence:
+            self.code = not self.code
+            return
+        self._text(ch)
+
+    def _text(self, h: str):
+        for c in h:
+            if getattr(self, "skip", False):
+                if c == "\n":
+                    self.skip, self.bol = False, True
+                continue
+            self._char(c)
+            if c == "\n":
+                self.bol, self.head = True, False
+                if not self.fence:
+                    self.bold = self.code = False
+
+    def end(self):
+        if getattr(self, "star", False):
+            self.star = False
+            self._char("*")
+        if self.hold:
+            h, self.hold, self.bol = self.hold, "", False
+            self._text(h)
+        self._flush_word()
+        if self.col:
+            self._newline()
+        self._out("\x1b[0m")
+
+
+def strip_ansi(t: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", t)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import launch  # noqa: E402  (./almond serve)
 LOGO = launch.LOGO   # the header, the same at a server's start
@@ -88,7 +278,7 @@ COMMANDS = [    # (name, arguments, what it does): /help's order, Tab's suggesti
     ("cd", "DIR", "the agent's working directory"), ("hide", "", "hide the thinking"), ("show", "", "show the thinking"),
     ("status", "", "model, context, thinking, sampling, agent, conversation"), ("ctx", "", "the context in use"),
     ("stats", "", "the server's monitor"), ("forget", "", "clear the engine's conversation cache"),
-    ("jobs", "[stop N]", "the agent's background commands"),
+    ("jobs", "[stop N]", "the agent's background commands"), ("todo", "[clear]", "the agent's task list"),
     ("compact", "[NOTE]", "summarize the earlier conversation, keep the recent part"),
     ("export", "[FILE]", "the conversation as Markdown"), ("help", "", "the commands"), ("quit", "", "leave"),
 ]
@@ -330,6 +520,10 @@ what is running; do not poll it with job_output or sleep in a loop.
 - Keep stderr visible (no 2>/dev/null) unless it is noise you understand; an empty output with an error code means \
 the command failed - read why before trying again, and change the command rather than repeating it.
 - edit_file needs the exact text from read_file, without the line numbers.
+- For work of three or more steps, write a task list with todo_write first and keep it current: one step \
+in_progress, each marked completed as soon as it is done.
+- When a decision is the user's (a choice between approaches, something you cannot find out), ask with ask_user \
+instead of guessing; do not ask what the files or a command can tell you.
 - Never run destructive commands (rm -rf, overwriting data, changing system settings) unless the user asked for \
 exactly that.
 
@@ -413,7 +607,50 @@ TOOLS = [
           id={"type": "integer"},
           lines={"type": "integer", "description": "how many of the last lines (50)", "optional": True}),
     _tool("job_stop", "Stop a background command (and whatever it started).", id={"type": "integer"}),
+    _tool("todo_write", "Your task list for the user's request, shown to the user: the whole list each time (it "
+          "replaces the last one). Write it first for work of three or more steps; keep exactly one step in_progress "
+          "while you work, mark each completed as soon as it is done, add the steps you discover.",
+          items={"type": "array", "items": {"type": "object", "properties": {
+              "content": {"type": "string", "description": "the step, a few words"},
+              "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}},
+              "required": ["content", "status"]}}),
+    _tool("ask_user", "Ask the user one question when you cannot go on without their decision (a choice between "
+          "approaches, a missing fact); not for what you can find out yourself. Their answer comes back as the result.",
+          question={"type": "string"},
+          options={"type": "array", "items": {"type": "string"}, "description": "2-5 likely answers, the one you "
+                   "recommend first; the user can also write their own", "optional": True}),
 ]
+TODO = []                                       # the agent's task list (todo_write), for this conversation
+
+
+def todo_text(items: list, color: bool = True) -> str:
+    """The list as the terminal shows it (color) or as the model reads it."""
+    out = []
+    for it in items:
+        st, c = it.get("status", "pending"), str(it.get("content", ""))
+        if not color:
+            out.append(f"[{'x' if st == 'completed' else '>' if st == 'in_progress' else ' '}] {c}")
+        elif st == "completed":
+            out.append(f"    {GREEN}✔{RESET} {DIM}\x1b[9m{c}{RESET}")
+        elif st == "in_progress":
+            out.append(f"    {CYAN}▶{RESET} {BOLD}{c}{RESET}")
+        else:
+            out.append(f"    {GRAY}○{RESET} {c}")
+    return "\n".join(out)
+
+
+def todo_from(messages: list) -> list:
+    """The last todo_write in a conversation (a loaded one gets its list back)."""
+    for m in reversed(messages):
+        for c in reversed(m.get("tool_calls") or []):
+            if c.get("function", {}).get("name") == "todo_write":
+                try:
+                    items = json.loads(c["function"].get("arguments") or "{}").get("items")
+                    if isinstance(items, list):
+                        return items
+                except (ValueError, AttributeError):
+                    pass
+    return []
 
 
 class Jobs:
@@ -715,8 +952,20 @@ class Agent:
             say(f"{CYAN}* {name}{RESET} {RED}bad arguments: {e}{RESET}")
             return f"error: the arguments are not a JSON object ({e})"
         fn = getattr(self, "t_" + name, None)
+        if name in ("todo_write", "ask_user"):  # they show themselves
+            fn = getattr(self, "t_" + name)
+            try:
+                return fn(**args)
+            except (TypeError, ValueError) as e:
+                return f"error: {e}"
         brief = str(args.get("command") or args.get("path") or args.get("query") or args.get("url") or args.get("id") or "")
-        say(f"{CYAN}* {name}{RESET} {brief.splitlines()[0] if brief else ''}")
+        head = f"  ⚙ {name} "
+        line = brief.splitlines()[0] if brief else ""
+        room = term_width() - len(head)
+        if len(line) > room or len(brief.splitlines()) > 1:
+            # a long command comes whole on the next lines (t_run_command): here only the tool
+            line = "" if name == "run_command" else line[:max(10, room - 1)] + "…"
+        say(f"\n  {CYAN}{BOLD}⚙ {name}{RESET} {line}")
         if fn is None:
             return f"error: no tool {name}"
         try:
@@ -728,9 +977,46 @@ class Agent:
         lines = [x for x in text.splitlines() if x.strip()]
         first = lines[0] if lines else ""
         last = lines[-1] if len(lines) > 1 and lines[-1].startswith("[") else ""   # the exit code or the timeout
-        say(f"{DIM}  {first[:120]}{' ...' if len(lines) > 1 else ''}"
-            + (f" {last}" if last and (len(lines) <= 3 or "exit code 0" not in last) else "") + RESET)
+        tail = f" {last}" if last and (len(lines) <= 3 or "exit code 0" not in last) else ""
+        more = " …" if len(lines) > 1 else ""
+        first = first[:max(10, term_width() - 8 - len(more) - len(tail))]
+        say(f"    {GRAY}⎿{RESET} {DIM}{first}{more}{tail}{RESET}")
         return text
+
+    def t_todo_write(self, items):
+        if not isinstance(items, list):
+            raise ValueError("items must be a list")
+        clean = []
+        for it in items:
+            if not isinstance(it, dict) or not str(it.get("content", "")).strip():
+                raise ValueError("each item needs content and status")
+            st = it.get("status") if it.get("status") in ("pending", "in_progress", "completed") else "pending"
+            clean.append({"content": str(it["content"]).strip(), "status": st})
+        TODO[:] = clean
+        say("\n" + todo_text(TODO))
+        done = sum(1 for x in TODO if x["status"] == "completed")
+        return f"the list is updated ({done} of {len(TODO)} completed)"
+
+    def t_ask_user(self, question, options=None):
+        opts = [str(o) for o in (options or []) if str(o).strip()][:9]
+        r = Render(lambda t: (sys.stdout.write(t), sys.stdout.flush()), margin="    ", first=f"  {MAGENTA}?{RESET} ",
+                   base="\x1b[1m", md=False) if TTY else None
+        if r:
+            say("")
+            r.write(question)
+            r.end()
+        else:
+            say(f"? {question}")
+        for i, o in enumerate(opts, 1):
+            say(f"    {CYAN}{i}{RESET}. {o}")
+        hint = f"1-{len(opts)} or your own answer" if opts else "your answer"
+        try:
+            a = input(f"    ({hint}) ").strip()
+        except EOFError:
+            return "the user gave no answer"
+        if a.isdigit() and 1 <= int(a) <= len(opts):
+            a = opts[int(a) - 1]
+        return f"the user answered: {a}" if a else "the user gave no answer"
 
     def t_job_output(self, id, lines=50):
         j = JOBS.get(id)
@@ -835,7 +1121,14 @@ class Agent:
         return head + part
 
     def t_run_command(self, command, timeout=120, background=False):
-        say(f"{BOLD}  $ {command}{RESET}" + (f" {DIM}(in the background){RESET}" if background else ""))
+        if TTY and (len(command) > term_width() - 18 or "\n" in command):    # cut on the tool's line: whole here
+            r = Render(lambda t: (sys.stdout.write(t), sys.stdout.flush()), margin="    ", base="\x1b[2m", md=False)
+            r.write(command)
+            r.end()
+        elif not TTY:
+            say(f"  $ {command}")
+        if background:
+            say(f"    {DIM}(in the background){RESET}")
         if not self.allow("run_command", "run it"):
             return "denied by the user"
         env = dict(os.environ, LC_NUMERIC="C")     # 1.5G, not 1,5G: the model reads the numbers better
@@ -1055,7 +1348,26 @@ class Chat:
         t0 = time.time()
         first = None
         bar = self.bar
+        # on a terminal: the thinking dim behind a bar, the answer after a marker, both wrapped under a margin
+        pretty = TTY and out is sys.stdout
+        blocks = {}
+
+        def block(kind):
+            if kind not in blocks:
+                for k in list(blocks):          # the block before it ends, a blank line between them
+                    blocks.pop(k).end()
+                    bar.write(out, "\n")
+                blocks[kind] = (Render(lambda t: bar.write(think, t), margin=f"  {GRAY}│{RESET} ", base="\x1b[2m\x1b[3m")
+                                if kind == "reasoning" else
+                                Render(lambda t: bar.write(out, t), first=f"{GREEN}●{RESET} "))
+            return blocks[kind]
+
+        def end_blocks():
+            for k in list(blocks):
+                blocks.pop(k).end()
         bar.run(self.model["id"], self.ctx_used)
+        if pretty:
+            out.write("\n")
         try:
             for kind, v in self.api.stream(body):
                 if kind in ("reasoning", "content") and first is None:
@@ -1063,15 +1375,27 @@ class Chat:
                 if kind == "reasoning":
                     reasoning.append(v)
                     if self.show:
-                        bar.write(think, (DIM if state != "reasoning" else "") + v)
+                        if pretty:
+                            if "reasoning" in blocks:
+                                blocks["reasoning"].write(v)
+                            elif v.strip():
+                                block("reasoning").write(v.lstrip())
+                        else:
+                            bar.write(think, (DIM if state != "reasoning" else "") + v)
                     state = "reasoning"
                 elif kind == "content":
-                    if state == "reasoning" and self.show:
+                    if state == "reasoning" and self.show and not pretty:
                         bar.write(think, f"{RESET}\n\n" if TTY else "\n")
                     state = "content"
                     bar.phase = "answer"
                     content.append(v)
-                    bar.write(out, v)
+                    if pretty:
+                        if "content" in blocks:
+                            blocks["content"].write(v)
+                        elif v.strip():
+                            block("content").write(v.lstrip())
+                    else:
+                        bar.write(out, v)
                 elif kind == "tool":            # the pieces of each call, by index
                     c = calls.setdefault(v.get("index", len(calls)), {"id": None, "name": "", "arguments": ""})
                     fn = v.get("function") or {}
@@ -1082,6 +1406,7 @@ class Chat:
                     end = v
         except KeyboardInterrupt:
             bar.done()
+            end_blocks()
             try:
                 self.api.live.close()           # the server sees the client go and stops the answer
             except Exception:
@@ -1091,12 +1416,16 @@ class Chat:
             end, self.stopped, calls = {"finish": "stopped"}, True, {}
         except (RuntimeError, OSError, http.client.HTTPException) as e:
             bar.done()
+            end_blocks()
             say(f"{RESET}{RED}error: {e}{RESET}")
             return None
         bar.done()
-        if state == "reasoning" and self.show:
-            think.write(RESET if TTY else "\n")
-        out.write("\n")
+        if pretty:
+            end_blocks()
+        else:
+            if state == "reasoning" and self.show:
+                think.write(RESET if TTY else "\n")
+            out.write("\n")
         msg = {"role": "assistant", "content": "".join(content)}
         if reasoning:
             msg["reasoning_content"] = "".join(reasoning)
@@ -1119,7 +1448,7 @@ class Chat:
             parts = [f"{n} tokens" if n else None, f"{speed:.1f} tok/s" if speed else None,
                      f"prompt {t['prompt_per_second']:.0f} tok/s" if t.get("prompt_n", 0) > 1 else None,
                      f"{time.time() - t0:.1f} s", end.get("finish") if end.get("finish") not in ("stop", None) else None]
-            say(f"{DIM}[{', '.join(p for p in parts if p)}]{RESET}")
+            say(f"{DIM}  [{', '.join(p for p in parts if p)}]{RESET}")
         return calls
 
     # ---- compaction
@@ -1222,6 +1551,8 @@ class Chat:
         run = JOBS.running()
         jobs = ("\n[Background jobs still running: " + "; ".join(f"job {j['id']}: {j['cmd'].splitlines()[0][:100]}"
                                                                for j in run) + "]") if run else ""
+        if TODO:                                # the list's last todo_write may be in the summarized part
+            jobs += "\n[Your task list so far:\n" + todo_text(TODO, color=False) + "]"
         self.messages = [{"role": "user", "content": COMPACT_HEAD + text + COMPACT_TAIL + jobs}] + self.messages[tail:]
         self.ctx_used = self.est_tokens(self.wire(), rate)
         self.save()
@@ -1345,6 +1676,7 @@ class Chat:
             if self.messages:
                 say(f"{DIM}saved as {self.save()}{RESET}")
             self.messages, self.ctx_used, self.name = [], 0, None
+            TODO.clear()
             self.date = time.strftime("%Y-%m-%d")
             say(f"{DIM}a new conversation{RESET}")
         elif cmd == "save":
@@ -1436,6 +1768,10 @@ class Chat:
                 return True
             self.pending = f"{arg}:\n```\n{text}\n```\n"
             say(f"{DIM}{arg}: {len(text)} characters, sent with your next message{RESET}")
+        elif cmd == "todo":
+            if arg == "clear":
+                TODO.clear()
+            say(todo_text(TODO) if TODO else f"{DIM}no task list{RESET}")
         elif cmd == "jobs":
             if arg.startswith("stop"):
                 try:
@@ -1509,6 +1845,7 @@ class Chat:
             except (SystemExit, RuntimeError) as e:
                 say(f"{RED}{e}; it goes on with {self.model['id']}{RESET}")
         self.messages, self.system = d.get("messages") or [], d.get("system")
+        TODO[:] = todo_from(self.messages)
         # the day it started: kept since "date" is saved; before, the name's YYYYMMDD- (the save's own day)
         m = re.match(r"(\d{4})(\d{2})(\d{2})-", f.stem)
         self.date = d.get("date") or (f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else time.strftime("%Y-%m-%d"))
@@ -1597,7 +1934,7 @@ class Chat:
                 sys.stdout.write(f"  {m + (' ' + args if args else ''):<20} {DIM}{w}{RESET}\n")
             else:
                 sys.stdout.write(f"  {m}\n")
-        sys.stdout.write(f"{BOLD}>{RESET} " + self.readline.get_line_buffer())
+        sys.stdout.write(strip_ansi(PROMPT).replace("\001", "").replace("\002", "") + self.readline.get_line_buffer())
         sys.stdout.flush()
 
     def loop(self):
@@ -1658,7 +1995,9 @@ class Chat:
                 continue
             self.bar.idle(self)
             try:
-                line = read_input(f"{BOLD}>{RESET} " if TTY else "> ", self.prefill, wake=bool(self.agent))
+                if TTY:                         # a rule between the turns
+                    say(f"\n{GRAY}{'─' * term_width()}{RESET}")
+                line = read_input(PROMPT, self.prefill, wake=bool(self.agent))
                 self.prefill = ""
             except JobsDone as e:               # what was typed comes back after the turn
                 self.prefill = e.buf or self.prefill
@@ -2001,6 +2340,13 @@ def main() -> int:
         if a.no_start or api.host not in ("127.0.0.1", "localhost"):
             raise SystemExit(f"almond: nothing answers at {a.url}")
         started = start_router(api, api.port, a.ctx, a.session_log)
+    # power-tune for as long as the chat runs too (launch.py switches it with each server): on now, off on leaving
+    # unless a server still runs.  Only on this machine, only when installed; DS41_POWER_TUNE=0 leaves it alone.
+    tuned = api.host in ("127.0.0.1", "localhost") and os.environ.get("DS41_POWER_TUNE", "1") != "0" and \
+        os.access(launch.PT, os.X_OK) and \
+        subprocess.run(["sudo", "-n", launch.PT, "on"], capture_output=True).returncode == 0
+    if tuned:
+        say(f"{DIM}power-tune on (off again when the chat ends and no server is left){RESET}")
     chat = Chat(api, a)
     try:
         chat.pick(a.model)
@@ -2038,6 +2384,9 @@ def main() -> int:
                 started.wait(timeout=180)
             except subprocess.TimeoutExpired:
                 os.killpg(started.pid, signal.SIGKILL)
+        if tuned and not launch.others_running() and \
+                subprocess.run(["sudo", "-n", launch.PT, "off"], capture_output=True).returncode == 0:
+            say(f"{DIM}power-tune off{RESET}")
 
 
 if __name__ == "__main__":
