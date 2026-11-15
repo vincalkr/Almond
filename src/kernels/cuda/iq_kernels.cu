@@ -43,6 +43,22 @@ __device__ __forceinline__ uint32_t unpack_ksigns(const uint8_t v) {
     const uint32_t s = v ^ p << 7;
     return s * 0x01010101;
 }
+// AMD: __vcmpne4 / __vsub4 are emulated byte by byte (hip_compat/intrinsics.hpp).  The signed grid words of the
+// IQ2_XXS / IQ2_XS / IQ3_XXS blocks come out of a packed sign expansion instead (project-maya's RDNA expert kernels,
+// docs/AMD_EXPERT_KERNELS.md there; GLM's glm_fast.cu has it): a multiply spreads four sign bits into the top bit of
+// four bytes, a negative byte becomes (g ^ 0xFF) + 1 with one word add - no carry crosses a byte because every grid
+// byte is nonzero.  The same signed bytes as __vsub4(g ^ s, s), so the same results bit for bit
+// (ALMOND_HIP_SIGNS_LEGACY at build time keeps the old form; bench-expert-hotcold.sh HASH=1 compares them).
+#if defined(__HIP_PLATFORM_AMD__) && !defined(ALMOND_HIP_SIGNS_LEGACY)
+#define ALMOND_FAST_SIGNS 1
+__device__ __forceinline__ uint2 signed_grid_pair(uint32_t gx, uint32_t gy, uint32_t b7) {
+    uint32_t b = b7 & 127u;
+    b |= (__popc(b) & 1u) << 7;
+    const uint32_t lo = (((b & 15u) * 0x10204080u) & 0x80808080u) >> 7;
+    const uint32_t hi = ((((b >> 4) & 15u) * 0x10204080u) & 0x80808080u) >> 7;
+    return make_uint2((gx ^ (lo * 255u)) + lo, (gy ^ (hi * 255u)) + hi);
+}
+#endif
 __device__ __forceinline__ int2 get_int_from_table_16(const int& q4, const int8_t* table) {
 #if defined(ALMOND_HIP_GFX906)
     // AMD: llama.cpp's HIP lookup (vecdotq.cuh) - v_perm_b32 takes 3-bit byte indices, so the low and high halves
@@ -105,13 +121,18 @@ __device__ __forceinline__ float vec_dot_iq2_xxs_q8_1(const void* __restrict__ v
 #pragma unroll
     for (int k0 = 0; k0 < 8; k0 += 2) {
         const uint2 grid_pos = ((const uint2*) iq2xxs_grid)[aux8[k0 / 2]];
+#if defined(ALMOND_FAST_SIGNS)
+        const uint2 sg = signed_grid_pair((uint32_t) grid_pos.x, (uint32_t) grid_pos.y, (uint32_t) (aux32 >> (7 * k0 / 2)));
+        const int grid0 = (int) sg.x, grid1 = (int) sg.y;
+#else
         const uint32_t signs = unpack_ksigns(aux32 >> (7 * k0 / 2));
         const int signs0 = __vcmpne4(signs & 0x08040201, 0);
         const int grid0 = __vsub4(grid_pos.x ^ signs0, signs0);
-        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, k0 + 0);
-        sumi = ggml_cuda_dp4a(grid0, u0, sumi);
         const int signs1 = __vcmpne4(signs & 0x80402010, 0);
         const int grid1 = __vsub4(grid_pos.y ^ signs1, signs1);
+#endif
+        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, k0 + 0);
+        sumi = ggml_cuda_dp4a(grid0, u0, sumi);
         const int u1 = get_int_b4(bq8_1[iqs / 2].qs, k0 + 1);
         sumi = ggml_cuda_dp4a(grid1, u1, sumi);
     }
@@ -132,12 +153,18 @@ __device__ __forceinline__ float vec_dot_iq2_xs_q8_1(const void* __restrict__ vb
 #pragma unroll
     for (int l0 = 0; l0 < 8; l0 += 2) {
         const uint2 grid_pos = ((const uint2*) iq2xs_grid)[q2[l0 / 2] & 0x1FF];
+        #if defined(ALMOND_FAST_SIGNS)
+        const uint2 sg = signed_grid_pair((uint32_t) grid_pos.x, (uint32_t) grid_pos.y, (uint32_t) (q2[l0 / 2] >> 9));
+        const int grid_l = (int) sg.x;
+        const int grid_h = (int) sg.y;
+        #else
         const uint32_t signs = unpack_ksigns(q2[l0 / 2] >> 9);
         const int signs0 = __vcmpne4(signs & 0x08040201, 0);
         const int grid_l = __vsub4(grid_pos.x ^ signs0, signs0);
-        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
         const int signs1 = __vcmpne4(signs & 0x80402010, 0);
         const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
+        #endif
+        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
         const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
         if (l0 < 4) {
             sumi0 = ggml_cuda_dp4a(grid_l, u0, sumi0);
@@ -195,12 +222,18 @@ __device__ __forceinline__ float vec_dot_iq3_xxs_q8_1(const void* __restrict__ v
 #pragma unroll
     for (int l0 = 0; l0 < 8; l0 += 2) {
         const int2 grid_pos = make_int2(iq3xxs_grid[q3[l0 + 0]], iq3xxs_grid[q3[l0 + 1]]);
+        #if defined(ALMOND_FAST_SIGNS)
+        const uint2 sg = signed_grid_pair((uint32_t) grid_pos.x, (uint32_t) grid_pos.y, (uint32_t) (aux32 >> (7 * l0 / 2)));
+        const int grid_l = (int) sg.x;
+        const int grid_h = (int) sg.y;
+        #else
         const uint32_t signs = unpack_ksigns(aux32 >> (7 * l0 / 2));
         const int signs0 = __vcmpne4(signs & 0x08040201, 0);
         const int grid_l = __vsub4(grid_pos.x ^ signs0, signs0);
-        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
         const int signs1 = __vcmpne4(signs & 0x80402010, 0);
         const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
+        #endif
+        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
         const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
         sumi = ggml_cuda_dp4a(grid_l, u0, sumi);
         sumi = ggml_cuda_dp4a(grid_h, u1, sumi);
@@ -686,11 +719,17 @@ template<> struct Split<16> {   // IQ2_XXS
 #pragma unroll
         for (int k0 = 0; k0 < 8; k0 += 2) {
             const uint2 grid_pos = grid_lut[aux8[k0 / 2]];
+            #if defined(ALMOND_FAST_SIGNS)
+            const uint2 sg = signed_grid_pair((uint32_t) grid_pos.x, (uint32_t) grid_pos.y, (uint32_t) (aux32 >> (7 * k0 / 2)));
+            r.g[k0 + 0] = (int) sg.x;
+            r.g[k0 + 1] = (int) sg.y;
+            #else
             const uint32_t signs = unpack_ksigns(aux32 >> (7 * k0 / 2));
             const int signs0 = __vcmpne4(signs & 0x08040201, 0);
             r.g[k0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
             const int signs1 = __vcmpne4(signs & 0x80402010, 0);
             r.g[k0 + 1] = __vsub4(grid_pos.y ^ signs1, signs1);
+            #endif
         }
         r.ls = aux32 >> 27 | 1;
         r.dw = __half2float(bq2->d);
@@ -735,11 +774,17 @@ template<> struct Split<17> : SplitLs2 {   // IQ2_XS
 #pragma unroll
         for (int l0 = 0; l0 < 8; l0 += 2) {
             const uint2 grid_pos = grid_lut[q2[l0 / 2] & 0x1FF];
+            #if defined(ALMOND_FAST_SIGNS)
+            const uint2 sg = signed_grid_pair((uint32_t) grid_pos.x, (uint32_t) grid_pos.y, (uint32_t) (q2[l0 / 2] >> 9));
+            r.g[l0 + 0] = (int) sg.x;
+            r.g[l0 + 1] = (int) sg.y;
+            #else
             const uint32_t signs = unpack_ksigns(q2[l0 / 2] >> 9);
             const int signs0 = __vcmpne4(signs & 0x08040201, 0);
             r.g[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
             const int signs1 = __vcmpne4(signs & 0x80402010, 0);
             r.g[l0 + 1] = __vsub4(grid_pos.y ^ signs1, signs1);
+            #endif
         }
         r.dw = __half2float(bq2->d);
         return r;
@@ -786,11 +831,17 @@ template<> struct Split<18> {   // IQ3_XXS
 #pragma unroll
         for (int l0 = 0; l0 < 8; l0 += 2) {
             const int2 grid_pos = make_int2(iq3xxs_grid[q3[l0 + 0]], iq3xxs_grid[q3[l0 + 1]]);
+            #if defined(ALMOND_FAST_SIGNS)
+            const uint2 sg = signed_grid_pair((uint32_t) grid_pos.x, (uint32_t) grid_pos.y, (uint32_t) (aux32 >> (7 * l0 / 2)));
+            r.g[l0 + 0] = (int) sg.x;
+            r.g[l0 + 1] = (int) sg.y;
+            #else
             const uint32_t signs = unpack_ksigns(aux32 >> (7 * l0 / 2));
             const int signs0 = __vcmpne4(signs & 0x08040201, 0);
             r.g[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
             const int signs1 = __vcmpne4(signs & 0x80402010, 0);
             r.g[l0 + 1] = __vsub4(grid_pos.y ^ signs1, signs1);
+            #endif
         }
         r.ls = aux32 >> 28;
         r.dw = __half2float(bq3->d);

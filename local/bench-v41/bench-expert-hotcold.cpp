@@ -93,6 +93,19 @@ int main(int argc, char** argv) {
             std::printf("%3d/%3d/%3d (L%-3lld)          %-5s %10.1f %10.1f %8.0f %8.0f %6.2f\n", gt, ut, dt, (long long) l,
                         phase == 1 ? "gu" : "down", res[0], res[1], by / res[0] / 1e3, by / res[1] / 1e3, res[1] / res[0]);
         }
+        {   // HASH=1: the full call's K output rows on the first expert set, hashed (a kernel change must keep them bit for bit)
+            static const bool hash = std::getenv("HASH") != nullptr;
+            if (hash) {
+                kernels::native_expert_set_mode(-1, 0);
+                ck(cudaMemset(d_out, 0, K * D * 4), "z");
+                kernels::native_expert_grouped(L, d_ptrs, d_start, d_ng, d_dst, d_tok, K, K, d_xq, d_scr, d_out, nullptr, K);
+                std::vector<uint32_t> h((size_t) K * D);
+                ck(cudaMemcpy(h.data(), d_out, h.size() * 4, cudaMemcpyDeviceToHost), "h");
+                uint64_t f = 1469598103934665603ull;
+                for (uint32_t v : h) { f ^= v; f *= 1099511628211ull; }
+                std::printf("%3d/%3d/%3d hash %016llx\n", gt, ut, dt, (unsigned long long) f);
+            }
+        }
         for (auto p : d_blobs) cudaFree(p);
         cudaFree(d_ptrs);
     }

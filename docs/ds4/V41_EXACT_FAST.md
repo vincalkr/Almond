@@ -213,6 +213,26 @@ last of three rounds keeps 8 of 32 lanes busy (75% on average). The 16- and 8-la
 Qwen's shapes (n_embd 2560, n_ff 640). The ceiling of any of this: the experts keep card 0 busy ~3.9 ms a token and
 card 1 ~1.1 ms (same trace), so a faster kernel wins at most ~1-2 ms a token, 2-4% of the decode. Not built.
 
+**The IQ2 expert kernels with packed sign expansion** (2026-11-15, default). On AMD `__vcmpne4` / `__vsub4` are
+emulated byte by byte; the IQ2_XXS / IQ2_XS / IQ3_XXS blocks' signed grid words now come from project-maya's packed
+sign expansion (a multiply spreads four sign bits into four bytes, a negative byte is `(g ^ 0xFF) + 1` with one word
+add: no carry crosses a byte since every grid byte is nonzero), which GLM's kernels already had. The same signed
+bytes, so the same results bit for bit: `bench-expert-hotcold.sh` with `HASH=1` hashes a full call's output per
+format class, identical for the old and new kernels in all 6 runs (`ALMOND_HIP_SIGNS_LEGACY` at build time keeps the
+old form). The bench, card 0, the two builds alternated three times, medians (`local/sweep-signs/`):
+
+| gate+up / down | gu, old -> new (cold) | down, old -> new (cold) |
+| --- | ---: | ---: |
+| IQ2_XXS / IQ2_XXS | 83.9 -> 62.8 us (-25%) | 55.2 -> 44.2 us (-20%) |
+| IQ2_XXS / IQ2_XS | 82.7 -> 60.4 us (-27%) | 56.8 -> 45.9 us (-19%) |
+| IQ2_XS / IQ2_XS | 87.5 -> 67.3 us (-23%) | 56.8 -> 45.8 us (-19%) |
+| IQ1_M / IQ1_M | 68.0 -> 67.9 us (the same: no sign bits) | 42.5 -> 42.3 us |
+
+26 of the 40 layers have an IQ2 gate/up or down. With the expert kernels at ~3.9 ms a token on card 0 and ~1.1 on
+card 1 (above), this is about 1 ms a token, 2-3% of the decode. The end-to-end A/B (the configuration's flags, 3
+rounds alternated) did not resolve it: the box was short of RAM during it (24 GiB available, kswapd busy) and both
+builds fell round by round (Promessi Sposi 20.1 -> 8.6 tok/s), far more than the difference sought.
+
 ### A rotated-INT4 copy of the experts for prompts: not built (2026-11-06)
 
 RDNA3's `v_wmma_i32_16x16x16_iu4` runs at twice the rate of the INT8 instruction ggml's MMQ uses; a block-Hadamard
