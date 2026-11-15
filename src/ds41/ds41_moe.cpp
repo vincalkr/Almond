@@ -5773,6 +5773,28 @@ bool Ds41MoeTier::reclaim_cache(std::string& err) {
     im.lent.clear();
     im.lent_bytes = 0;
     if (bad) { err = terr.empty() ? "reclaim: pinned buffer allocation failed" : terr; return false; }
+    // ALMOND_LOAN_CHECK=1 (diagnostic, slow: every resident expert read again from the file): every VRAM slot against
+    // the file, byte for byte, after the reclaim - the check that found ROCm's virtual memory sharing segments
+    static const bool loan_check = std::getenv("ALMOND_LOAN_CHECK") && std::getenv("ALMOND_LOAN_CHECK")[0] == '1';
+    if (loan_check) {
+        const double tc = now_ms();
+        const std::vector<int64_t> hold = cache.slot_holders();
+        std::vector<uint8_t> ref((size_t) im.blob);
+        int64_t n = 0, nbad = 0;
+        for (int64_t s = 0; s < cache.slots(); ++s) {
+            const int64_t le = hold[(size_t) s];
+            if (le < 0) continue;
+            const int64_t l = le / NX, e = le % NX;
+            im.blobs->read(l, e, ref.data());
+            std::string ce;
+            ++n;
+            if (!cache.verify_slot((int32_t) s, ref.data(), ce, im.bl[(size_t) im.g.cls(l, e)])) {
+                if (++nbad <= 8) std::fprintf(stderr, "[loan-check] slot %lld (L%lld e%lld) BAD\n", (long long) s, (long long) l, (long long) e);
+            }
+        }
+        std::fprintf(stderr, "[loan-check] after the reclaim: %lld of %lld VRAM experts bad (%.1f s)\n", (long long) nbad,
+                     (long long) n, (now_ms() - tc) / 1000.0);
+    }
     return true;
 #else
     err = "no GPU tier";

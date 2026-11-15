@@ -73,9 +73,11 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
   prompts through the server read fine.
 - **Speed:** where the time goes in the sessions and the levers left, with what was measured on 2026-11-10 (GLM's
   shared CPU pool, DeepSeek's readahead, arena 88, 24 threads, the late-layer skip: none adopted): docs/SPEED_LEVERS.md.
-  Built 2026-11-11, on in the DeepSeek configurations since (`ALMOND_SERVE_BATCH_KEEP=1024`): it lends the VRAM cache's tail to a
-  small prompt batch instead of releasing it (a ~500-token agent turn 10.5-18.5 s -> 6.8-8.3 s over 7 turns, measured there; turns of
-  600-1,024 tokens and long agent sessions not measured yet).
+  The cache loan (`ALMOND_SERVE_BATCH_KEEP=1024`, on in the DeepSeek configurations): a prompt batch of up to 1,024
+  new tokens keeps the VRAM cache, lending its tail. Its first build (2026-11-11) garbled the output after a while:
+  ROCm's virtual memory gave two live segments the same memory; since 2026-11-15 the cache is chunks of plain
+  allocations on HIP, checked byte for byte in the server (0 bad, 10 turns) and lent turns 26% shorter
+  (docs/SPEED_LEVERS.md). Long agent sessions (100K+) not measured yet.
 - **DeepSeek:** `--skip-miss 0.15` +7% for +0.6-0.8% decode PPL (off); `--skip-miss-from 21` +6-8% at 17K, its PPL
   not measured (docs/SPEED_LEVERS.md).
   Prompt chunks of 4K instead of 8K (project-maya's RDNA3 finding) not measured. The CPU tier is at the RAM's

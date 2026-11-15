@@ -1,0 +1,11 @@
+turn  1:  2255 new, prompt  14.11 s,  17.3 tok/s, 29.7 s wall, bad chars 0 | It is a detailed performance and compatibility report on running several quantized GGUF models
+turn  2:   356 new, prompt   5.44 s,  17.2 tok/s, 15.9 s wall, bad chars 0 | It adds the Qwen3.8-27B Q8_0 setup details (unsloth GGUF, tokenizer export, chat template, two-card
+turn  3:   695 new, prompt   7.00 s,  18.1 tok/s, 20.1 s wall, bad chars 0 | It adds the Qwen3.8-27B vision and conversation-persistence details: the CPU encoder feeds image rows
+turn  4:  1146 new, prompt   9.76 s,  19.2 tok/s, 18.9 s wall, bad chars 0 | It adds the Qwen3.8-27B thinking/sampling levels and template details, the DeltaNet state-snapshot mechanism that
+turn  5:  1711 new, prompt  11.51 s,  19.1 tok/s, 22.4 s wall, bad chars 0 | It adds conversation checkpointing details (host-RAM recurrent-state checkpoints, KV/DFlash2 indexed by position, prefix resumption)
+turn  6:   549 new, prompt   6.63 s,  17.6 tok/s, 16.5 s wall, bad chars 0 | It adds the Qwen3.8-Flash-Next Q8_0 memory/arena handling: the resident arena doesn't fit the machine,
+turn  7:  1225 new, prompt  10.26 s,  10.4 tok/s, 28.4 s wall, bad chars 0 | It adds the DeepSeek-V4.1-Flash-1017 setup: the ISTA-DASLab GSQ-RCO IQ2_XXS pack (138.2 GB, four shards,
+turn  8:  1891 new, prompt  23.81 s,   5.5 tok/s, 81.0 s wall, bad chars 0 | It adds the DeepSeek-V4.1 configuration details (flags, environment levers, enc-skip for long prompts, dense
+turn  9:   342 new, prompt   6.23 s,  14.3 tok/s, 17.6 s wall, bad chars 0 | It adds a finer breakdown of card 0's per-token time: 19.9 ms busy (7.2
+turn 10:  1344 new, prompt   9.76 s,  18.3 tok/s, 19.3 s wall, bad chars 0 | It adds that HIP graphs are already enabled in decode (most graph computes launched
+bad characters in all answers: 0

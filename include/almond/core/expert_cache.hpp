@@ -119,7 +119,7 @@ public:
     /// always.  CUDA only: a HIP build refuses it at open.  The slots past `slots()` after a shrink must hold no
     /// resident expert and no loan: the CALLER evicts them first (they become CPU misses).
     void set_segment_bytes(int64_t seg_bytes) { seg_req_ = seg_bytes > 0 ? seg_bytes : 0; }
-    bool segmented() const { return !segs_.empty(); }
+    bool segmented() const { return !segs_.empty() || chunked_; }
     int64_t segment_bytes() const { return seg_; }
     /// Bytes of the arena backed by VRAM now (a whole number of segments; the arena when not segmented).
     int64_t mapped_bytes() const;
@@ -228,6 +228,21 @@ private:
     int64_t slot_end(int64_t n) const { return off_.empty() ? n * blob_ : (int64_t) off_[(size_t) n]; }
     bool open_segmented(uint64_t want, std::string& err);
     void release_segmented();
+    /// The CHUNKED arena (HIP, 2026-11-15): ROCm's virtual memory management gave two live segments the same physical
+    /// memory after an unmap / release / create / map (a standalone test on card 0: 7 of 10 runs; the loan's garbled
+    /// output), so on HIP a segmented cache is chunks of whole slots, each its own cudaMalloc (+ zeroed slack for the
+    /// kernels' over-reads); shrink frees the tail chunks, grow allocates them again (a chunk may come back at another
+    /// address: every reader takes device_slot() per call).  open_sized builds it; device_slot() looks the chunk up.
+    static constexpr size_t kChunkSlack = (size_t) 1 << 20;
+    bool open_chunked(std::string& err);
+    void free_chunks(size_t from);
+    bool chunked_ = false;
+    bool chunk_pending_ = false;        ///< open_sized is about to build the chunks: open() allocates nothing
+    std::vector<uint8_t*> chunk_ptr_;   ///< each chunk's allocation (null: freed by shrink)
+    std::vector<int64_t> chunk_first_;  ///< each chunk's first slot, and slots_ at the end
+    std::vector<int64_t> chunk_bytes_;  ///< each chunk's slot bytes (the allocation adds kChunkSlack)
+    std::vector<int32_t> slot_chunk_;   ///< slot -> its chunk
+    int64_t live_chunks_ = 0;           ///< chunks [0, live_chunks_) are allocated
     uint8_t* base_ = nullptr;
     int64_t live_slots_ = 0;            ///< #533: slots() - all of them unless shrunk
     int64_t seg_req_ = 0;               ///< #533: the segment size asked for (0: one cudaMalloc)

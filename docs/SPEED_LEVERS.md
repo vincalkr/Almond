@@ -97,8 +97,36 @@ in place and streams the rest from the arena with 256 MiB halves (`ALMOND_LEND_S
 the batch the pass graphs' buffers go back, the segments are mapped again and the experts copied back from the
 arena (`reclaim_cache`, 0.2-0.35 s), their LRU age as it was. A lent batch that does not fit is run again the old
 way (measured: with 4.96 GiB free the pass graphs' third growth, 2.15 GiB, failed; 5.25 was enough - hence 6.0).
-The cache is opened as a segmented arena for this (`--cache-segment-mib`, 256 by default with the loan: #533's
-elastic cache, which was CUDA-only, now on HIP through hipMemAddressReserve / hipMemCreate / hipMemMap).
+The cache is opened as a segmented arena for this (`--cache-segment-mib`, 256 by default with the loan).
+
+**Garbled output with the loan, 2026-11-12/14: ROCm's virtual memory.** The first build made the segments with
+hipMemAddressReserve / hipMemCreate / hipMemMap. In use the answers turned to U+FFFD and nonsense after a while
+(the configurations went back to 0). A byte check of every VRAM slot against the file showed 0 bad slots after the
+loan and 31 after the reclaim - the cache's whole first segment (31 experts of ~8.6 MB), which the loan never
+touches. A standalone HIP test (8 segments of 16 MiB in one reserved range, the last 3 unmapped, released, created
+and mapped again, each filled with its own byte) found two live segments sharing physical memory in 7 of 10 runs on
+card 0 and 2 of 10 on card 1. So on HIP the segmented cache is now chunks of whole slots, each its own cudaMalloc
+(+1 MiB zeroed for the kernels' over-reads): the loan frees the tail chunks and the reclaim allocates them again
+(`ExpertCache::open_chunked`). `src/core/test_expert_cache_chunks.cpp` (48 slots of 0.5-3 MiB in 8 MiB chunks, 30
+cycles of shrink, a foreign allocation written over the freed VRAM, grow, refill, every slot compared byte for byte):
+0 bad on either card.
+
+The chunked cache in the server (2026-11-15, `local/bench-v41/loan-soak.py`: one conversation of 10 turns, a
+2,255-token text then 342-1,891 new tokens a turn, 200 tokens of greedy answer each, `local/sweep-batch-keep/chunked/`):
+with `ALMOND_LOAN_CHECK=1` (every VRAM slot read back and compared with the file after each reclaim) 4 loans, 0 of
+2,116-2,128 experts bad each time, and no U+FFFD or control character in any answer. The same conversation, the
+loan at 1024 without the check against the configuration without the loan (one run each):
+
+| turn (new tokens) | prompt, base | prompt, lent | turn's wall, base | turn's wall, lent |
+| --- | ---: | ---: | ---: | ---: |
+| 2 (356) | 5.44 s | 3.61 s | 15.9 s | 11.4 s |
+| 3 (695) | 7.00 s | 6.38 s | 20.1 s | 13.6 s |
+| 6 (549) | 6.63 s | 5.16 s | 16.5 s | 12.8 s |
+| 9 (342) | 6.23 s | 3.98 s | 17.6 s | 14.2 s |
+
+The four lent turns 70.1 s against 52.0 (-26%); the reclaim 0.28-0.34 s where the base re-seeded in 1.2-6.2 s.
+The six turns past the limit ran the old way in both (one base turn took a 32.9 s seed and decoded at 5.5 tok/s,
+a one-off). The numbers below are the first build's (the corruption changes the weights' values, not the times).
 A VRAM-resident expert's arena copy no longer counts as used under `--arena-skip-vram`, so the duplicates a loan
 or an LRU promotion leave behind age out of the arena.
 

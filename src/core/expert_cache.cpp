@@ -1,17 +1,17 @@
 // src/core/expert_cache.cpp - R4's slot storage and residency table.  Read the header first.
 #include "almond/core/expert_cache.hpp"
 
-// #533's segmented cache uses the driver's virtual memory management: CUDA's cuMem* (through the runtime's entry
-// points) or HIP's hipMem* (ROCm 6+, the RDNA backend); not the gfx906 compat build (PR #638), which compiles this
-// file as HIP without ALMOND_USE_HIP
-#if defined(ALMOND_HIP_GFX906)
+// #533's segmented cache uses CUDA's virtual memory management (cuMem*, through the runtime's entry points).  Not on
+// HIP: ROCm's hipMem* gave two live segments the same physical memory after an unmap / release / create / map
+// (2026-11-15, ROCm 7.14, gfx1100: 7 of 10 runs on card 0 of a standalone test, the cache loan's garbled output) - a
+// HIP build's segmented cache is chunks of whole slots instead (open_chunked).  Nor the gfx906 compat build (PR
+// #638), which compiles this file as HIP without ALMOND_USE_HIP.
+#if defined(ALMOND_USE_HIP) || defined(ALMOND_HIP_GFX906)
 #define ALMOND_EC_NO_VMM 1
 #endif
 
 #include <cuda_runtime.h>
-#if defined(ALMOND_USE_HIP)
-#include <hip/hip_runtime_api.h>
-#elif !defined(ALMOND_EC_NO_VMM)
+#if !defined(ALMOND_EC_NO_VMM)
 #include <cuda.h>   // #533: the virtual memory management types (the functions come through the runtime's entry points)
 #endif
 #include <cstdint>
@@ -215,12 +215,9 @@ bool write_expert_profile(const std::string& path, int64_t n_layers, int64_t n_e
 
 ExpertCache::~ExpertCache() { close(); }
 
-// ---- #533: the segmented arena (--vram-elastic).  One address range for the whole arena, backed by physical segments,
-// and the tail's segments unmapped / mapped again later.  On CUDA the driver API's virtual memory functions are looked
-// up through the runtime (no link against the driver library); on HIP (ROCm 6+) the same functions exist in the
-// runtime as hipMemAddressReserve / hipMemCreate / hipMemMap / hipMemSetAccess / hipMemUnmap / hipMemRelease /
-// hipMemAddressFree and are called directly (2026-11-10: DeepSeek's small-batch cache loan, docs/SPEED_LEVERS.md).
-// Nothing here runs unless a segment size was set.
+// ---- #533: the segmented arena (--vram-elastic), CUDA.  One address range for the whole arena, backed by physical
+// segments, and the tail's segments unmapped / mapped again later; the driver API's virtual memory functions are looked
+// up through the runtime (no link against the driver library).  Nothing here runs unless a segment size was set.
 #if !defined(ALMOND_EC_NO_VMM)
 namespace {
 // the backend-neutral face of the virtual memory API: addresses as integers, handles as 64-bit words
@@ -237,68 +234,6 @@ struct Vmm {
     bool (*set_access)(uintptr_t va, size_t bytes, int dev) = nullptr;
 };
 
-#if defined(ALMOND_USE_HIP)
-hipMemAllocationProp hip_prop(int dev) {
-    hipMemAllocationProp prop{};
-    prop.type = hipMemAllocationTypePinned;
-    prop.location.type = hipMemLocationTypeDevice;
-    prop.location.id = dev;
-    return prop;
-}
-bool hip_supported(int dev) {
-    int v = 0;
-    return hipDeviceGetAttribute(&v, hipDeviceAttributeVirtualMemoryManagementSupported, dev) == hipSuccess && v != 0;
-}
-bool hip_granularity(int dev, size_t* gran) {
-    const hipMemAllocationProp prop = hip_prop(dev);
-    return hipMemGetAllocationGranularity(gran, &prop, hipMemAllocationGranularityRecommended) == hipSuccess && *gran > 0;
-}
-bool hip_reserve(uintptr_t* va, size_t bytes) {
-    void* p = nullptr;
-    if (hipMemAddressReserve(&p, bytes, 0, nullptr, 0) != hipSuccess) return false;
-    *va = reinterpret_cast<uintptr_t>(p);
-    return true;
-}
-bool hip_address_free(uintptr_t va, size_t bytes) { return hipMemAddressFree(reinterpret_cast<void*>(va), bytes) == hipSuccess; }
-bool hip_create(unsigned long long* handle, size_t bytes, int dev) {
-    const hipMemAllocationProp prop = hip_prop(dev);
-    hipMemGenericAllocationHandle_t h{};
-    if (hipMemCreate(&h, bytes, &prop, 0) != hipSuccess) return false;
-    *handle = reinterpret_cast<unsigned long long>(h);
-    return true;
-}
-bool hip_release(unsigned long long handle) {
-    return hipMemRelease(reinterpret_cast<hipMemGenericAllocationHandle_t>(handle)) == hipSuccess;
-}
-bool hip_map(uintptr_t va, size_t bytes, unsigned long long handle) {
-    return hipMemMap(reinterpret_cast<void*>(va), bytes, 0, reinterpret_cast<hipMemGenericAllocationHandle_t>(handle), 0) == hipSuccess;
-}
-bool hip_unmap(uintptr_t va, size_t bytes) { return hipMemUnmap(reinterpret_cast<void*>(va), bytes) == hipSuccess; }
-bool hip_set_access(uintptr_t va, size_t bytes, int dev) {
-    hipMemAccessDesc access{};
-    access.location.type = hipMemLocationTypeDevice;
-    access.location.id = dev;
-    access.flags = hipMemAccessFlagsProtReadWrite;
-    return hipMemSetAccess(reinterpret_cast<void*>(va), bytes, &access, 1) == hipSuccess;
-}
-const Vmm& vmm() {
-    static const Vmm v = [] {
-        Vmm x;
-        x.supported = hip_supported;
-        x.granularity = hip_granularity;
-        x.reserve = hip_reserve;
-        x.address_free = hip_address_free;
-        x.create = hip_create;
-        x.release = hip_release;
-        x.map = hip_map;
-        x.unmap = hip_unmap;
-        x.set_access = hip_set_access;
-        x.ok = true;
-        return x;
-    }();
-    return v;
-}
-#else
 struct CuApi {
     CUresult (CUDAAPI* device_get)(CUdevice*, int) = nullptr;
     CUresult (CUDAAPI* attribute)(int*, CUdevice_attribute, CUdevice) = nullptr;
@@ -403,7 +338,6 @@ const Vmm& vmm() {
     }();
     return v;
 }
-#endif
 
 // one segment: a physical allocation mapped at `va`, readable and writable by this device
 bool map_segment(const Vmm& v, int dev, uintptr_t va, size_t bytes, unsigned long long& handle) {
@@ -427,7 +361,8 @@ bool map_segment(const Vmm& v, int dev, uintptr_t va, size_t bytes, unsigned lon
 bool ExpertCache::open_segmented(uint64_t want, std::string& err) {
 #if defined(ALMOND_EC_NO_VMM)
     (void) want;
-    err = "ExpertCache: --vram-elastic (a segmented expert cache) needs CUDA or HIP";
+    err = "ExpertCache: --vram-elastic (a segmented expert cache through the driver's virtual memory) is CUDA-only; "
+          "a HIP build's segmented cache is chunked (open_sized)";
     return false;
 #else
     const Vmm& v = vmm();
@@ -491,7 +426,60 @@ void ExpertCache::release_segmented() {
     base_ = nullptr;
 }
 
+// HIP's segmented cache (see the header): chunks of whole slots, each about seg_req_ bytes, each its own allocation
+bool ExpertCache::open_chunked(std::string& err) {
+    chunk_first_.clear();
+    chunk_bytes_.clear();
+    slot_chunk_.assign((size_t) slots_, 0);
+    for (int64_t s = 0; s < slots_;) {
+        const int64_t first = s;
+        const uint64_t o0 = slot_offset(s);
+        while (s < slots_ && (s == first || slot_offset(s + 1) - o0 <= (uint64_t) seg_req_)) {
+            slot_chunk_[(size_t) s] = (int32_t) chunk_first_.size();
+            ++s;
+        }
+        chunk_first_.push_back(first);
+        chunk_bytes_.push_back((int64_t) (slot_offset(s) - o0));
+    }
+    chunk_first_.push_back(slots_);
+    chunk_ptr_.assign(chunk_bytes_.size(), nullptr);
+    for (size_t i = 0; i < chunk_bytes_.size(); ++i) {
+        // + kChunkSlack zeroed: the MMQ path reads up to 4 KiB past a matrix (one allocation had the next slot there)
+        if (cudaMalloc((void**) &chunk_ptr_[i], (size_t) chunk_bytes_[i] + kChunkSlack) != cudaSuccess ||
+            cudaMemset(chunk_ptr_[i], 0, (size_t) chunk_bytes_[i] + kChunkSlack) != cudaSuccess) {
+            (void) cudaGetLastError();
+            char buf[200];
+            std::snprintf(buf, sizeof buf, "ExpertCache: cudaMalloc failed: chunk %zu of %zu (%.2f GiB) of the "
+                          "chunked cache could not be allocated", i + 1, chunk_bytes_.size(),
+                          (double) chunk_bytes_[i] / 1073741824.0);
+            err = buf;
+            free_chunks(0);
+            return false;
+        }
+    }
+    if (cudaDeviceSynchronize() != cudaSuccess) { err = "ExpertCache: clearing the chunks failed"; free_chunks(0); return false; }
+    chunked_ = true;
+    live_chunks_ = (int64_t) chunk_bytes_.size();
+    base_ = chunk_ptr_.empty() ? nullptr : chunk_ptr_[0];   // valid(); device_slot() goes through the chunks
+    seg_ = seg_req_;
+    return true;
+}
+
+void ExpertCache::free_chunks(size_t from) {
+    if (from < chunk_ptr_.size()) (void) cudaDeviceSynchronize();
+    for (size_t i = from; i < chunk_ptr_.size(); ++i)
+        if (chunk_ptr_[i]) {
+            (void) cudaFree(chunk_ptr_[i]);
+            chunk_ptr_[i] = nullptr;
+        }
+}
+
 int64_t ExpertCache::mapped_bytes() const {
+    if (chunked_) {
+        int64_t b = 0;
+        for (int64_t i = 0; i < live_chunks_; ++i) b += chunk_bytes_[(size_t) i];
+        return b;
+    }
     if (segs_.empty()) return base_ != nullptr ? full_bytes() : 0;
     int64_t b = 0;
     for (int64_t i = 0; i < mapped_segs_; ++i) b += seg_size_[(size_t) i];
@@ -507,6 +495,19 @@ int64_t ExpertCache::slots_within(int64_t bytes) const {
 }
 
 bool ExpertCache::shrink(int64_t keep_bytes, std::string& err) {
+    if (chunked_) {
+        int64_t keep = 0, at = 0;   // chunks [0, keep) hold the first keep_bytes
+        while (keep < (int64_t) chunk_bytes_.size() && at < keep_bytes) at += chunk_bytes_[(size_t) keep++];
+        if (keep >= live_chunks_) return true;
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            err = std::string("the device failed before the cache shrank: ") + cudaGetErrorString(cudaGetLastError());
+            return false;
+        }
+        free_chunks((size_t) keep);
+        live_chunks_ = keep;
+        live_slots_ = chunk_first_[(size_t) keep];
+        return true;
+    }
     if (segs_.empty()) {
         err = "the expert cache is not segmented (the engine needs --vram-elastic)";
         return false;
@@ -540,6 +541,27 @@ bool ExpertCache::shrink(int64_t keep_bytes, std::string& err) {
 }
 
 bool ExpertCache::grow(int64_t want_bytes, std::string& err) {
+    if (chunked_) {
+        int64_t at = mapped_bytes();
+        while (live_chunks_ < (int64_t) chunk_bytes_.size() && at + chunk_bytes_[(size_t) live_chunks_] <= want_bytes) {
+            const size_t i = (size_t) live_chunks_;
+            uint8_t* p = nullptr;
+            if (cudaMalloc((void**) &p, (size_t) chunk_bytes_[i] + kChunkSlack) != cudaSuccess ||
+                cudaMemset(p, 0, (size_t) chunk_bytes_[i] + kChunkSlack) != cudaSuccess) {
+                if (p) (void) cudaFree(p);
+                (void) cudaGetLastError();
+                err = "the driver has no VRAM for another expert-cache chunk";
+                live_slots_ = chunk_first_[(size_t) live_chunks_];
+                return false;
+            }
+            chunk_ptr_[i] = p;
+            at += chunk_bytes_[i];
+            ++live_chunks_;
+        }
+        live_slots_ = chunk_first_[(size_t) live_chunks_];
+        if (cudaDeviceSynchronize() != cudaSuccess) { err = "the cache's new chunks failed to clear"; return false; }
+        return true;
+    }
     if (segs_.empty()) {
         err = "the expert cache is not segmented (the engine needs --vram-elastic)";
         return false;
@@ -628,7 +650,8 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert, int6
         }
     }
 
-    if (seg_req_ > 0) {   // #533: --vram-elastic: physical segments behind one address range (zeroed below)
+    if (chunk_pending_) {   // HIP's segmented cache: open_sized allocates the chunks once the slot offsets are known
+    } else if (seg_req_ > 0) {   // #533: --vram-elastic: physical segments behind one address range (zeroed below)
         if (!open_segmented(want, err)) return false;
     } else if (g_cache_vmm && vmm_available()) {
         // the elastic K/V: every chunk mapped now; the K/V may later take some of them (and give them back)
@@ -652,7 +675,7 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert, int6
     }
     // Zeroed so a slot read before it is filled is a DETERMINISTIC wrong answer rather than whatever the
     // allocator handed back.  A stale block of a previous process's memory would still sum to finite floats.
-    if (cudaMemset(base_, 0, (size_t) want) != cudaSuccess) {
+    if (!chunk_pending_ && cudaMemset(base_, 0, (size_t) want) != cudaSuccess) {
         err = "ExpertCache: cudaMemset of the slot arena failed";
         close();
         return false;
@@ -696,11 +719,19 @@ bool ExpertCache::open_sized(const std::vector<int64_t>& slot_bytes, int64_t n_l
         mx = slot_bytes[i] > mx ? slot_bytes[i] : mx;
     }
     // one allocation of the summed size, through the uniform path's checks: n "slots" of 1 byte
-    if (!open((int64_t) off.back(), n_layers, n_expert, 1, err)) return false;
+#if defined(ALMOND_USE_HIP)
+    chunk_pending_ = seg_req_ > 0;   // HIP: chunks of whole slots instead of VMM segments (see open_chunked)
+#endif
+    const bool ok_open = open((int64_t) off.back(), n_layers, n_expert, 1, err);
+    if (!ok_open) { chunk_pending_ = false; return false; }
     slots_ = (int64_t) slot_bytes.size();
     live_slots_ = slots_;
     blob_ = mx;
     off_ = std::move(off);
+    if (chunk_pending_) {
+        chunk_pending_ = false;
+        if (!open_chunked(err)) { close(); return false; }
+    }
 #if defined(ALMOND_USE_HIP)
     if (!ensure_blocking_staging((std::size_t) blob_, err)) {
         close();
@@ -724,6 +755,16 @@ void ExpertCache::close() {
     blocking_staging_ = nullptr;
     blocking_staging_bytes_ = 0;
 #endif
+    if (chunked_) {
+        free_chunks(0);
+        chunked_ = false;
+        chunk_ptr_.clear();
+        chunk_first_.clear();
+        chunk_bytes_.clear();
+        slot_chunk_.clear();
+        live_chunks_ = 0;
+        base_ = nullptr;
+    }
     off_.clear();
     if (!segs_.empty()) {
         release_segmented();
@@ -808,6 +849,11 @@ std::vector<int64_t> ExpertCache::slot_holders() const {
 }
 
 int64_t ExpertCache::slots_after_shrink(int64_t keep_bytes) const {
+    if (chunked_) {
+        int64_t keep = 0, at = 0;
+        while (keep < (int64_t) chunk_bytes_.size() && at < keep_bytes) at += chunk_bytes_[(size_t) keep++];
+        return std::min(live_slots_, chunk_first_[(size_t) keep]);
+    }
     if (segs_.empty()) return live_slots_;
     int64_t keep = 0, at = 0;
     while (keep < (int64_t) segs_.size() && at < keep_bytes) at += seg_size_[(size_t) keep++];
@@ -816,12 +862,22 @@ int64_t ExpertCache::slots_after_shrink(int64_t keep_bytes) const {
 
 uint8_t* ExpertCache::device_slot(int32_t slot) {
     if (slot < 0 || slot >= slots_) return nullptr;
+    if (chunked_) {
+        const int32_t c = slot_chunk_[(size_t) slot];
+        uint8_t* b = chunk_ptr_[(size_t) c];
+        return b == nullptr ? nullptr : b + (off_[(size_t) slot] - off_[(size_t) chunk_first_[(size_t) c]]);
+    }
     if (!off_.empty()) return base_ + off_[(size_t) slot];
     return base_ + (size_t) slot * (size_t) blob_;
 }
 
 const uint8_t* ExpertCache::device_slot(int32_t slot) const {
     if (slot < 0 || slot >= slots_) return nullptr;
+    if (chunked_) {
+        const int32_t c = slot_chunk_[(size_t) slot];
+        uint8_t* b = chunk_ptr_[(size_t) c];
+        return b == nullptr ? nullptr : b + (off_[(size_t) slot] - off_[(size_t) chunk_first_[(size_t) c]]);
+    }
     if (!off_.empty()) return base_ + off_[(size_t) slot];
     return base_ + (size_t) slot * (size_t) blob_;
 }

@@ -1,0 +1,26 @@
+vram cache: segmented (256 MiB segments, 69 of them) - loanable
+vram cache: loan: 693 experts out of the last slots, 693 demoted into the arena
+serve: VRAM cache lent 5.51 GiB for a 356-token batch: 693 of 2128 experts out (0.22 s)
+vram cache: reclaimed 5.51 GiB, 693 experts back (693 from the arena, 0 from the file)
+[loan-check] after the reclaim: 0 of 2128 VRAM experts bad (13.4 s)
+serve: VRAM cache reclaimed in 13.71 s: 2128 experts in VRAM
+vram cache: loan: 724 experts out of the last slots, 133 demoted into the arena
+serve: VRAM cache lent 5.76 GiB for a 695-token batch: 724 of 2128 experts out (0.04 s)
+vram cache: reclaimed 5.76 GiB, 724 experts back (703 from the arena, 21 from the file)
+[loan-check] after the reclaim: 0 of 2128 VRAM experts bad (18.7 s)
+serve: VRAM cache reclaimed in 19.06 s: 2128 experts in VRAM
+vram cache: segmented (256 MiB segments, 68 of them) - loanable
+vram cache: segmented (256 MiB segments, 68 of them) - loanable
+vram cache: loan: 681 experts out of the last slots, 166 demoted into the arena
+serve: VRAM cache lent 5.42 GiB for a 549-token batch: 681 of 2116 experts out (0.05 s)
+vram cache: reclaimed 5.42 GiB, 681 experts back (656 from the arena, 25 from the file)
+[loan-check] after the reclaim: 0 of 2116 VRAM experts bad (11.8 s)
+serve: VRAM cache reclaimed in 12.14 s: 2116 experts in VRAM
+vram cache: segmented (256 MiB segments, 68 of them) - loanable
+vram cache: segmented (256 MiB segments, 68 of them) - loanable
+vram cache: loan: 681 experts out of the last slots, 164 demoted into the arena
+serve: VRAM cache lent 5.42 GiB for a 343-token batch: 681 of 2116 experts out (0.05 s)
+vram cache: reclaimed 5.42 GiB, 681 experts back (654 from the arena, 27 from the file)
+[loan-check] after the reclaim: 0 of 2116 VRAM experts bad (11.4 s)
+serve: VRAM cache reclaimed in 11.72 s: 2116 experts in VRAM
+vram cache: segmented (256 MiB segments, 68 of them) - loanable

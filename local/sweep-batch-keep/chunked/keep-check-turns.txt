@@ -1,0 +1,11 @@
+turn  1:  2255 new, prompt  18.51 s,  16.6 tok/s, 40.8 s wall, bad chars 0 | It is a detailed performance and compatibility report on running several quantized GGUF models
+turn  2:   356 new, prompt   5.49 s,  19.4 tok/s, 26.1 s wall, bad chars 0 | It adds the Qwen3.8-27B Q8_0 setup details (unsloth GGUF, tokenizer export, chat template, two-card
+turn  3:   695 new, prompt   5.27 s,  19.3 tok/s, 33.3 s wall, bad chars 0 | It adds the Q8_0 vs IQ3_S trade-off (2.4x bytes per token, Q8_0 for closest-to-original
+turn  4:  1146 new, prompt   8.75 s,  15.2 tok/s, 23.5 s wall, bad chars 0 | It adds the Qwen3.8-27B chat/thinking setup (GGUF template, Flash-Next tokenizer, thinking levels and sampling,
+turn  5:  1711 new, prompt  12.62 s,  17.7 tok/s, 20.9 s wall, bad chars 0 | It adds how conversation state is resumed (KV/DFlash2 ring indexed by position, recurrent-state checkpoints
+turn  6:   549 new, prompt   5.49 s,  19.2 tok/s, 28.1 s wall, bad chars 0 | It adds the Qwen3.8-Flash-Next Q8_0 setup (unsloth six-shard GGUF, pack with `--compat-bf16`, card 0
+turn  7:  1226 new, prompt  10.99 s,  18.6 tok/s, 23.0 s wall, bad chars 0 | It adds the DeepSeek-V4.1-Flash-1017 setup: the ISTA-DASLab GSQ-RCO IQ2_XXS pack (four shards, 138.2 GB,
+turn  8:  1892 new, prompt  11.05 s,  19.5 tok/s, 22.6 s wall, bad chars 0 | It adds the DeepSeek-V4.1 configuration details (`local/ds41-local.json` flags, Engram tables, rank, route dump, conversation
+turn  9:   343 new, prompt   3.86 s,  19.1 tok/s, 26.2 s wall, bad chars 0 | It adds a token-level timing breakdown for DeepSeek-V4.1: card 0 is busy 19.9 ms
+turn 10:  1345 new, prompt   9.37 s,  18.1 tok/s, 21.7 s wall, bad chars 0 | It adds further timing analysis showing launches are not the bottleneck: HIP graphs are
+bad characters in all answers: 0
