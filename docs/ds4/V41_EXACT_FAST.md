@@ -293,6 +293,22 @@ model ended `circles` at 58 tokens and `huge17k` at once, so 926 tokens in all):
 
 2 differences against 4 on 926 tokens, all at gaps under 0.4 logits; the dense half 0.9-2.8 ms a token faster.
 
+### The decode's dense half against the context: almost flat, no indexer kernel needed (2026-11-15)
+
+Xolotl (on the V4 build) found its lightning indexer's cost growing with the context (attention + router 15.9 ms a
+token at 600 tokens, 48 at 131K, 17-19 after a fused indexer kernel). Here, the configuration's flags with
+`ALMOND_HC_HEAD=1 ALMOND_ROUTER_FUSE=1 ALMOND_ATTN_PROF=1`, 128 tokens after each prompt (17K and 64K forced on a
+continuation, the model ended them at once), one run each:
+
+| context | dense compute call, ms a token | tok/s |
+| --- | ---: | ---: |
+| 19 tokens (Promessi Sposi) | 22.52 | 15.62 |
+| 17,349 | 23.85 | 15.91 |
+| 25,500 | 22.82 | 19.84 |
+| 63,613 | 24.45 | 16.10 |
+
++2 ms a token at 64K, so a fused indexer could win at most that there; not built.
+
 ### A rotated-INT4 copy of the experts for prompts: not built (2026-11-06)
 
 RDNA3's `v_wmma_i32_16x16x16_iu4` runs at twice the rate of the INT8 instruction ggml's MMQ uses; a block-Hadamard
