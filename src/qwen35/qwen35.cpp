@@ -33,6 +33,7 @@
 #include <unordered_map>
 #include <deque>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -257,7 +258,13 @@ void load(Model& m) {
         if (m.o.split > 0) split = m.o.split;
         else {
             // weight bytes per layer from the file, KV and state per layer: split by free memory
-            const double f0 = (double) free_vram(m.o.gpus[0]), f1 = (double) free_vram(m.o.gpus[1]);
+            const double f0 = (double) free_vram(m.o.gpus[0]);
+            double f1 = (double) free_vram(m.o.gpus[1]);
+            // the drafter (weights, KV ring, its graph) goes on the last card after this split: leave it room
+            if (!m.o.dflash.empty()) {
+                struct stat st{};
+                if (::stat(m.o.dflash.c_str(), &st) == 0) f1 -= (double) st.st_size + 768.0 * 1048576.0;
+            }
             split = (int) std::lround(h.n_layer * f0 / (f0 + f1));
             split -= 2;   // card 0 also holds the compute buffers of the larger half
         }

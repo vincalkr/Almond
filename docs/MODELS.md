@@ -510,6 +510,41 @@ the same text as MTP's on all four; DSpine alone the same on three (the story pa
 do). Configurations: `local/qwen27-local-dspine.json` (`./almond -m qwen27-dspine`, 131072) and
 `local/qwen27-q8-local-dspine.json` (`./almond -m qwen27-q8-dspine`, two cards); the defaults keep MTP.
 
+### Every configuration through the server, short and ~123K context (2026-11-15)
+
+Each configuration started with `./almond serve --config local/<name>.json --port 8161` on 127.0.0.1 and was sent,
+through `/v1/chat/completions` (streamed, the configuration's sampling: temperature 1.0, top-p 0.95, top-k 20): a
+two-sentence answer, a Python function with three asserts (one ``` block, ~135 tokens), a 500-word story (650-800
+tokens, thinking off), and a `get_weather` tool call. Every configuration answered all four correctly: the same
+right function, a well-formed `get_weather({"city": "Rome"})`, and on `-vision` a right one-sentence description of a
+PNG logo (361 prompt tokens, 5.5 s with the CPU encoder). Then one long request: 390,000 characters of this
+repository's docs and sources plus "summarize what they say about the 27B" (122,927 prompt tokens, a cold cache,
+400 tokens generated, thinking on, temperature 0). tok/s are the server's, from the first streamed token to the last:
+they include the HTTP and detokenizer overhead and are under the engine bench's numbers above.
+
+| configuration | cards | story tok/s | code tok/s | 123K prefill tok/s (s) | 123K decode tok/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `qwen27-local` (IQ3_S, 192K, MTP 3) | 0 | 56.6 | 89.5 | 585 (210.0) | 37.3 |
+| `qwen27-local-vision` | 0 | 55.8 | – | 573 (214.7) | 35.0 |
+| `qwen27-local-dspine` (131072, `--spec auto`) | 0 | 54.9 | 79.0 | 585 (210.2) | 37.6 |
+| `qwen27-local-256k` (IQ3_S, 262144) | 0,1 | 40.3 | 68.4 | 538 (228.4) | 29.8 |
+| `qwen27-q8-local` (Q8_0, 262144, MTP 3) | 0,1 | 36.4 | 57.8 | 555 (221.4) | 28.1 |
+| `qwen27-q8-local-dspine` (`--spec auto`) | 0,1 | 35.5 | 57.4 | 554 (221.8) | 25.0 |
+
+One run each (the card's run-to-run spread is ~10%). The code answer is one short block, so DSpine drafts a few
+rounds only (24 on the Q8_0) and does not show its gain on longer code (the tables above). At 123K decode falls to
+about two thirds of the short-context speed on one card, and the second card's link (PCIe 4.0 x2) costs another ~20%.
+
+**The Q8_0 + DSpine configuration did not start** (`./almond -m qwen27-q8-dspine` in the chat, or the router): the
+engine split the layers by the two cards' free memory (layers 0-29 on card 0) before it loaded the drafter, which goes
+on the last card (1.16 GiB of weights, its KV ring and graph); card 1 then had no room for the 609 MiB compute buffer
+(`cudaMalloc failed: out of memory`, `qwen35: cannot allocate a graph`) and the server stopped. The split now takes
+the drafter's file size plus 768 MiB off card 1's free memory when `--dflash` is given on two cards (layers 0-30 on
+card 0); without a drafter the split is unchanged. Also, `./almond serve --config local/qwen27-q8-local.json` without
+`--model qwen27` started DeepSeek's server on the 27B's configuration (an assertion on the end-of-turn token): the
+launcher now picks the server from the engine arguments the configuration names (`--qwen35`, `--qwen`, `--glm-pack`)
+when `--model` is not given.
+
 ## Qwen3.8-Flash-Next Q8_0 (unsloth, 2026-11-11)
 
 `unsloth/Qwen3.8-Flash-Next-GGUF` Q8_0 (six shards, 188 GB; experts 128.3 GB, 5.2 MB each; the PLE table, 54 GB, in

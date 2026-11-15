@@ -105,7 +105,22 @@ def parse(argv: list) -> tuple:
         fail(f"--gpu takes card numbers: 0, 1 or 0,1 (got '{o['gpu']}')")
     if o["model"] == "deepseek":
         o["model"] = "ds41"
+    if o["config"] and not any(a.partition("=")[0] == "--model" for a in argv):
+        o["model"] = config_model(o["config"], o["model"])
     return o, rest
+
+
+def config_model(cfg: str, default: str) -> str:
+    """The server a configuration needs when --model is not given, from the engine arguments it names (--qwen35,
+    --qwen, --glm-pack): --config local/qwen27-q8-local.json alone started DeepSeek's server on the 27B."""
+    try:
+        args = json.loads((ROOT / cfg).read_text() if not os.path.isabs(cfg) else open(cfg).read()).get("args", [])
+    except (OSError, ValueError, AttributeError):
+        return default
+    for flag, model in (("--qwen35", "qwen27"), ("--qwen", "qwen"), ("--glm-pack", "glm")):
+        if flag in args:
+            return model
+    return default
 
 
 def pick_config(o: dict) -> str:
