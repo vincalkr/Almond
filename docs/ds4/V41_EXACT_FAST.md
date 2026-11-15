@@ -231,7 +231,15 @@ old form). The bench, card 0, the two builds alternated three times, medians (`l
 26 of the 40 layers have an IQ2 gate/up or down. With the expert kernels at ~3.9 ms a token on card 0 and ~1.1 on
 card 1 (above), this is about 1 ms a token, 2-3% of the decode. The end-to-end A/B (the configuration's flags, 3
 rounds alternated) did not resolve it: the box was short of RAM during it (24 GiB available, kswapd busy) and both
-builds fell round by round (Promessi Sposi 20.1 -> 8.6 tok/s), far more than the difference sought.
+builds fell round by round (Promessi Sposi 20.1 -> 8.6 tok/s), far more than the difference sought. Run again with 105 GiB available (2026-11-15), tok/s per round, old / new:
+
+| prompt | round 1 | round 2 | round 3 | median |
+|---|---:|---:|---:|---:|
+| huge17k, 128 tokens | 17.88 / 15.77 | 16.16 / 18.45 | 18.16 / 18.31 | 17.88 / 18.31 |
+| Promessi Sposi, 300 tokens | 20.16 / 19.82 | 19.07 / 9.52 | 18.57 / 18.29 | 19.07 / 18.29 |
+
+The spread between rounds of one build (up to 15%, one run at half speed) is larger than the 2-3% expected, so the
+end-to-end gain is still not measured; the kernel numbers above stand, and the outputs are the same bit for bit.
 
 ### A rotated-INT4 copy of the experts for prompts: not built (2026-11-06)
 
