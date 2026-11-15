@@ -450,6 +450,15 @@ void launch_mul_mat_vec_f_cuda(
         }
     }
 
+    // Almond (tools/v41/ggml/mmvf-wide.patch), opt-in ALMOND_MMVF_WIDE=1: a single-token product with fewer blocks than
+    // the card has compute units and long rows (DeepSeek-V4.1 24 x 20480 hyper-connection mixes)
+    // ran 256 threads a row on 24 blocks; 1024 threads a row fill more of the card. Changes the reduction order.
+    static const bool almond_wide = [] { const char * e = getenv("ALMOND_MMVF_WIDE"); return e && e[0] == '1'; }();
+    if (almond_wide && ncols_dst == 1 && !is_multi_token_id && ncols >= 8192 && max_block_size == 256 &&
+            nrows*nchannels_dst*nsamples_or_ntokens <= 4*ggml_cuda_info().devices[device].nsm) {
+        block_size_best = 1024;
+    }
+
     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
 
     const int nbytes_shared = warp_size*sizeof(float) + (has_fusion ? warp_size*sizeof(float) : 0);
@@ -503,6 +512,16 @@ void launch_mul_mat_vec_f_cuda(
                 (x, y, ids, fusion, dst, ncols/2, nchannels_y_fd, stride_row, stride_col_y/2, stride_col_dst,
                  channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
                  sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst, block_dims, block_nums, nbytes_shared, ids_stride, stream);
+        } break;
+        case 1024: {
+            if constexpr (ncols_dst == 1 && !is_multi_token_id) {
+                mul_mat_vec_f_switch_fusion<T, type_acc, ncols_dst, 1024, is_multi_token_id>
+                    (x, y, ids, fusion, dst, ncols/2, nchannels_y_fd, stride_row, stride_col_y/2, stride_col_dst,
+                     channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
+                     sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst, block_dims, block_nums, nbytes_shared, ids_stride, stream);
+            } else {
+                GGML_ABORT("fatal error");
+            }
         } break;
         default: {
             GGML_ABORT("fatal error");

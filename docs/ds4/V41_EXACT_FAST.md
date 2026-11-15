@@ -241,6 +241,27 @@ builds fell round by round (Promessi Sposi 20.1 -> 8.6 tok/s), far more than the
 The spread between rounds of one build (up to 15%, one run at half speed) is larger than the 2-3% expected, so the
 end-to-end gain is still not measured; the kernel numbers above stand, and the outputs are the same bit for bit.
 
+### Card 0's decode kernels by time, and the wide hyper-connection product: opt-in, off (2026-11-15)
+
+A rocprofv3 kernel trace of a forced Promessi Sposi run, 220 tokens minus 20 (so the prompt and warm-up drop out),
+the configuration's flags: card 0 runs ~23 ms of kernels a token, card 1 ~1.6. The quantized products of the dense
+half (q_b, output_a/b, the shared expert, the vocabulary head) read their weights at 640-870 GB/s, near the card's
+~960; the rest is ~2,500 small kernels a token at ~4.7 us each (11.7 ms), and three kernels well under bandwidth:
+
+| kernel | ms a token | why |
+| --- | ---: | --- |
+| the hyper-connection mixes, F32 24 x 20480, 80 a token | 1.10 | 24 rows = 24 blocks of 256 threads, ~143 GB/s |
+| the router, BF16 384 x 5120, 40 a token | 0.57 | ~280 GB/s |
+| argsort for the top-k, 40 a token | 0.59 | sorts all 384 scores |
+
+`ALMOND_MMVF_WIDE=1` (`tools/v41/ggml/mmvf-wide.patch`) runs a single-token float product with rows of 8192 or more
+and at most 4 blocks per compute unit with 1024 threads a row instead of 256: the mixes drop from 13.7 to 5.6 us a
+call, 1.10 -> 0.44 ms a token. The router does not gain (1024 threads: 0.82 ms against 0.69), so it is left out; the
+argsort is what `ALMOND_ROUTER_FUSE=1` (above) already removes. The sum's order changes, so the last bits do: forced
+Promessi Sposi, 300 tokens, 2 rounds alternated, 5 / 2 argmax differences off and 4 / 4 on, tok/s 19.48 / 18.57 off
+and 19.36 / 18.77 on - 0.66 ms a token is ~1.3% of the decode, inside the spread. The Lucebox PPL does not see it
+(its prompt runs take the batched product). The default stays off.
+
 ### A rotated-INT4 copy of the experts for prompts: not built (2026-11-06)
 
 RDNA3's `v_wmma_i32_16x16x16_iu4` runs at twice the rate of the INT8 instruction ggml's MMQ uses; a block-Hadamard
