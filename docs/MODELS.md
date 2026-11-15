@@ -589,6 +589,7 @@ greedy and streamed 57.8 tok/s from the first token to the last (57.9 in a secon
 including the prompt; streamed at temperature 1.0 (the configuration's sampling) 53.4 and 53.2. So the server
 (HTTP, detokenizer, streaming) costs ~3%, and sampling at temperature 1.0 ~8% through MTP accepting fewer drafts;
 nothing to fix in the server.
+
 ## Qwen3.8-Flash-Next Q8_0 (unsloth, 2026-11-11)
 
 `unsloth/Qwen3.8-Flash-Next-GGUF` Q8_0 (six shards, 188 GB; experts 128.3 GB, 5.2 MB each; the PLE table, 54 GB, in
