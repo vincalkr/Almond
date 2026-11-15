@@ -309,6 +309,21 @@ continuation, the model ended them at once), one run each:
 
 +2 ms a token at 64K, so a fused indexer could win at most that there; not built.
 
+### One card against two, with card 1 on its x2 link (2026-11-15)
+
+Does card 1's PCIe 4.0 x2 link cost more than it gives? The configuration's flags with `ALMOND_HC_HEAD=1
+ALMOND_ROUTER_FUSE=1`, two cards (card 1 holding ~2,750 experts) against `HIP_VISIBLE_DEVICES=0` without the peer
+flags (`local/ds41-local-1gpu.json`), forced, 2 rounds alternated, tok/s and the decode's CPU / file time:
+
+| prompt | two cards | one card |
+| --- | --- | --- |
+| Promessi Sposi, 300 | 18.13 / 17.47 (cpu 1.95-1.99 s, file 2.98-3.09 s) | 16.77 / 11.46 (cpu 2.56-2.64 s, file 3.88-4.00 s) |
+| long-it, 500 | 23.21 / 22.84 (cpu 3.20-3.25 s, file 1.83-2.11 s) | 21.36 / 14.72 (cpu 4.55-4.58 s, file 3.16-3.44 s) |
+
+Two cards are faster on every run (+8% on the first round; the second round's one-card runs were slower still):
+without card 1 its experts fall to the CPU and the NVMe. The x2 link carries a few KB of rows a layer, not the
+experts. The default stays two cards.
+
 ### A rotated-INT4 copy of the experts for prompts: not built (2026-11-06)
 
 RDNA3's `v_wmma_i32_16x16x16_iu4` runs at twice the rate of the INT8 instruction ggml's MMQ uses; a block-Hadamard
