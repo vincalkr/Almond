@@ -279,8 +279,19 @@ the dense call at 53.5 / 69.3 ms):
 | `ALMOND_HC_HEAD=1` | 23.35 / 69.29 / 23.46 | 18.55 / 13.95 / 17.59 | 5 / 5 / 5 |
 
 ~1.8 ms a token less in the dense half (-7%) on the clean rounds, +1.4-4.6% tok/s. The three extra differences are
-fragile steps (gaps 0.12-0.48 at steps 83, 102, 133) and the text reads the same. The default stays off until a
-longer check of the output.
+fragile steps (gaps 0.12-0.48 at steps 83, 102, 133) and the text reads the same.
+
+A longer check, four more prompts forced on a first run of the configuration, a second run of it as the noise (the
+model ended `circles` at 58 tokens and `huge17k` at once, so 926 tokens in all):
+
+| prompt, tokens | argmax differences, configuration again / `ALMOND_HC_HEAD=1` | dense call, ms a token | tok/s |
+| --- | --- | --- | --- |
+| code-en, 125 | 1 / 1 (the same step, gaps 0.017 / 0.074) | 25.36 / 24.46 | 16.87 / 16.76 |
+| code_review, 243 | 1 / 2 (the same step 206, gaps 0.088 / 0.39; step 94, 0.001) | 25.93 / 24.13 | 16.56 / 16.25 |
+| circles, 58 | 0 / 0 | - | - |
+| long-it, 500 | 0 / 1 (step 10, gap 0.19) | 25.62 / 22.84 | 20.73 / 22.78 |
+
+2 differences against 4 on 926 tokens, all at gaps under 0.4 logits; the dense half 0.9-2.8 ms a token faster.
 
 ### A rotated-INT4 copy of the experts for prompts: not built (2026-11-06)
 
