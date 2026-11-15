@@ -68,7 +68,9 @@
     "ALMOND_ARENA_EVICT_PEER": "1",
     "ALMOND_SUM_ZEROCOPY": "1",
     "DS41_META": "local/rco-iq2xxs-meta/meta.gguf",
-    "ALMOND_SERVE_BATCH_KEEP": "1024"
+    "ALMOND_SERVE_BATCH_KEEP": "1024",
+    "ALMOND_HC_HEAD": "1",
+    "ALMOND_ROUTER_FUSE": "1"
   },
   "cwd": ".",
   "tokenizer": "models/rco-iq2xxs/tokenizer",
