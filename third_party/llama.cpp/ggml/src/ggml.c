@@ -6595,6 +6595,32 @@ struct ggml_tensor * ggml_dsv41_hc_mixes(
     return result;
 }
 
+struct ggml_tensor * ggml_dsv41_hc_head(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * x,
+        struct ggml_tensor  * fn,
+        struct ggml_tensor  * scale,
+        struct ggml_tensor  * base,
+        float                 rms_eps,
+        float                 hc_eps,
+        int                   n_iter) {
+    GGML_ASSERT(x->type == GGML_TYPE_F32 && ggml_is_contiguous(x) && ggml_nrows(x) == 1);
+    GGML_ASSERT(fn->type == GGML_TYPE_F32 && ggml_is_contiguous(fn) && fn->ne[0] == x->ne[0] && fn->ne[1] == 24);
+    GGML_ASSERT(scale->type == GGML_TYPE_F32 && ggml_nelements(scale) >= 3);
+    GGML_ASSERT(base->type == GGML_TYPE_F32 && ggml_nelements(base) == 24);
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 24, 1);
+    ggml_set_op_params_f32(result, 0, hc_eps);
+    ggml_set_op_params_i32(result, 1, 1);
+    ggml_set_op_params_f32(result, 2, rms_eps);
+    ggml_set_op_params_i32(result, 3, n_iter);
+    result->op     = GGML_OP_DSV41_HC_MIXES;
+    result->src[0] = x;
+    result->src[1] = scale;
+    result->src[2] = base;
+    result->src[3] = fn;
+    return result;
+}
+
 struct ggml_tensor * ggml_dsv4_hc_pre(
         struct ggml_context * ctx,
         struct ggml_tensor  * x,

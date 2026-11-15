@@ -12491,6 +12491,7 @@ void ggml_compute_forward_dsv41_fake_quant(const ggml_compute_params * params, g
 // the product must round on its own, GNU mode contracts a*b+c into fma and the composite is two ops), the sigmoid, and
 // s*1 + eps / s*2 + 0 (exactly the scale the composite applies, `fma(x, 1, eps)` == `x + eps`).
 void ggml_compute_forward_dsv41_hc_mixes(const ggml_compute_params * params, ggml_tensor * dst) {
+    GGML_ASSERT(ggml_get_op_params_i32(dst, 1) == 0 && "ggml_dsv41_hc_head: CUDA only");
     const ggml_tensor * mixes = dst->src[0];
     const ggml_tensor * scale = dst->src[1];
     const ggml_tensor * base  = dst->src[2];

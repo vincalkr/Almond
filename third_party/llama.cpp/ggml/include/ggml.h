@@ -2751,6 +2751,19 @@ extern "C" {
             struct ggml_tensor  * base,
             float                 eps);
 
+    // Almond (tools/v41/ggml/dsv41-hc-head.patch): one token's whole Block.hc_mixes in one kernel - rms_norm of the flat
+    // [hc*n_embd] row, the [24] product with fn, the pre / post mixes and the comb's Sinkhorn. dst [24] = pre[4] post[4]
+    // comb[4 x 4] (idst fastest). The op is GGML_OP_DSV41_HC_MIXES with op_params[1] = 1; CUDA only, one token.
+    GGML_API struct ggml_tensor * ggml_dsv41_hc_head(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * fn,
+            struct ggml_tensor  * scale,
+            struct ggml_tensor  * base,
+            float                 rms_eps,
+            float                 hc_eps,
+            int                   n_iter);
+
     // custom operators
 
     typedef void (*ggml_custom1_op_t)(struct ggml_tensor * dst , const struct ggml_tensor * a, int ith, int nth, void * userdata);

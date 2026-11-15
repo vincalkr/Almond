@@ -423,7 +423,124 @@ static __global__ void dsv41_hc_mixes_f32(
     dst[i] = post ? __fmaf_rn(2.0f, s, 0.0f) : __fmaf_rn(1.0f, s, eps);
 }
 
+// ---- Almond: ggml_dsv41_hc_head - one token's Block.hc_mixes in one kernel (rms_norm, the 24-row product, the
+// pre / post mixes, the comb's Sinkhorn). Each block sums its slice of the row (24 dot products and the sum of squares);
+// the last block to finish adds the partials and does the 24 small outputs. The sums run in another order than
+// rms_norm + mul_mat, so the last bits differ.
+static constexpr int DSV41_HEAD_NC = 80;               // column chunks
+static constexpr int DSV41_HEAD_NG = 1;                // row groups (4 x 6 rows measured slower)
+static constexpr int DSV41_HEAD_NB = DSV41_HEAD_NC * DSV41_HEAD_NG;
+static constexpr int DSV41_HEAD_NT = 256;
+static __device__ float    dsv41_head_part[DSV41_HEAD_NB * 25];
+static __device__ unsigned dsv41_head_count = 0;
+
+static __global__ void __launch_bounds__(DSV41_HEAD_NT) dsv41_hc_head_f32(
+        const float * __restrict__ x, const float * __restrict__ fn, const float * __restrict__ scale,
+        const float * __restrict__ base, float * __restrict__ dst, const int K, const float rms_eps,
+        const float hc_eps, const int n_iter) {
+    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+    constexpr int nwarps = DSV41_HEAD_NT / warp_size;
+    __shared__ float red[25][nwarps];
+    __shared__ bool last;
+    float acc[25];
+#pragma unroll
+    for (int j = 0; j < 25; ++j) acc[j] = 0.0f;
+    const int cb = blockIdx.x % DSV41_HEAD_NC, rg = blockIdx.x / DSV41_HEAD_NC;
+    for (int c = cb * DSV41_HEAD_NT + threadIdx.x; c < K; c += DSV41_HEAD_NC * DSV41_HEAD_NT) {
+        const float xv = x[c];
+#pragma unroll
+        for (int r = 0; r < 24; ++r) {
+            if (r * DSV41_HEAD_NG / 24 == rg) acc[r] += fn[(int64_t) r * K + c] * xv;
+        }
+        if (rg == 0) acc[24] += xv * xv;
+    }
+    const int lane = threadIdx.x % warp_size, w = threadIdx.x / warp_size;
+#pragma unroll
+    for (int j = 0; j < 25; ++j) {
+        const float v = warp_reduce_sum<warp_size>(acc[j]);
+        if (lane == 0) red[j][w] = v;
+    }
+    __syncthreads();
+    if (threadIdx.x < 25) {
+        float v = 0.0f;
+        for (int i = 0; i < nwarps; ++i) v += red[threadIdx.x][i];
+        dsv41_head_part[blockIdx.x * 25 + threadIdx.x] = v;
+        __threadfence();
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        last = atomicAdd(&dsv41_head_count, 1u) == DSV41_HEAD_NB - 1;
+    }
+    __syncthreads();
+    if (!last) return;
+    __threadfence();
+    // the partials in parallel: thread t < 200 sums blocks t/25, t/25 + 8, ... of value t%25 (10 independent loads)
+    __shared__ float tot[25];
+    __shared__ float sub[8][25];
+    static_assert(DSV41_HEAD_NB % 8 == 0, "");
+    if (threadIdx.x < 200) {
+        const int j = threadIdx.x % 25, g = threadIdx.x / 25;
+        float v[DSV41_HEAD_NB / 8];
+#pragma unroll
+        for (int i = 0; i < DSV41_HEAD_NB / 8; ++i) v[i] = __builtin_nontemporal_load(&dsv41_head_part[(g + 8 * i) * 25 + j]);
+        float t = 0.0f;
+#pragma unroll
+        for (int i = 0; i < DSV41_HEAD_NB / 8; ++i) t += v[i];
+        sub[g][j] = t;
+    }
+    __syncthreads();
+    if (threadIdx.x < 25) {
+        float t = 0.0f;
+        for (int g = 0; g < 8; ++g) t += sub[g][threadIdx.x];
+        tot[threadIdx.x] = t;
+    }
+    __syncthreads();
+    if (threadIdx.x >= warp_size) return;
+    // warp 0: lanes 0-15 the comb (lane = idst + 4*isrc), lanes 16-23 the pre / post mixes
+    const int l = threadIdx.x;
+    if (l == 0) dsv41_head_count = 0;
+    const float rs = rsqrtf(tot[24] / (float) K + rms_eps);
+    if (l >= 16 && l < 24) {
+        const int h = l - 16;
+        const float v = tot[h] * rs * scale[h < DSV4_HC ? 0 : 1] + base[h];
+        const float sg = 1.0f / (1.0f + expf(-v));
+        dst[h] = h < DSV4_HC ? sg + hc_eps : 2.0f * sg;
+    }
+    const int idx = l & 15;
+    float v = tot[2 * DSV4_HC + idx] * rs * scale[2] + base[2 * DSV4_HC + idx];
+    // softmax over idst (lanes xor 1, 2), then + eps
+    float mx = fmaxf(v, __shfl_xor_sync(0xffffffff, v, 1, warp_size)); mx = fmaxf(mx, __shfl_xor_sync(0xffffffff, mx, 2, warp_size));
+    v = expf(v - mx);
+    float sm = v + __shfl_xor_sync(0xffffffff, v, 1, warp_size); sm += __shfl_xor_sync(0xffffffff, sm, 2, warp_size);
+    v = v * (1.0f / sm) + hc_eps;
+    auto norm_cols = [&](float x) {   // sum over isrc: lanes xor 4, 8
+        float t = x + __shfl_xor_sync(0xffffffff, x, 4, warp_size); t += __shfl_xor_sync(0xffffffff, t, 8, warp_size);
+        return x * (1.0f / (t + hc_eps));
+    };
+    auto norm_rows = [&](float x) {   // sum over idst: lanes xor 1, 2
+        float t = x + __shfl_xor_sync(0xffffffff, x, 1, warp_size); t += __shfl_xor_sync(0xffffffff, t, 2, warp_size);
+        return x * (1.0f / (t + hc_eps));
+    };
+    v = norm_cols(v);
+    for (int i = 1; i < n_iter; ++i) {
+        v = norm_rows(v);
+        v = norm_cols(v);
+    }
+    if (l < 16) dst[2 * DSV4_HC + l] = v;
+}
+
 void ggml_cuda_op_dsv41_hc_mixes(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    if (ggml_get_op_params_i32(dst, 1) == 1) {
+        const ggml_tensor * x  = dst->src[0];
+        const ggml_tensor * fn = dst->src[3];
+        GGML_ASSERT(x->type == GGML_TYPE_F32 && fn->type == GGML_TYPE_F32 && fn->ne[1] == 24 && fn->ne[0] == x->ne[0]);
+        dsv41_hc_head_f32<<<DSV41_HEAD_NB, DSV41_HEAD_NT, 0, ctx.stream()>>>(
+            (const float *) x->data, (const float *) fn->data, (const float *) dst->src[1]->data,
+            (const float *) dst->src[2]->data, (float *) dst->data, (int) x->ne[0], ggml_get_op_params_f32(dst, 2),
+            ggml_get_op_params_f32(dst, 0), ggml_get_op_params_i32(dst, 3));
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     const ggml_tensor * mixes = dst->src[0];
     const ggml_tensor * scale = dst->src[1];
     const ggml_tensor * base  = dst->src[2];

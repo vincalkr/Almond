@@ -262,6 +262,26 @@ Promessi Sposi, 300 tokens, 2 rounds alternated, 5 / 2 argmax differences off an
 and 19.36 / 18.77 on - 0.66 ms a token is ~1.3% of the decode, inside the spread. The Lucebox PPL does not see it
 (its prompt runs take the batched product). The default stays off.
 
+**One token's hyper-connection head in one kernel: opt-in, off** (`ALMOND_HC_HEAD=1`, `tools/v41/ggml/dsv41-hc-head.patch`,
+2026-11-15). Each of the 80 `hc_mixes` a token ran the flat rms_norm (one block over 20,480 values, 8.5 us), the 24-row
+product (13.7 us), the pre / post mixes (2.0 us) and the comb's Sinkhorn (8.5 us): ~2.6 ms a token. `ggml_dsv41_hc_head`
+(GGML_OP_DSV41_HC_MIXES with op_params[1] = 1, CUDA only, one token) does all four: 80 blocks each sum their slice of
+the row (the 24 dot products and the sum of squares, the norm applied after as one factor), the last block to finish
+adds the partials and computes the 24 outputs, the Sinkhorn on 16 lanes. The kernel trace: 12.5 us a call, 1.00 ms a
+token. Two things that cost time on the way: the last block's sum of the 80 partials as one serial chain of loads
+(22.7 us a call) and 4 x 80 blocks of 6 rows each (1.30 ms a token). The sums run in another order, so the last bits
+change. Promessi Sposi 300 tokens, forced, 3 rounds alternated, `ALMOND_ATTN_PROF=1` (round 2 was disturbed for both,
+the dense call at 53.5 / 69.3 ms):
+
+| | dense compute call, ms a token | tok/s | argmax differences |
+| --- | --- | --- | --- |
+| the configuration | 25.38 / 53.51 / 25.00 | 17.74 / 15.54 / 17.35 | 2 / 2 / 2 |
+| `ALMOND_HC_HEAD=1` | 23.35 / 69.29 / 23.46 | 18.55 / 13.95 / 17.59 | 5 / 5 / 5 |
+
+~1.8 ms a token less in the dense half (-7%) on the clean rounds, +1.4-4.6% tok/s. The three extra differences are
+fragile steps (gaps 0.12-0.48 at steps 83, 102, 133) and the text reads the same. The default stays off until a
+longer check of the output.
+
 ### A rotated-INT4 copy of the experts for prompts: not built (2026-11-06)
 
 RDNA3's `v_wmma_i32_16x16x16_iu4` runs at twice the rate of the INT8 instruction ggml's MMQ uses; a block-Hadamard

@@ -467,6 +467,19 @@ struct B {
     void hc_mixes(ggml_tensor * x, ggml_tensor * fn, ggml_tensor * sc, ggml_tensor * bs,
                   ggml_tensor ** pre, ggml_tensor ** post, ggml_tensor ** comb) const {
         const int64_t HC = g->hc, nt = x->ne[2], D = g->n_embd;
+#if defined(ALMOND_DSV41_HC_MIX)
+        // ALMOND_HC_HEAD=1 (opt-in, the card, one token): the rms_norm, the 24-row product, the two mixes and the comb
+        // in one kernel (ggml_dsv41_hc_head, tools/v41/ggml/dsv41-hc-head.patch); its sums run in another order.
+        static const bool head = std::getenv("ALMOND_HC_HEAD") && std::getenv("ALMOND_HC_HEAD")[0] == '1';
+        if (head && nt == 1 && !im->cpu && HC == 4 && fn->type == GGML_TYPE_F32 && ggml_is_contiguous(x)) {
+            ggml_tensor * h = ggml_dsv41_hc_head(c, ggml_reshape_1d(c, x, HC * D), fn, sc, bs, (float) g->rms_eps,
+                                                 (float) g->hc_eps, (int) g->hc_iters);   // [24] = pre | post | comb
+            *pre  = ggml_view_2d(c, h, HC, 1, h->nb[1], 0);
+            *post = ggml_view_2d(c, h, HC, 1, h->nb[1], (size_t) HC * sizeof(float));
+            *comb = ggml_view_3d(c, h, HC, HC, 1, (size_t) HC * sizeof(float), h->nb[1], (size_t) 2 * HC * sizeof(float));
+            return;
+        }
+#endif
         ggml_tensor * flat = ggml_rms_norm(c, ggml_reshape_2d(c, x, HC * D, nt), (float) g->rms_eps);
         ggml_tensor * mixes = ggml_mul_mat(c, fn, flat);                                  // [24, n]
         ggml_mul_mat_set_prec(mixes, GGML_PREC_F32);
