@@ -2257,6 +2257,7 @@ int bench(Engine& E) {
         int32_t v;
         while (std::fread(&v, 4, 1, f) == 1) all.push_back(v);
         std::fclose(f);
+        if (want == SIZE_MAX) want = all.size();   // no :N: the file once (it looped until out of memory)
         while (ids.size() < want && !all.empty())
             for (int32_t x : all) { if (ids.size() >= want) break; ids.push_back(x); }
     } else if (!m.o.prompt_ids.empty()) {
@@ -2285,7 +2286,7 @@ int bench(Engine& E) {
                         (long long) E.auto_rounds[1]);
         if (rep == 0) {
             std::printf("ids:");
-            for (size_t i = 0; i < std::min<size_t>(outv.size(), 48); ++i) std::printf(" %d", outv[i]);
+            for (size_t i = 0; i < std::min<size_t>(outv.size(), std::getenv("ALMOND_Q35_IDS_ALL") ? outv.size() : 48); ++i) std::printf(" %d", outv[i]);
             std::printf("\n");
         }
         std::fflush(stdout);

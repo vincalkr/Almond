@@ -545,6 +545,50 @@ card 0); without a drafter the split is unchanged. Also, `./almond serve --confi
 launcher now picks the server from the engine arguments the configuration names (`--qwen35`, `--qwen`, `--glm-pack`)
 when `--model` is not given.
 
+### Decode attention over a long q8_0 KV (`GGML_CUDA_FA_Q8_SPLITK=1`, 2026-11-16)
+
+Where the time goes at long context: `--bench 512` on card 0 (IQ3_S, q8_0 KV, MTP 3, greedy, thinking off) with a
+122,824-token prompt (this repository's docs and sources) against a 26-token one: the 4-token verify window
+(`ALMOND_Q35_PROF=1`, `trunk4`) takes 68.9 ms against 32.4 ms. rocprofv3's kernel trace of the decode puts the
+difference in the 16 full-attention layers: with a q8_0 KV and 4 query tokens (24 query rows per KV head) ggml picks
+its tile kernel, which needs f16 K and V, so every call first converts the whole K and V views to f16
+(`dequantize_block_q8_0_f16`, ~0.5 ms each) and then runs `flash_attn_tile` (1.26 ms): ~2.3 ms per layer, ~36 ms a
+round, where reading the layer's 267 MB of q8_0 KV once takes ~0.3 ms at the card's bandwidth.
+
+`ggml-cuda/fattn-q8-splitk.cu` (opt-in, `GGML_CUDA_FA_Q8_SPLITK=1`; the patch in `tools/v41/ggml/fa-q8-splitk.patch`)
+reads the q8_0 bytes directly: one block per KV head and 256 context positions, all the head's query rows (1-4 tokens
+x 6 heads) at once, K and V staged in LDS with 16-byte loads, an online softmax over 64-position sub-chunks, and a
+second kernel that merges the blocks. It runs for q8_0 K and V, head size 256, at most 24 query rows (so not
+DSpine's 8-token windows) and at least 16K context positions; anything else goes to ggml's kernels as before. The
+first, simple version was slower than ggml's (1.8 ms a call at 123K); what made it faster, measured in a standalone
+microbenchmark at 32K positions: staging K/V in LDS, rotating Q's rows in LDS so the lanes of one position do not hit
+the same bank (790 -> 497 us), two positions per lane for the scores and two dimensions per thread for P*V, and no
+unrolling of the score loop (200 VGPRs, no spills): 387 us at 32K, 1.40 ms at 123K (191 GB/s; still under the
+card's bandwidth, the scores' LDS reads limit it).
+
+| context (tokens) | ggml tok/s | `GGML_CUDA_FA_Q8_SPLITK=1` tok/s |
+| --- | ---: | ---: |
+| 26 | 59.45 | 59.58 (not used under 16K) |
+| 8,847 | 66.65 | 65.57 (when it ran at 8K; now not used) |
+| 36,847 | 52.46 | 58.11 (+10.8%) |
+| 73,418 | 42.97 | 48.44 (+12.7%) |
+| 122,824 | 39.34, 39.32 | 44.60 (+13.4%; `trunk4` 59.6 ms) |
+
+(`--bench 512`, one run each unless two values are given; the 8K-73K prompts are shorter cuts of the same text, with
+the question at the end.) Output: two runs without it gave the same 512 tokens; with it the text parts at token 48 at
+a near tie ("Dense 27B parameter model" against "Dense 27B model") and stays coherent and on the same content to the
+end. Since it measured better from 32K up and the same at short context, `local/qwen27-local.json` and its
+`-vision` copy set it in their `env`; the two-card and `-dspine` configurations do not (not measured).
+
+### The server against the engine (2026-11-16)
+
+The 56.6 tok/s of the story through the server above against the 73.3 tok/s of the table at the top of this section
+was not server overhead: 73.3 is the harmonic mean of three prompts, the story alone is 57.6 there. The same story
+request (thinking off, 512 tokens, `ignore_eos`) on `qwen27-local`: engine `--bench` 59.5 tok/s greedy; the server
+greedy and streamed 57.8 tok/s from the first token to the last (57.9 in a second run), not streamed 56.6 tok/s
+including the prompt; streamed at temperature 1.0 (the configuration's sampling) 53.4 and 53.2. So the server
+(HTTP, detokenizer, streaming) costs ~3%, and sampling at temperature 1.0 ~8% through MTP accepting fewer drafts;
+nothing to fix in the server.
 ## Qwen3.8-Flash-Next Q8_0 (unsloth, 2026-11-11)
 
 `unsloth/Qwen3.8-Flash-Next-GGUF` Q8_0 (six shards, 188 GB; experts 128.3 GB, 5.2 MB each; the PLE table, 54 GB, in
