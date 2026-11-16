@@ -594,6 +594,29 @@ Better at 123K in all four and the same at short context, so all the 27B configu
 gain is smaller: the attention is a smaller share of a round there (the Q8_0's 27 GB of weights, the hand-over to
 the second card).
 
+### llama.cpp with its tensor split, same prompts (2026-11-16)
+
+llama.cpp 669204ee2 (`llama-server`, ROCm, both cards, the user's settings: `-c 131072 -b 2048 -ub 512 -fa on -ctk
+q8_0 -ctv q8_0 --spec-type draft-mtp`, the same GGUFs), greedy, 512 tokens, `ignore_eos`, the same story and the same
+123,595-token text, tok/s from the server's `timings`:
+
+| llama.cpp | story tok/s | 123K tok/s (prefill tok/s) | MTP drafts accepted at 123K |
+| --- | ---: | ---: | ---: |
+| Q8_0, `-sm layer`, MTP 2 | 37.85 | stalled at 88K of the prefill (card 1 "100%" at 39 W, memory clock idle, 17 min), killed | - |
+| Q8_0, `-sm tensor`, MTP 2 | 51.16 | 16.54 (525.7) | 0 / 1019 |
+| Q8_0, `-sm tensor`, MTP 3 | 50.40 | 48.01 (526.8) | 350 / 480 |
+| IQ3_S, `-sm tensor`, MTP 2 | 63.40 | 19.33 (523.7) | 0 / 1019 |
+
+Against Almond on the same two cards (the tables above, with `GGML_CUDA_FA_Q8_SPLITK=1`): the Q8_0 39.6 short and
+30.4 at 123K, the IQ3_S 44.1 and 32.2. llama.cpp's tensor split (every matrix and the attention heads halved over
+the two cards, the cards working at once, a reduction per layer over the x2 link) is +29% on the Q8_0's short story
+and +58% at 123K with MTP 3, and the IQ3_S on two cards (63.4) is above Almond's on one card (59.5). Almond's
+two-card split is by layers only, so one card waits while the other runs. With MTP 2, llama.cpp accepted no draft at
+123K in both runs (MTP 3 did), and its `-sm layer` run stalled: neither is looked into here. Prefill at 123K is the
+same (~525 tok/s against Almond's ~555); llama.cpp's `-sm layer` prefill was faster before it stalled (2,000 tok/s
+falling to 1,080 by 88K).
+
+
 ### The server against the engine (2026-11-16)
 
 The 56.6 tok/s of the story through the server above against the 73.3 tok/s of the table at the top of this section
