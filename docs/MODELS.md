@@ -578,7 +578,21 @@ card's bandwidth, the scores' LDS reads limit it).
 the question at the end.) Output: two runs without it gave the same 512 tokens; with it the text parts at token 48 at
 a near tie ("Dense 27B parameter model" against "Dense 27B model") and stays coherent and on the same content to the
 end. Since it measured better from 32K up and the same at short context, `local/qwen27-local.json` and its
-`-vision` copy set it in their `env`; the two-card and `-dspine` configurations do not (not measured).
+`-vision` copy set it in their `env`.
+
+The other configurations, same `--bench 512` (each configuration's own arguments; the 26-token story and a
+123,595-token cut of the same text, one run each):
+
+| configuration | story, ggml | story, flag | 123K, ggml | 123K, flag |
+| --- | ---: | ---: | ---: | ---: |
+| `qwen27-local-256k` (IQ3_S, two cards) | 44.12 | 44.10 | 29.68 | 32.22 (+8.6%) |
+| `qwen27-q8-local` (Q8_0, two cards) | 39.66 | 39.64 | 28.96 | 30.41 (+5.0%) |
+| `qwen27-local-dspine` (one card, `--spec auto`) | 59.04 | 58.97 | 36.71 | 42.43 (+15.6%) |
+| `qwen27-q8-local-dspine` (two cards) | 39.09 | 39.09 | 27.23 | 29.78 (+9.4%) |
+
+Better at 123K in all four and the same at short context, so all the 27B configurations set it now. On two cards the
+gain is smaller: the attention is a smaller share of a round there (the Q8_0's 27 GB of weights, the hand-over to
+the second card).
 
 ### The server against the engine (2026-11-16)
 

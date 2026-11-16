@@ -13,7 +13,9 @@
     "--mtp",
     "3"
   ],
-  "env": {},
+  "env": {
+    "GGML_CUDA_FA_Q8_SPLITK": "1"
+  },
   "cwd": ".",
   "tokenizer": "models/qwen38-27b/tokenizer",
   "model_name": "qwen3.8-27b-q8",
