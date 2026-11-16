@@ -491,7 +491,7 @@ loses on prose, more with longer drafts.
 So `--spec auto` (with `--mtp 3` and the drafter) follows the generated text: inside a ``` block or a `<tool_call>`
 the block drafter drafts, elsewhere MTP; the MTP block is caught up every round either way and the drafter's ring is
 filled by every verify window. Inside code, when the drafter's tokens per millisecond fall below 0.9x MTP's (measured
-on the text before), MTP drafts until the block ends (`ALMOND_Q35_AUTO_GIVEUP`). Every switch is a line in the engine log
+on the text before), MTP drafted until the block ended (`ALMOND_Q35_AUTO_GIVEUP`; off by default since 2026-11-16, see below). Every switch is a line in the engine log
 (`qwen35: --spec auto: MTP -> DSpine at token N (a ``` block opened; rates ...)`), and each request's first drafter. An earlier rule that chose by the two
 drafters' moving rates with trial rounds (MTP and DFlash2) was slower than MTP alone (62.9 against 66.6 tok/s over the
 four prompts) and was dropped.
@@ -685,6 +685,28 @@ tests 81.23 -> 116.32 tok/s (layer split -> `--tp`, the code correct), the story
 | `qwen27-q8-local-dspine` | 38.6 -> 43.0 | 57.4 -> 65.9 | 52.6 -> 59.5 |
 
 (The tool call is 27 tokens: too short to compare.)
+
+### `--spec auto` inside code: no give-up by default (2026-11-16)
+
+The rule that gave the block drafter up inside code (its rate below 0.9x MTP's) compared its rate in the code with
+MTP's on the prose before, and judged it on its first round after the block opened, which is slow. In four requests
+with a paragraph of prose before the code it gave DSpine up after its first round every time, and MTP wrote the rest
+of the block. `--bench 1024`, greedy, IQ3_S on card 0 (two values: two runs):
+
+| prose, then code | give-up 0.9 (before) | give-up after 4 rounds | no give-up |
+| --- | ---: | ---: | ---: |
+| token bucket in Python | 80.32 | 82.67 | 82.85, 84.53 |
+| single-file HTML/JS todo app | 80.76 | 81.90 | 87.70, 87.74 |
+| trie in TypeScript | 88.99 | 88.05 | 98.09, 98.76 |
+| Bash backup script | 78.90 | 77.77 | 82.13, 81.90 |
+| code only (the module with tests) | 107.77 | 108.47 | (no give-up happened) |
+| the story (no code) | 58.52 | 57.06 | (no code) |
+
+Q8_0 + DSpine with `--tp`: the HTML app 66.88 -> 84.34 tok/s, the trie 70.33 -> 94.54. Waiting for 4 or 8 DSpine
+rounds only gave it up later: DSpine in code is below MTP's rate on prose and still above MTP in the same code, so the
+comparison itself was wrong. An MTP probe inside code (both rates on the same block, the better one drafting, the
+other tried every 8 rounds) was slower too (90.5 against 107.8 tok/s on the module): one round's rate is too noisy.
+So `ALMOND_Q35_AUTO_GIVEUP` is 0 by default: inside ``` blocks and tool calls the block drafter drafts.
 
 
 ### The server against the engine (2026-11-16)
