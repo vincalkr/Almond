@@ -653,6 +653,23 @@ against 32.9 tok/s split by tensors and 23.4 against 23.6 by layers, and `GGML_C
 llama.cpp. In the profile card 0 spends 96 us on average in each of the window's 128 reductions against 40 us for card
 1, i.e. it waits for card 1 to reach them; the MTP steps (catch-up 3.3 ms, two draft steps of 2.9 ms) add the rest.
 
+Most of it was HIP graphs not being replayed: with `GGML_CUDA_GRAPH_STATS=1` only 39% of the cards' sub-graph runs
+were launched as captured graphs, 15% captured again and 45% run directly, with the number of graph keys growing.
+The cause was the conv window's offset in the trunk graph's key: it moves with every verify that drops tokens, so the
+trunk graph was rebuilt most rounds. Now a verify that drops tokens copies the window's 3 live columns back to its end
+(one small cached graph per offset) and the trunk keeps one graph: 97% of the runs launch a captured graph, the
+verify window takes 39.0 ms (45.8 before).
+
+| `--tp`, two cards, tok/s | story, before | story, now | 123K, before | 123K, now |
+| --- | ---: | ---: | ---: | ---: |
+| Q8_0 | 42.46 | 46.71 | 45.12 | 47.83 |
+| IQ3_S | 50.99 | 57.33 | 50.15 | 54.46 |
+
+(llama.cpp `-sm tensor`: Q8_0 50.4 short, 48.0 at 123K; IQ3_S 63.4 short.) The Q8_0's 512 tokens are the layer
+split's up to token 338, where the two part at a near tie ("Elias had smiled" against "Elias had listened"), both
+coherent to the end. Left: the head (248,320 rows) is mirrored, so both cards compute all of it at every trunk and MTP
+call (1.6 ms each on the Q8_0).
+
 
 ### The server against the engine (2026-11-16)
 

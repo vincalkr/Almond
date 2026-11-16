@@ -1344,6 +1344,37 @@ struct Engine {
         next_p -= n - keep;
         m.ssm_slot = n - keep;
         m.conv_off = CONV_W - (n + 3) + keep;
+        if (m.o.tp && m.conv_off != CONV_W - 3) conv_realign();
+    }
+
+    // --tp: the conv window's offset is part of the trunk's graph, so after a verify that dropped tokens its 3 live
+    // columns are copied back to the window's end (one small cached graph per offset) and the trunk keeps one graph.
+    std::map<int, std::unique_ptr<Built>> realign;
+    void conv_realign() {
+        const int off = m.conv_off;
+        auto& slot = realign[off];
+        if (!slot) {
+            slot = std::make_unique<Built>();
+            Built& b = *slot;
+            b.tp = true;
+            b.ctx = graph_ctx();
+            b.gf = ggml_new_graph_custom(b.ctx, GRAPH_NODES, false);
+            for (Layer& l : m.L) {
+                if (!l.conv) continue;
+                const int64_t C = l.conv->ne[1];
+                ggml_tensor* src = ggml_cont(b.ctx, ggml_view_2d(b.ctx, l.conv, 3, C, l.conv->nb[1], (size_t) off * 4));
+                ggml_build_forward_expand(
+                    b.gf, ggml_cpy(b.ctx, src, ggml_view_2d(b.ctx, l.conv, 3, C, l.conv->nb[1], (size_t) (CONV_W - 3) * 4)));
+            }
+            b.sched = ggml_backend_sched_new(m.bk.data(), nullptr, (int) m.bk.size(), GRAPH_NODES, false, false);
+            b.own_sched = true;
+            ggml_backend_meta_set_view_owner(&b);
+            const bool ok = ggml_backend_sched_alloc_graph(b.sched, b.gf);
+            ggml_backend_meta_set_view_owner(nullptr);
+            if (!ok) die("cannot allocate the conv realign graph");
+        }
+        if (ggml_backend_sched_graph_compute(slot->sched, slot->gf) != GGML_STATUS_SUCCESS) die("the conv realign failed");
+        m.conv_off = CONV_W - 3;
     }
 
     // The MTP block over r rows (see mtp_graph); returns its draft (argmax) and the draft's probability.
