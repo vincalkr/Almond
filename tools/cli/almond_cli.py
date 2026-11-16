@@ -50,6 +50,7 @@ returns to the prompt; Ctrl+D (or /quit) leaves.  It speaks Almond's OpenAI API 
 or one model's server, ./almond serve): the history and the thinking level live here, the model there.
 """
 import argparse
+import base64
 import difflib
 import http.client
 import json
@@ -113,6 +114,7 @@ class Render:
         self.w(text)
 
     def _start_line(self):
+        self.width = term_width()               # (a resize in the middle of an answer: the next lines fit it)
         m = self.first if (self.first is not None and self.line_no == 0) else self.margin
         m += " " * getattr(self, "hang", 0)     # a list item's wrapped lines: under its text
         self._out("\x1b[0m" + m)
@@ -274,7 +276,8 @@ COMMANDS = [    # (name, arguments, what it does): /help's order, Tab's suggesti
     ("model", "NAME", "another model"), ("models", "", "the models and their state"),
     ("think", "[LEVEL]", "the thinking level"), ("nothink", "", "the lowest thinking level"),
     ("set", "[KEY VALUE]", "sampling"), ("system", "TEXT", "the system prompt"),
-    ("read", "FILE", "a file sent with your next message"), ("agent", "[on|off]", "the agent's tools"),
+    ("read", "FILE", "a file sent with your next message"),
+    ("image", "[FILE]", "an image sent with your next message (no FILE: the clipboard's)"), ("agent", "[on|off]", "the agent's tools"),
     ("cd", "DIR", "the agent's working directory"), ("hide", "", "hide the thinking"), ("show", "", "show the thinking"),
     ("status", "", "model, context, thinking, sampling, agent, conversation"), ("ctx", "", "the context in use"),
     ("stats", "", "the server's monitor"), ("forget", "", "clear the engine's conversation cache"),
@@ -282,6 +285,48 @@ COMMANDS = [    # (name, arguments, what it does): /help's order, Tab's suggesti
     ("compact", "[NOTE]", "summarize the earlier conversation, keep the recent part"),
     ("export", "[FILE]", "the conversation as Markdown"), ("help", "", "the commands"), ("quit", "", "leave"),
 ]
+
+
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+               ".gif": "image/gif", ".bmp": "image/bmp"}
+IMAGE_CHARS = 3000      # what an image counts for in the context estimate (its base64 is not what the model reads)
+
+
+def text_of(content) -> str:
+    """A message's text: the content itself, or a list's text parts (a message with images)."""
+    if isinstance(content, list):
+        return "\n".join(p.get("text", "") for p in content if p.get("type") == "text")
+    return content or ""
+
+
+def images_of(content) -> list:
+    return [p["image_url"]["url"] for p in content if p.get("type") == "image_url"] if isinstance(content, list) else []
+
+
+def read_image(arg: str) -> tuple[str, str]:
+    """(data URL, what it was) from a file, or from the clipboard when arg is empty."""
+    if arg:
+        path = Path(os.path.expanduser(arg.strip().strip("'\"")))
+        mime = IMAGE_TYPES.get(path.suffix.lower())
+        if not mime:
+            raise OSError(f"{path.name}: not an image ({', '.join(IMAGE_TYPES)})")
+        data, what = path.read_bytes(), path.name
+    else:
+        cmds = [["wl-paste", "--no-newline", "--type", "image/png"]] if os.environ.get("WAYLAND_DISPLAY") else []
+        cmds.append(["xclip", "-selection", "clipboard", "-t", "image/png", "-o"])
+        data = b""
+        for c in cmds:
+            try:
+                r = subprocess.run(c, capture_output=True, timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if r.returncode == 0 and r.stdout[:8] == b"\x89PNG\r\n\x1a\n":
+                data = r.stdout
+                break
+        if not data:
+            raise OSError("no image in the clipboard (wl-paste or xclip)")
+        mime, what = "image/png", "the clipboard's image"
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}", f"{what}, {len(data) // 1024} KB"
 
 
 class Api:
@@ -369,6 +414,9 @@ class Bar:
         self.api, self.on, self.text = api, False, ""
         self.lock = threading.RLock()
         self.busy = None                        # threading.Event while a request runs
+        # a resize: SIGWINCH runs its handler on the main thread between two bytecodes, also in the middle of a
+        # write under the (reentrant) lock: then it only marks it, and the write's end redraws
+        self.depth, self.resized, self.h = 0, False, 0
         self.phase = "thinking"                 # what the stream shows: thinking / answer
 
     def rows(self):
@@ -380,14 +428,30 @@ class Bar:
             return
         self.on = True
         sys.stdout.write("\n\x1b[A")        # a free row under the cursor, so the last row is not the one it is on
-        signal.signal(signal.SIGWINCH, lambda *_: self.region())
+        signal.signal(signal.SIGWINCH, self.on_resize)
         self.region()
+
+    def on_resize(self, *_):
+        self.resized = True
+        if self.depth == 0:
+            self.region()
+
+    def _after(self):
+        """The end of a write or draw: a resize that came in the middle of it."""
+        if self.depth == 0 and self.resized and self.on:
+            self.region()
 
     def region(self):
         """The scroll region over rows 1 .. H-1 (again after a resize), then the line."""
         with self.lock:
+            self.resized = False
             h, _ = self.rows()
-            sys.stdout.write(f"\x1b7\x1b[1;{max(1, h - 1)}r\x1b8")
+            old = self.h
+            self.h = h
+            seq = "\x1b7"
+            if old and old < h:             # taller: the old line is now a row of the conversation, blank it
+                seq += f"\x1b[{old};1H\x1b[2K"
+            sys.stdout.write(seq + f"\x1b[1;{max(1, h - 1)}r\x1b8")
             self.draw()
 
     def stop(self):
@@ -406,16 +470,26 @@ class Bar:
         with self.lock:
             if text is not None:
                 self.text = text
-            h, w = self.rows()
-            line = self.text[:w - 1]
-            sys.stdout.write(f"\x1b7\x1b[{h};1H\x1b[2K{DIM}{line}{RESET}\x1b8")
-            sys.stdout.flush()
+            self.depth += 1
+            try:
+                h, w = self.rows()
+                line = self.text[:w - 1]
+                sys.stdout.write(f"\x1b7\x1b[{h};1H\x1b[2K{DIM}{line}{RESET}\x1b8")
+                sys.stdout.flush()
+            finally:
+                self.depth -= 1
+            self._after()
 
     def write(self, out, text: str):
         """The stream's text, under the same lock as the line, so neither cuts into the other."""
         with self.lock:
-            out.write(text)
-            out.flush()
+            self.depth += 1
+            try:
+                out.write(text)
+                out.flush()
+            finally:
+                self.depth -= 1
+            self._after()
 
     # ---- while a request runs
     def run(self, model: str, base: int = 0):
@@ -1296,11 +1370,13 @@ class Chat:
         return True
 
     # ---- one turn
-    def ask(self, text: str, out=None) -> bool:
+    def ask(self, text: str, out=None, images: list | None = None) -> bool:
         out = out or sys.stdout
-        if self.messages and self.should_compact(self.est_tokens([{"role": "user", "content": text}])):
+        content = [{"type": "text", "text": text}] + [{"type": "image_url", "image_url": {"url": u}} for u in images] \
+            if images else text
+        if self.messages and self.should_compact(self.est_tokens([{"role": "user", "content": content}])):
             self.compact("the conversation fills the context, before a new user turn")
-        self.messages.append({"role": "user", "content": text})
+        self.messages.append({"role": "user", "content": content})
         for step in range(AGENT_STEPS if self.agent else 1):
             calls = self.reply(out)
             if calls is None:
@@ -1459,7 +1535,14 @@ class Chat:
 
     @staticmethod
     def _chars(msgs: list) -> int:
-        return sum(len(json.dumps(m, ensure_ascii=False)) for m in msgs)
+        n = 0
+        for m in msgs:
+            if isinstance(m.get("content"), list):
+                imgs = len(images_of(m["content"]))
+                m = dict(m, content=text_of(m["content"]))
+                n += imgs * IMAGE_CHARS
+            n += len(json.dumps(m, ensure_ascii=False))
+        return n
 
     def token_rate(self) -> float:
         whole = self._chars(self.wire())
@@ -1717,12 +1800,13 @@ class Chat:
             if i is None:
                 say(f"{DIM}no message yet{RESET}")
                 return True
-            text = self.messages[i]["content"]
+            text, imgs = text_of(self.messages[i]["content"]), images_of(self.messages[i]["content"])
             del self.messages[i:]
             if cmd == "retry":
-                self.ask(text)
+                self.ask(text, images=imgs)
             elif cmd == "edit":
                 self.prefill = text
+                self.images = imgs + self.images
             else:
                 say(f"{DIM}the last exchange dropped{RESET}")
         elif cmd == "export":
@@ -1768,6 +1852,16 @@ class Chat:
                 return True
             self.pending = f"{arg}:\n```\n{text}\n```\n"
             say(f"{DIM}{arg}: {len(text)} characters, sent with your next message{RESET}")
+        elif cmd == "image":
+            try:
+                url, what = read_image(arg)
+            except OSError as e:
+                say(f"{RED}{e}{RESET}")
+                return True
+            self.images.append(url)
+            mods = ((self.model or {}).get("architecture") or {}).get("input_modalities")
+            note = f" ({self.model['id']} takes no images: switch to a vision model)" if mods and "image" not in mods else ""
+            say(f"{DIM}{what}: sent with your next message{RESET}{RED}{note}{RESET}")
         elif cmd == "todo":
             if arg == "clear":
                 TODO.clear()
@@ -1805,7 +1899,7 @@ class Chat:
         if name:
             self.name = "".join(c if c.isalnum() or c in "-_." else "-" for c in name).strip("-.") or None
         if not self.name:
-            first = next((m["content"] for m in self.messages if m.get("role") == "user"), "")
+            first = next((text_of(m["content"]) for m in self.messages if m.get("role") == "user"), "")
             words = "-".join("".join(c for c in w if c.isalnum()) for w in str(first).split()[:5]).strip("-")
             self.name = time.strftime("%Y%m%d-%H%M") + ("-" + words[:40] if words else "")
         CHATS.mkdir(parents=True, exist_ok=True)
@@ -1879,7 +1973,8 @@ class Chat:
         for m in self.messages:
             r = m.get("role")
             if r == "user":
-                out += ["## you", "", m["content"], ""]
+                n = len(images_of(m["content"]))
+                out += ["## you", "", text_of(m["content"])] + ([f"*({n} image{'s' if n > 1 else ''})*"] if n else []) + [""]
             elif r == "assistant":
                 out += ["## " + self.model["id"], ""]
                 if m.get("content"):
@@ -1895,6 +1990,9 @@ class Chat:
         readline.set_completer_delims(" \t\n")
         readline.parse_and_bind("tab: complete")
         readline.parse_and_bind("set show-all-if-ambiguous on")
+        # Python turns readline's bracketed paste off: a pasted block then sent its first line on its own. On, the
+        # whole block lands in the line and goes out on Enter.
+        readline.parse_and_bind("set enable-bracketed-paste on")
         readline.set_completer(self.complete)
         readline.set_completion_display_matches_hook(self.show_matches)
         self.readline = readline
@@ -1947,7 +2045,7 @@ class Chat:
             readline.set_history_length(2000)
         except ImportError:
             readline = None
-        self.pending = ""
+        self.pending, self.images = "", []
         if readline:
             self.complete_setup(readline)
         say(f"{CYAN}{BOLD}{LOGO}{RESET}")
@@ -2016,7 +2114,8 @@ class Chat:
                     break
                 continue
             text, self.pending = self.pending + line, ""
-            self.ask(text)
+            imgs, self.images = self.images, []
+            self.ask(text, images=imgs)
 
 
 def _f(x, nd=0):
