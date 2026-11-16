@@ -628,7 +628,7 @@ ffn_down (two reductions a layer). What it took in Almond: the DeltaNet conv win
 with `get_rows` (that path gave wrong windows under the split); the vendored meta backend's view handling brought up
 to llama.cpp's; and per-graph view containers in the meta backend (`ggml_backend_meta_set_view_owner` /
 `release_views`), since Almond keeps several graphs allocated (trunk, MTP catch-up, MTP step) where the meta backend
-kept only the last one's views (`tools/v41/ggml/meta-tp.patch`). Disk sessions are refused under `--tp` for now.
+kept only the last one's views (`tools/v41/ggml/meta-tp.patch`). (Disk sessions were refused under `--tp` at first; they work now, below.)
 
 `--bench 512`, greedy, the 26-token story and the 123,595-token text, `GGML_CUDA_FA_Q8_SPLITK=1`:
 
