@@ -645,6 +645,14 @@ and the rest is the host. HIP graphs make no difference (43.4 against 43.3 tok/s
 nor does reusing the graphs; llama.cpp's newer ggml-cuda and meta backend are the likely difference, not ported here.
 Not measured yet with DSpine or through the server; the configurations do not set it.
 
+Porting the newer ggml would not close the short-context gap: without MTP (one token a step, Q8_0, two cards,
+`--bench 128` against `llama-bench -n 128 -fa 1 -ctk q8_0 -ctv q8_0`) Almond and llama.cpp are the same, 32.2
+against 32.9 tok/s split by tensors and 23.4 against 23.6 by layers, and `GGML_CUDA_P2P=1` is slower (39.3 against
+41.2 tok/s with MTP). The difference is in the MTP rounds: under `--tp` the 4-token verify window costs 45.8 ms against
+~31 ms for one token (+15 ms; +8.6 ms with the layer split), a round with the MTP steps ~53 ms against ~45 ms for
+llama.cpp. In the profile card 0 spends 96 us on average in each of the window's 128 reductions against 40 us for card
+1, i.e. it waits for card 1 to reach them; the MTP steps (catch-up 3.3 ms, two draft steps of 2.9 ms) add the rest.
+
 
 ### The server against the engine (2026-11-16)
 
