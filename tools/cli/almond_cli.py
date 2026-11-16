@@ -18,6 +18,7 @@ Thinking: --nothink, --think (the model's default), --think-max, --think-level L
 Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium / xhigh).  In the conversation:
 
   /help  /quit  /models  /model NAME  /think [LEVEL]  /nothink  /read FILE  /system TEXT  /ctx  /status
+  /image [FILE]      an image sent with the next message (no FILE: the clipboard's), to a -vision model
   /new               a new conversation (the current one is saved first; /clear is the same)
   /save [NAME]  /sessions  /load N|NAME  /rename NAME  /delete N|NAME
                      the conversations saved in local/chats/ (on /new and on leaving too); ./almond -c resumes the

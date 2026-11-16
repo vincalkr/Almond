@@ -190,7 +190,10 @@ instead.
   (Markdown), `/status`, `/cd DIR` (the agent's directory).
 - `/models`, `/model NAME` (switches through the router), `/read FILE`, `/system TEXT`, `/ctx`, `/hide`, `/show`;
   `/` alone lists the commands, Tab completes them (with what each does) and their arguments; a line ending in `\`
-  goes on, `"""` opens a block; Ctrl+C stops an answer.
+  goes on, `"""` opens a block, a pasted block of lines is one message (sent on Enter); Ctrl+C stops an answer.
+- `/image FILE` (png, jpg, webp, gif, bmp), or `/image` alone for the clipboard's image (`wl-paste` or `xclip`): sent
+  with the next message, to a model with images on (the `-vision` configurations). Checked with
+  `local/qwen27-local-vision.json`: a 175 KB png and a three-line pasted question, answered at 55 tok/s.
 
 Through the API the level is `reasoning_effort`, `reasoning.effort` (OpenAI) or `output_config.effort` / `thinking`
 (Anthropic). DeepSeek's goes into its prompt (`Reasoning Effort: N`), with no cap on the thinking, as DeepSeek's API
