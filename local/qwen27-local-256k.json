@@ -6,6 +6,7 @@
     "models/qwen38-27b/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
     "--gpus",
     "0,1",
+    "--tp",
     "--max-context",
     "262144",
     "--kv",

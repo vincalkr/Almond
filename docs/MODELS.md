@@ -670,6 +670,22 @@ split's up to token 338, where the two part at a near tie ("Elias had smiled" ag
 coherent to the end. Left: the head (248,320 rows) is mirrored, so both cards compute all of it at every trunk and MTP
 call (1.6 ms each on the Q8_0).
 
+`--tp` in the two-card configurations (2026-11-16): `qwen27-local-256k`, `qwen27-q8-local` and `qwen27-q8-local-dspine`
+set it now. Disk sessions work under it (the chunks are whole rows of the split tensors, the conv window's columns go
+through the host): a conversation saved, the server restarted, the next turn resumed 105 tokens from disk in 72 ms.
+DSpine works under it with the drafter mirrored on both cards (its tensors reuse the trunk's names, so they are kept
+out of the split rules). Engine `--bench 512`, Q8_0 + DSpine (`--spec auto`, 7 drafts), greedy: a Python module with
+tests 81.23 -> 116.32 tok/s (layer split -> `--tp`, the code correct), the story 38.85 -> 45.46. Through the server
+(the short tests at the top of this section, streamed, temperature 1.0; one run each), all correct:
+
+| configuration | chat, layer split -> `--tp` | code | tool call |
+| --- | ---: | ---: | ---: |
+| `qwen27-local-256k` | 48.6 -> 60.5 | 68.4 -> 81.7 | 81.2 -> 78.0 |
+| `qwen27-q8-local` | 43.4 -> 48.5 | 57.8 -> 67.7 | 76.8 -> 70.3 |
+| `qwen27-q8-local-dspine` | 38.6 -> 43.0 | 57.4 -> 65.9 | 52.6 -> 59.5 |
+
+(The tool call is 27 tokens: too short to compare.)
+
 
 ### The server against the engine (2026-11-16)
 

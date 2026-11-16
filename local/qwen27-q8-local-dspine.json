@@ -6,6 +6,7 @@
     "models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf",
     "--gpus",
     "0,1",
+    "--tp",
     "--max-context",
     "262144",
     "--kv",

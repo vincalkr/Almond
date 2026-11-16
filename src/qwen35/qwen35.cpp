@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -197,12 +198,19 @@ ggml_tensor* need(Model& m, const std::string& name, bool req = true) {
 // heads repeat the key heads Hv/Hk times, so v is split as Hv/Hk segments of the key width); the FFN by its inner
 // width.  The meta backend adds the partial outputs of attn_output, ssm_out and ffn_down.  Norms, embeddings, the
 // MTP block's own projections and the head are mirrored.
+// --tp: tensors that stay whole on each card whatever their name (the drafter's: it reuses the trunk's names)
+std::set<const ggml_tensor*>& tp_mirrored() {
+    static std::set<const ggml_tensor*> s;
+    return s;
+}
+
 ggml_backend_meta_split_state tp_split_state(const ggml_tensor* t, void* ud) {
     const Hp& h = *(const Hp*) ud;
     ggml_backend_meta_split_state s{};
     s.axis = GGML_BACKEND_SPLIT_AXIS_MIRRORED;
     s.nr[0] = 1;
     s.n_segments = 1;
+    if (tp_mirrored().count(t)) return s;
     const std::string n = t->name;
     auto ends = [&](const char* suf) {
         const size_t k = std::strlen(suf);
@@ -570,6 +578,7 @@ void load_drafter(Model& m) {
         l.ffn_up = B("ffn_up.weight");
         l.ffn_down = B("ffn_down.weight");
     }
+    for (ggml_tensor* t = ggml_get_first_tensor(wc); t; t = ggml_get_next_tensor(wc, t)) tp_mirrored().insert(t);
     ggml_backend_buffer_t b = ggml_backend_alloc_ctx_tensors_from_buft(wc, ggml_backend_get_default_buffer_type(m.gpu[dev]));
     if (!b) die("cannot allocate the drafter's weights");
     ggml_backend_buffer_set_usage(b, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
@@ -593,6 +602,7 @@ void load_drafter(Model& m) {
         l.k_ring = ggml_new_tensor_2d(sc, GGML_TYPE_F16, d->kv_dim(), d->ring);
         l.v_ring = ggml_new_tensor_2d(sc, GGML_TYPE_F16, d->kv_dim(), d->ring);
     }
+    for (ggml_tensor* t = ggml_get_first_tensor(sc); t; t = ggml_get_next_tensor(sc, t)) tp_mirrored().insert(t);
     ggml_backend_buffer_t rb = ggml_backend_alloc_ctx_tensors(sc, m.gpu[dev]);
     if (!rb) die("cannot allocate the drafter's KV ring");
     ggml_backend_buffer_clear(rb, 0);
@@ -1524,8 +1534,11 @@ struct Engine {
     // moves `bytes` between a device tensor (from byte `off`) and the file through a 16 MiB stage
     bool sess_io(FILE* f, ggml_tensor* t, size_t off, size_t bytes, bool save, uint64_t& done, uint64_t total) {
         static std::vector<uint8_t> stage(16u << 20);
+        // --tp: a split tensor is read and written in whole rows, so the chunks are whole rows
+        const size_t chunk = m.o.tp ? std::max<size_t>(1, stage.size() / t->nb[1]) * t->nb[1] : stage.size();
+        if (stage.size() < chunk) stage.resize(chunk);
         for (size_t at = 0; at < bytes;) {
-            const size_t n = std::min(stage.size(), bytes - at);
+            const size_t n = std::min(chunk, bytes - at);
             if (save) {
                 ggml_backend_tensor_get(t, stage.data(), off + at, n);
                 if (std::fwrite(stage.data(), 1, n, f) != n) return false;
@@ -1547,10 +1560,6 @@ struct Engine {
     }
     // the body after the header, both ways (the state goes to / comes from the live slot and conv rows)
     bool sess_body(FILE* f, const SessHead& h, bool save, uint64_t total) {
-        if (m.o.tp) {   // the split state is read in whole tensors only: no disk sessions under --tp (yet)
-            std::fprintf(stderr, "qwen35: --tp: disk sessions are not supported\n");
-            return false;
-        }
         uint64_t done = sizeof(SessHead);
         const size_t L = (size_t) h.len;
         if (!save) {
@@ -1565,8 +1574,14 @@ struct Engine {
         const int slot = save ? m.ssm_slot : 0, coff = save ? m.conv_off : CONV_W - 3;
         for (Layer& l : m.L) {
             if (l.conv) {
-                if (!sess_io(f, l.ssm, (size_t) slot * h.ssm_d * 4, (size_t) h.ssm_d * 4, save, done, total) ||
-                    !sess_io(f, l.conv, (size_t) coff * C * 4, (size_t) 3 * C * 4, save, done, total))
+                if (!sess_io(f, l.ssm, (size_t) slot * h.ssm_d * 4, (size_t) h.ssm_d * 4, save, done, total))
+                    return false;
+                if (m.o.tp) {   // the window's 3 columns through the host, in the same [3][C] layout
+                    std::vector<float> w((size_t) 3 * C);
+                    if (save) conv3(l, coff, w.data(), false);
+                    if (!sess_host(f, w.data(), w.size() * 4, save, done)) return false;
+                    if (!save) conv3(l, coff, w.data(), true);
+                } else if (!sess_io(f, l.conv, (size_t) coff * C * 4, (size_t) 3 * C * 4, save, done, total))
                     return false;
             }
             if (l.k_cache) {
