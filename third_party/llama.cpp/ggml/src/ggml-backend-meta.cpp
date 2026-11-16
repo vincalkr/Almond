@@ -413,6 +413,9 @@ struct ggml_backend_meta_simple_tensor_container {
     ggml_backend_meta_simple_tensor_container() {}
 };
 
+struct ggml_backend_meta_buffer_context;
+static std::set<ggml_backend_meta_buffer_context *> & ggml_backend_meta_buffer_registry();
+
 struct ggml_backend_meta_buffer_context {
     // FIXME
     // Most tensors can simply be stored statically in their own buffer.
@@ -447,15 +450,73 @@ struct ggml_backend_meta_buffer_context {
         }
         const char * GGML_META_DEBUG = getenv("GGML_META_DEBUG");
         debug = GGML_META_DEBUG ? atoi(GGML_META_DEBUG) : 0;
+        n_simple_owned = this->stc_compute[0].ctxs.size() ? this->stc_compute[0].ctxs.size() : bufs.size();
+        ggml_backend_meta_buffer_registry().insert(this);
     }
+
+    // Owned views (ggml_backend_meta_set_view_owner): the external views and compute tensors of each owner (one
+    // graph of the caller's) in their own container, kept until ggml_backend_meta_release_views(owner), so that
+    // several graphs can be allocated at once and each run again (the rotating pair above holds one graph's).
+    std::map<const void *, std::unique_ptr<ggml_backend_meta_simple_tensor_container>> owned;
+    std::map<const ggml_tensor *, ggml_backend_meta_simple_tensor_container *> owned_where;
+    size_t n_simple_owned = 0;
+
+    ggml_backend_meta_simple_tensor_container & owned_container(const void * owner) {
+        auto & c = owned[owner];
+        if (!c) {
+            const ggml_init_params params = {
+                /*.mem_size   =*/ 32768*ggml_tensor_overhead(),
+                /*.mem_buffer =*/ nullptr,
+                /*.no_alloc   =*/ true,
+            };
+            c = std::make_unique<ggml_backend_meta_simple_tensor_container>(params, (int) n_simple_owned);
+        }
+        return *c;
+    }
+
+    ggml_backend_meta_buffer_context(const ggml_backend_meta_buffer_context &) = delete;
+    ~ggml_backend_meta_buffer_context();
 
     ggml_backend_meta_simple_tensor_container & get_simple_tensor_container(const ggml_tensor * tensor) {
         if (stc_static.simple_tensors.find(tensor) != stc_static.simple_tensors.end()) {
             return stc_static;
         }
+        if (!owned_where.empty()) {
+            auto it = owned_where.find(tensor);
+            if (it != owned_where.end()) {
+                return *it->second;
+            }
+        }
         return stc_compute[stc_compute_index];
     }
 };
+
+static std::set<ggml_backend_meta_buffer_context *> & ggml_backend_meta_buffer_registry() {
+    static std::set<ggml_backend_meta_buffer_context *> r;
+    return r;
+}
+static const void * ggml_backend_meta_view_owner = nullptr;
+
+ggml_backend_meta_buffer_context::~ggml_backend_meta_buffer_context() {
+    ggml_backend_meta_buffer_registry().erase(this);
+}
+
+void ggml_backend_meta_set_view_owner(const void * owner) {
+    ggml_backend_meta_view_owner = owner;
+}
+
+void ggml_backend_meta_release_views(const void * owner) {
+    for (ggml_backend_meta_buffer_context * ctx : ggml_backend_meta_buffer_registry()) {
+        auto it = ctx->owned.find(owner);
+        if (it == ctx->owned.end()) {
+            continue;
+        }
+        for (auto w = ctx->owned_where.begin(); w != ctx->owned_where.end();) {
+            w = w->second == it->second.get() ? ctx->owned_where.erase(w) : std::next(w);
+        }
+        ctx->owned.erase(it);
+    }
+}
 
 static void ggml_backend_meta_buffer_free_buffer(ggml_backend_buffer_t buffer) {
     GGML_ASSERT(ggml_backend_buffer_is_meta(buffer));
@@ -487,6 +548,32 @@ static struct ggml_tensor * ggml_backend_meta_buffer_simple_tensor(const struct 
         return nullptr;
     }
     return it->second[index];
+}
+
+// bytes spanned by all dims except skip_dim
+static size_t ggml_backend_meta_inner_extent(const struct ggml_tensor * tensor, int skip_dim) {
+    size_t extent = 0;
+    for (int i = 0; i < GGML_MAX_DIMS; i++) {
+        if (i != skip_dim && tensor->ne[i] > 1) {
+            extent += (size_t) (tensor->ne[i] - 1) * tensor->nb[i];
+        }
+    }
+    return extent;
+}
+
+// the view dim that holds the split axis of src, or -1
+// all other dims of src and view must stay inside one slab of that axis
+static int ggml_backend_meta_view_slab_dim(const struct ggml_tensor * view, const struct ggml_tensor * src, int axis) {
+    const size_t slab = src->nb[axis];
+    if (ggml_backend_meta_inner_extent(src, axis) >= slab) {
+        return -1;
+    }
+    for (int dim = 0; dim < GGML_MAX_DIMS; dim++) {
+        if (view->ne[dim] == src->ne[axis] && view->nb[dim] == slab) {
+            return ggml_backend_meta_inner_extent(view, dim) < slab ? dim : -1;
+        }
+    }
+    return -1;
 }
 
 static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(const struct ggml_tensor * tensor, bool assume_sync);
@@ -700,8 +787,38 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             }
             GGML_ABORT("fatal error");
         }
+        // permuted view: split the view dim that spans the src split axis, other dims must be inside one element of it or outside the span
+        if (ggml_is_permuted(tensor) && !ggml_is_permuted(tensor->src[0]) && axis >= 0 && axis < GGML_MAX_DIMS-1) {
+            const size_t nb_axis = tensor->src[0]->nb[axis];
+            const size_t nb_next = tensor->src[0]->nb[axis+1];
+            for (int dim = 0; dim < GGML_MAX_DIMS; dim++) {
+                if (tensor->ne[dim] == 1 || tensor->nb[dim] < nb_axis || tensor->nb[dim]*tensor->ne[dim] != nb_next) {
+                    continue;
+                }
+                bool others_ok = true;
+                for (int i = 0; i < GGML_MAX_DIMS; i++) {
+                    if (i == dim || tensor->ne[i] == 1) {
+                        continue;
+                    }
+                    others_ok = others_ok && (tensor->nb[i]*tensor->ne[i] <= tensor->nb[dim] || tensor->nb[i] % nb_next == 0);
+                }
+                if (others_ok) {
+                    return {ggml_backend_meta_split_axis(dim), {0}, {1}, 1};
+                }
+            }
+        }
         if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED || src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_PARTIAL) {
             return src_ss[0];
+        }
+        // a view that only regroups dims inside one slab of the split axis keeps the split,
+        // the per-device strides are only rescaled above nb[axis] (e.g. the KV streams of a permuted q)
+        if (axis >= 0 && axis < GGML_MAX_DIMS && tensor->view_offs == tensor->src[0]->view_offs) {
+            const int dim = ggml_backend_meta_view_slab_dim(tensor, tensor->src[0], axis);
+            if (dim >= 0) {
+                ggml_backend_meta_split_state ret = src_ss[0];
+                ret.axis = ggml_backend_meta_split_axis(dim);
+                return ret;
+            }
         }
         GGML_ABORT("view of permuted tensor not implemented");
         //return {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, {1}, 1};
@@ -713,8 +830,10 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             case GGML_BACKEND_SPLIT_AXIS_1:
             case GGML_BACKEND_SPLIT_AXIS_2:
             case GGML_BACKEND_SPLIT_AXIS_3: {
-                GGML_ASSERT(src_ss[0].n_segments == 1 || src_ss[0].nr[0] == 1);
-                return {ggml_backend_meta_split_axis(tensor->op_params[src_ss[0].axis]), {0}, {src_ss[0].nr[0]}, 1};
+                // keep the segments (their sizes and repeats): only the axis moves
+                ggml_backend_meta_split_state ret = src_ss[0];
+                ret.axis = ggml_backend_meta_split_axis(tensor->op_params[src_ss[0].axis]);
+                return ret;
             }
             case GGML_BACKEND_SPLIT_AXIS_MIRRORED:
             case GGML_BACKEND_SPLIT_AXIS_PARTIAL: {
@@ -731,8 +850,10 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         switch (src_ss[0].axis) {
             case GGML_BACKEND_SPLIT_AXIS_0:
             case GGML_BACKEND_SPLIT_AXIS_1: {
-                GGML_ASSERT(src_ss[0].n_segments == 1 || src_ss[0].nr[0] == 1);
-                return {ggml_backend_meta_split_axis(int(src_ss[0].axis) ^ 1), {0}, {src_ss[0].nr[0]}, 1};
+                // keep the segments (their sizes and repeats): only the axis moves
+                ggml_backend_meta_split_state ret = src_ss[0];
+                ret.axis = ggml_backend_meta_split_axis(int(src_ss[0].axis) ^ 1);
+                return ret;
             }
             case GGML_BACKEND_SPLIT_AXIS_2:
             case GGML_BACKEND_SPLIT_AXIS_3:
@@ -1000,8 +1121,13 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
                 split_state = handle_pad(src_ss);
             } break;
             case GGML_OP_PAD_REFLECT_1D:
-            case GGML_OP_ROLL:
-            case GGML_OP_ARANGE:
+            case GGML_OP_ROLL: {
+                split_state = handle_generic(src_ss, /*scalar_only =*/ true);
+            } break;
+            case GGML_OP_ARANGE: {
+                // no sources, every device computes the full range
+                split_state = {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
+            } break;
             case GGML_OP_TIMESTEP_EMBEDDING: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
             } break;
@@ -1339,6 +1465,11 @@ static enum ggml_status ggml_backend_meta_buffer_init_tensor_impl(ggml_backend_m
 static enum ggml_status ggml_backend_meta_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
     GGML_ASSERT(ggml_backend_buffer_is_meta(buffer));
     ggml_backend_meta_buffer_context * buf_ctx = (ggml_backend_meta_buffer_context *) buffer->context;
+    if (ggml_backend_meta_view_owner != nullptr) {
+        ggml_backend_meta_simple_tensor_container & stc = buf_ctx->owned_container(ggml_backend_meta_view_owner);
+        buf_ctx->owned_where[tensor] = &stc;
+        return ggml_backend_meta_buffer_init_tensor_impl(stc, tensor);
+    }
     buf_ctx->stc_compute_index = buf_ctx->stc_compute_index_next;
     return ggml_backend_meta_buffer_init_tensor_impl(buf_ctx->get_simple_tensor_container(tensor), tensor);
 }
@@ -2028,6 +2159,9 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
         }
         for (ggml_backend_buffer_t buf : used_buffers) {
             ggml_backend_meta_buffer_context * buf_ctx = (ggml_backend_meta_buffer_context *) buf->context;
+            if (!buf_ctx->owned.empty()) {
+                continue;   // owned views: kept until their owner releases them
+            }
             buf_ctx->stc_compute_index_next = buf_ctx->stc_compute_index ^ 1;
             ggml_backend_meta_simple_tensor_container & stc = buf_ctx->stc_compute[buf_ctx->stc_compute_index_next];
             for (ggml_context_ptr & ctx : stc.ctxs) {

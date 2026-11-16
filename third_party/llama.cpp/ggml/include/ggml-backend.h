@@ -416,6 +416,11 @@ extern "C" {
     // create a new meta device from "simple" devices, meta buffer type/buffer/backend is then derived from this:
     // TODO: this looks a bit strange - a backend API creates a device. I think we should try
     //       express this as a backend registry functionality instead
+    // Views of meta tensors created while an owner is set are kept per owner (one graph) until released, so that
+    // several allocated graphs can each run again (Almond's --tp); without an owner, the rotating pair as before.
+    GGML_API void ggml_backend_meta_set_view_owner(const void * owner);
+    GGML_API void ggml_backend_meta_release_views(const void * owner);
+
     GGML_API ggml_backend_dev_t ggml_backend_meta_device(
         ggml_backend_dev_t * devs, size_t n_devs, ggml_backend_meta_get_split_state_t get_split_state, void * get_split_state_ud);
 

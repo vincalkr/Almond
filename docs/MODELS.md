@@ -616,6 +616,35 @@ two-card split is by layers only, so one card waits while the other runs. With M
 same (~525 tok/s against Almond's ~555); llama.cpp's `-sm layer` prefill was faster before it stalled (2,000 tok/s
 falling to 1,080 by 88K).
 
+### Tensor parallel over the two cards (`--tp`, opt-in, 2026-11-16)
+
+`--tp` (with `--gpus 0,1`) runs the 27B on ggml's meta backend over both cards instead of a layer split: each card
+holds half of every layer's heads and FFN width, with the rules llama.cpp uses for this architecture (full attention:
+Q with its gate, K, V, the KV cache and attn_output's rows by head; DeltaNet: the q/k/v channels, gate, decay terms,
+conv window and recurrent state per key-head group, the value heads as Hv/Hk segments; FFN by its inner width; norms,
+embeddings and the head mirrored), and the meta backend adds the partial outputs after attn_output, ssm_out and
+ffn_down (two reductions a layer). What it took in Almond: the DeltaNet conv window stored time-inner
+(`[CONV_W, C]`, read and written through views, its offset part of the graph key) instead of channel-inner rows read
+with `get_rows` (that path gave wrong windows under the split); the vendored meta backend's view handling brought up
+to llama.cpp's; and per-graph view containers in the meta backend (`ggml_backend_meta_set_view_owner` /
+`release_views`), since Almond keeps several graphs allocated (trunk, MTP catch-up, MTP step) where the meta backend
+kept only the last one's views (`tools/v41/ggml/meta-tp.patch`). Disk sessions are refused under `--tp` for now.
+
+`--bench 512`, greedy, the 26-token story and the 123,595-token text, `GGML_CUDA_FA_Q8_SPLITK=1`:
+
+| two cards, tok/s | layer split, story | `--tp`, story | layer split, 123K | `--tp`, 123K |
+| --- | ---: | ---: | ---: | ---: |
+| Q8_0 | 39.60 | 42.46 | 30.41 | 45.12 (+48%) |
+| IQ3_S | 44.10 | 50.99 | 32.22 | 50.15 (+56%) |
+
+(IQ3_S on one card: 60.1 short, 44.6 at 123K; llama.cpp's `-sm tensor`: Q8_0 50.4 / 48.0, IQ3_S 63.4 short.) The
+output is the same: the IQ3_S with `--tp` gives the one-card tokens, the Q8_0 the layer split's. At 123K `--tp` is
+close to llama.cpp; at short context it is not: a profile of the Q8_0's decode has each card busy ~60% of the time,
+the reductions (128 a verify window, ~40 KB each over the x2 link) take card 0 585 ms in 3 s against 242 ms for card 1,
+and the rest is the host. HIP graphs make no difference (43.4 against 43.3 tok/s with `GGML_CUDA_DISABLE_GRAPHS=1`),
+nor does reusing the graphs; llama.cpp's newer ggml-cuda and meta backend are the likely difference, not ported here.
+Not measured yet with DSpine or through the server; the configurations do not set it.
+
 
 ### The server against the engine (2026-11-16)
 

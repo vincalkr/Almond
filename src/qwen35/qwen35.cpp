@@ -89,6 +89,7 @@ struct Opts {
     std::string model;
     std::vector<int> gpus = {0};
     int split = -1;                 // first layer of the second card (-1: by free VRAM)
+    bool tp = false;                // --tp: tensor parallel over two cards (ggml's meta backend), not a layer split
     int64_t max_ctx = 32768;
     ggml_type kv_type = GGML_TYPE_Q8_0;   // q8_0 by default (f16 with --kv f16)
     int ubatch = 1024;
@@ -190,6 +191,58 @@ ggml_tensor* need(Model& m, const std::string& name, bool req = true) {
     return t;
 }
 
+// --tp: how each tensor is laid out over the two cards (the rules llama.cpp uses for this architecture).  Each card
+// gets half of the heads: the full-attention layers' Q (with its gate), K, V, KV cache and output rows; the DeltaNet
+// layers' q/k/v channels, gate, decay terms, conv window and recurrent state, split per key-head group (the value
+// heads repeat the key heads Hv/Hk times, so v is split as Hv/Hk segments of the key width); the FFN by its inner
+// width.  The meta backend adds the partial outputs of attn_output, ssm_out and ffn_down.  Norms, embeddings, the
+// MTP block's own projections and the head are mirrored.
+ggml_backend_meta_split_state tp_split_state(const ggml_tensor* t, void* ud) {
+    const Hp& h = *(const Hp*) ud;
+    ggml_backend_meta_split_state s{};
+    s.axis = GGML_BACKEND_SPLIT_AXIS_MIRRORED;
+    s.nr[0] = 1;
+    s.n_segments = 1;
+    const std::string n = t->name;
+    auto ends = [&](const char* suf) {
+        const size_t k = std::strlen(suf);
+        return n.size() >= k && n.compare(n.size() - k, k, suf) == 0;
+    };
+    const int64_t kd = (int64_t) h.ssm_state * h.ssm_groups;   // key width
+    const uint32_t hr = (uint32_t) (h.ssm_vheads / h.ssm_groups);
+    auto split = [&](int axis, std::initializer_list<std::pair<int64_t, uint32_t>> segs) {
+        s.axis = (ggml_backend_meta_split_axis) axis;
+        s.n_segments = 0;
+        int64_t tot = 0;
+        for (auto& sg : segs) {
+            const uint32_t i = s.n_segments++;
+            s.ne[i * 2 + 0] = sg.first / 2;
+            s.ne[i * 2 + 1] = sg.first - sg.first / 2;
+            s.nr[i] = sg.second;
+            tot += sg.first * sg.second;
+        }
+        if (tot != t->ne[axis]) die("--tp: bad split of " + n);
+        return s;
+    };
+    auto whole = [&](int axis) { return split(axis, {{t->ne[axis], 1}}); };
+    if (n.rfind("blk.", 0) == 0) {
+        if (ends(".ffn_gate.weight") || ends(".ffn_up.weight")) return whole(1);
+        if (ends(".ffn_down.weight")) return whole(0);
+        if (ends(".attn_q.weight") || ends(".attn_k.weight") || ends(".attn_v.weight")) return whole(1);
+        if (ends(".attn_output.weight")) return whole(0);
+        if (ends(".attn_qkv.weight") || ends(".ssm_conv1d.weight")) return split(1, {{kd, 2 + hr}});
+        if (ends(".attn_gate.weight")) return split(1, {{kd, hr}});
+        if (ends(".ssm_out.weight")) return split(0, {{kd, hr}});
+        if (ends(".ssm_alpha.weight") || ends(".ssm_beta.weight")) return split(1, {{h.ssm_groups, hr}});
+        if (ends(".ssm_dt.bias") || ends(".ssm_a")) return split(0, {{h.ssm_groups, hr}});
+        return s;
+    }
+    if (n.rfind("cache_k_l", 0) == 0 || n.rfind("cache_v_l", 0) == 0) return whole(0);
+    if (n.rfind("cache_conv_l", 0) == 0) return split(1, {{kd, 2 + hr}});   // [CONV_W, C]
+    if (n.rfind("cache_ssm_l", 0) == 0) return split(0, {{kd * h.ssm_state, hr}});
+    return s;
+}
+
 size_t free_vram(int dev) {
     size_t fr = 0, tot = 0;
     ggml_backend_cuda_get_device_memory(dev, &fr, &tot);
@@ -243,6 +296,18 @@ void load(Model& m) {
     m.o.mtp = std::min(m.o.mtp, KSNAP - 1);
 
     // ---- backends
+    if (m.o.tp) {
+        // --tp: one meta device over the cards; the FFN matrices are split across them (gate/up by rows, down by
+        // columns, its partial sums reduced by the meta backend), everything else is mirrored
+        if (m.o.gpus.size() != 2) die("--tp takes two cards (--gpus 0,1)");
+        ggml_backend_dev_t devs[2];
+        for (int i = 0; i < 2; ++i) devs[i] = ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), m.o.gpus[i]);
+        ggml_backend_dev_t meta = ggml_backend_meta_device(devs, 2, tp_split_state, &m.hp);
+        ggml_backend_t b = ggml_backend_dev_init(meta, nullptr);
+        if (!b) die("cannot start the meta backend over the two cards");
+        m.gpu.push_back(b);
+        m.o.gpus.resize(1);
+    } else
     for (int g : m.o.gpus) {
         ggml_backend_t b = ggml_backend_cuda_init(g);
         if (!b) die("cannot start the HIP backend on card " + std::to_string(g));
@@ -346,6 +411,7 @@ void load(Model& m) {
         for (ggml_tensor* t = ggml_get_first_tensor(m.wctx[d]); t; t = ggml_get_next_tensor(m.wctx[d], t)) {
             const int64_t id = gguf_find_tensor(m.gguf, ggml_get_name(t));
             const size_t off = data_off + gguf_get_tensor_offset(m.gguf, id), n = ggml_nbytes(t);
+            if (m.o.tp && stage.size() < n) stage.resize(n);   // the meta backend sets a split tensor whole
             for (size_t done = 0; done < n;) {
                 const size_t c = std::min(stage.size(), n - done);
                 ssize_t r = ::pread(fd, stage.data(), c, (off_t) (off + done));
@@ -371,9 +437,16 @@ void load(Model& m) {
         if (l.wq) {
             l.k_cache = ggml_new_tensor_2d(c, m.o.kv_type, h.kv_dim(), ctx_n);
             l.v_cache = ggml_new_tensor_2d(c, m.o.kv_type, h.kv_dim(), ctx_n);
+            ggml_format_name(l.k_cache, "cache_k_l%d", il);   // the names --tp splits by
+            ggml_format_name(l.v_cache, "cache_v_l%d", il);
         } else {
-            l.conv = ggml_new_tensor_2d(c, GGML_TYPE_F32, h.conv_ch(), CONV_W);
+            // --tp keeps the window time-inner, [CONV_W, C] (read and written through views, as llama.cpp does,
+            // which the meta backend splits by channel); otherwise channel-inner, [C, CONV_W] (rows by get_rows)
+            l.conv = m.o.tp ? ggml_new_tensor_2d(c, GGML_TYPE_F32, CONV_W, h.conv_ch())
+                            : ggml_new_tensor_2d(c, GGML_TYPE_F32, h.conv_ch(), CONV_W);
             l.ssm = ggml_new_tensor_2d(c, GGML_TYPE_F32, h.ssm_d(), KSNAP);
+            ggml_format_name(l.conv, "cache_conv_l%d", il);
+            ggml_format_name(l.ssm, "cache_ssm_l%d", il);
         }
     }
     m.hbuf = ggml_new_tensor_2d(sctx[last], GGML_TYPE_F32, h.n_embd, m.hb_cols + 1);
@@ -604,13 +677,22 @@ ggml_tensor* gdn_block(Model& m, ggml_context* c, ggml_cgraph* gf, Layer& l, ggm
     g = ggml_mul(c, ggml_softplus(c, ggml_add(c, g, l.dt)), l.ssm_a);
     g = ggml_reshape_4d(c, g, 1, Hv, n, 1);
 
-    ggml_tensor* cst = ggml_transpose(c, ggml_get_rows(c, l.conv, in.cidx));   // [3, C]
-    ggml_tensor* cin = ggml_concat(c, cst, ggml_transpose(c, qkv), 0);          // [3+n, C]
     const int mcols = std::min(3 + n, CONV_W);
+    ggml_tensor* cin;
+    if (m.o.tp) {   // [CONV_W, C]: the 3 columns at conv_off (the graph is rebuilt every run under --tp)
+        ggml_tensor* cst = ggml_view_2d(c, l.conv, 3, C, l.conv->nb[1], (size_t) m.conv_off * sizeof(float));
+        cin = ggml_concat(c, cst, ggml_transpose(c, qkv), 0);                     // [3+n, C]
+        ggml_build_forward_expand(
+            gf, ggml_cpy(c, ggml_view_2d(c, cin, mcols, C, cin->nb[1], (size_t) (3 + n - mcols) * sizeof(float)),
+                         ggml_view_2d(c, l.conv, mcols, C, l.conv->nb[1], (size_t) (CONV_W - mcols) * sizeof(float))));
+    } else {
+    ggml_tensor* cst = ggml_transpose(c, ggml_get_rows(c, l.conv, in.cidx));   // [3, C]
+    cin = ggml_concat(c, cst, ggml_transpose(c, qkv), 0);                       // [3+n, C]
     ggml_build_forward_expand(
         gf, ggml_cpy(c, ggml_transpose(c, ggml_view_2d(c, cin, mcols, C, cin->nb[1],
                                                        (size_t) (3 + n - mcols) * sizeof(float))),
                      ggml_view_2d(c, l.conv, C, mcols, l.conv->nb[1], (size_t) (CONV_W - mcols) * l.conv->nb[1])));
+    }
     ggml_tensor* co = ggml_silu(c, ggml_ssm_conv(c, ggml_reshape_3d(c, cin, 3 + n, C, 1), l.conv1d));   // [C, n, 1]
     const size_t es = ggml_element_size(co), nb1 = es * C;
     ggml_tensor* q = ggml_view_4d(c, co, S, Hk, n, 1, es * S, nb1, nb1 * n, 0);
@@ -643,7 +725,9 @@ struct Built {
     ggml_tensor *logits = nullptr, *argmax = nullptr, *pmax = nullptr, *probs = nullptr;
     uint64_t used = 0;
     bool own_sched = true;
+    bool tp = false;
     ~Built() {
+        if (tp) ggml_backend_meta_release_views(this);
         if (ctx) ggml_free(ctx);
         if (sched && own_sched) ggml_backend_sched_free(sched);
     }
@@ -662,17 +746,23 @@ struct Graphs {
     std::pair<Built*, bool> get(Model& m, const std::string& key, int kind) {
         if (!sched[kind])
             sched[kind] = ggml_backend_sched_new(m.bk.data(), nullptr, (int) m.bk.size(), GRAPH_NODES, false, false);
-        if (live[kind] && live[kind]->key == key) return {live[kind].get(), true};
+        if (live[kind] && live[kind]->key == key && !std::getenv("ALMOND_Q35_NO_REUSE")) return {live[kind].get(), true};
         ggml_backend_sched_reset(sched[kind]);
         live[kind] = std::make_unique<Built>();
+        live[kind]->tp = tp = m.o.tp;
         live[kind]->key = key;
         live[kind]->sched = sched[kind];
         live[kind]->own_sched = false;
         return {live[kind].get(), false};
     }
     void alloc(int kind, Built* b) {
-        if (!ggml_backend_sched_alloc_graph(sched[kind], b->gf)) die("cannot allocate a graph (" + b->key + ")");
+        // --tp: the meta backend keeps this graph's views of the cards' tensors until the graph is freed (~Built)
+        if (tp) ggml_backend_meta_set_view_owner(b);
+        const bool ok = ggml_backend_sched_alloc_graph(sched[kind], b->gf);
+        if (tp) ggml_backend_meta_set_view_owner(nullptr);
+        if (!ok) die("cannot allocate a graph (" + b->key + ")");
     }
+    bool tp = false;
     void clear() {
         for (auto& l : live) l.reset();
     }
@@ -723,8 +813,8 @@ Built& trunk_graph(Model& m, Graphs& G, int n, int64_t pos0, int m_rows, int ksn
     const int n_kv = pad_kv(pos0 + n, m.o.max_ctx);
     char key[160];
     const bool inject = m.df && !want_ppl;
-    std::snprintf(key, sizeof key, "t n%d kv%d m%d k%d L%d P%d D%d I%d", n, n_kv, m_rows, ksnap, want_logits, want_ppl,
-                  inject, n_img);
+    std::snprintf(key, sizeof key, "t n%d kv%d m%d k%d L%d P%d D%d I%d C%d", n, n_kv, m_rows, ksnap, want_logits, want_ppl,
+                  inject, n_img, m.o.tp ? m.conv_off : -1);   // --tp: the conv window's offset is in the graph
     auto [bp, hit] = G.get(m, key, 0);
     Built& b = *bp;
     if (hit) return b;
@@ -1012,7 +1102,7 @@ void set_inputs(const Inputs& in, const int32_t* tok, int n, int64_t pos0, int n
     if (in.slot) {
         const int32_t sl[1] = {slot}, ci[3] = {conv_off, conv_off + 1, conv_off + 2};
         ggml_backend_tensor_set(in.slot, sl, 0, 4);
-        ggml_backend_tensor_set(in.cidx, ci, 0, 12);
+        if (in.cidx->buffer) ggml_backend_tensor_set(in.cidx, ci, 0, 12);   // not in the graph under --tp
     }
     std::vector<int32_t> pos((size_t) n * 4);
     std::vector<int64_t> idx(n);
@@ -1426,6 +1516,10 @@ struct Engine {
     }
     // the body after the header, both ways (the state goes to / comes from the live slot and conv rows)
     bool sess_body(FILE* f, const SessHead& h, bool save, uint64_t total) {
+        if (m.o.tp) {   // the split state is read in whole tensors only: no disk sessions under --tp (yet)
+            std::fprintf(stderr, "qwen35: --tp: disk sessions are not supported\n");
+            return false;
+        }
         uint64_t done = sizeof(SessHead);
         const size_t L = (size_t) h.len;
         if (!save) {
@@ -1591,8 +1685,7 @@ struct Engine {
         for (Layer& l : m.L) {
             if (!l.conv) continue;
             ggml_backend_tensor_get(l.ssm, c->ssm.data() + D * i, 0, D * 4);
-            ggml_backend_tensor_get(l.conv, c->conv.data() + (size_t) 3 * C * i, (size_t) (CONV_W - 3) * C * 4,
-                                    (size_t) 3 * C * 4);
+            conv3(l, CONV_W - 3, c->conv.data() + (size_t) 3 * C * i, false);
             ++i;
         }
         c->pend.clear();
@@ -1602,6 +1695,25 @@ struct Engine {
         }
         prof_add("ckpt_save", tp);
     }
+    // The 3 window columns from off, as [3][C] (channel-inner), out of (set false) or into (set true) a DeltaNet
+    // layer's conv window.  Under --tp the window is [CONV_W, C] and split: the whole of it goes through the host.
+    void conv3(Layer& l, int off, float* buf, bool set) {
+        const int C = m.hp.conv_ch();
+        if (!m.o.tp) {
+            if (set) ggml_backend_tensor_set(l.conv, buf, (size_t) off * C * 4, (size_t) 3 * C * 4);
+            else ggml_backend_tensor_get(l.conv, buf, (size_t) off * C * 4, (size_t) 3 * C * 4);
+            return;
+        }
+        std::vector<float> w((size_t) CONV_W * C);
+        ggml_backend_tensor_get(l.conv, w.data(), 0, w.size() * 4);
+        for (int r = 0; r < 3; ++r)
+            for (int i = 0; i < C; ++i) {
+                float& x = w[(size_t) i * CONV_W + off + r];
+                if (set) x = buf[(size_t) r * C + i];
+                else buf[(size_t) r * C + i] = x;
+            }
+        if (set) ggml_backend_tensor_set(l.conv, w.data(), 0, w.size() * 4);
+    }
     void restore_ck(Ckpt& c) {
         const int C = m.hp.conv_ch();
         const size_t D = (size_t) m.hp.ssm_d();
@@ -1609,8 +1721,7 @@ struct Engine {
         for (Layer& l : m.L) {
             if (!l.conv) continue;
             ggml_backend_tensor_set(l.ssm, c.ssm.data() + D * i, 0, D * 4);
-            ggml_backend_tensor_set(l.conv, c.conv.data() + (size_t) 3 * C * i, (size_t) (CONV_W - 3) * C * 4,
-                                    (size_t) 3 * C * 4);
+            conv3(l, CONV_W - 3, c.conv.data() + (size_t) 3 * C * i, true);
             ++i;
         }
         if (!c.pend.empty())
@@ -2320,6 +2431,7 @@ int qwen35_main(int argc, char** argv) {
                 p = q + 1;
             }
         } else if (a == "--split") o.split = std::atoi(next().c_str());
+        else if (a == "--tp") o.tp = true;
         else if (a == "--max-context") o.max_ctx = std::atoll(next().c_str());
         else if (a == "--kv") {
             const std::string k = next();
