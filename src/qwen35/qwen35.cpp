@@ -1929,7 +1929,9 @@ GenResult generate(Engine& E, int32_t first, const Sampling& s, int max_new, Emi
         const int D = m.o.mtp;
         const int R = std::max(D, m.o.dflash_n) + 2;   // catch-up rows: up to dflash_n + 1 kept, then t
         static const double alpha = 0.25;
-        static const double give_up = std::getenv("ALMOND_Q35_AUTO_GIVEUP") ? std::atof(std::getenv("ALMOND_Q35_AUTO_GIVEUP")) : 0.9;
+        // off by default: the block drafter's rate in code against MTP's on prose gave it up after its first round
+        // in every block measured, and the code went slower (docs/MODELS.md); ALMOND_Q35_AUTO_GIVEUP=0.9 brings it back
+        static const double give_up = std::getenv("ALMOND_Q35_AUTO_GIVEUP") ? std::atof(std::getenv("ALMOND_Q35_AUTO_GIVEUP")) : 0.0;
         double rate[2] = {-1.0, -1.0};                 // 0 = MTP, 1 = the block drafter
         bool gave_up = false;
         if (E.tick_tok.empty()) E.code_scan_init();
