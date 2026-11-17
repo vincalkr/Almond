@@ -16,12 +16,16 @@ Nothing is exposed: the bot asks Telegram for updates (long polling) and talks t
 
 In a chat:
   text                  a message (an answer streams by editing one message); a photo: with its caption, to a
-                        -vision model
+                        -vision model; a file: saved in the agent's directory (telegram-files/), its path to the
+                        model (a text file's content too, an image as a picture); the agent's send_file sends a
+                        file back (images as photos)
   /new                  a new conversation (the current one stays in local/chats/)
   /model [NAME]         the models, or switch (the router loads it)
   /agent [on|off]       the agent's tools: files and commands in "cwd", each write, edit and command asks with
                         buttons (Yes / No / Always); off, the model only has schedule (reminders) and its answers
   /schedule [WHEN PROMPT | stop N|all]   as the CLI's: 30m, at 9:00, at 9:00 tomorrow, every 2h; alone, the list
+  /compact [NOTE]       summarize the earlier conversation, keep the recent part (it also happens by itself at
+                        85% of the context, or when a tool result would not fit, as in the CLI)
   /stop                 stop the answer
   /status               model, agent, context, scheduled tasks
 Messages sent while it answers wait their turn.  Each chat is kept in local/chats/telegram-<chat id>.json, which
@@ -54,9 +58,16 @@ When the user asks for something later or repeatedly ("remind me in 30 minutes",
 use the schedule tool: the prompt comes back to you as a turn marked [scheduled task N] and your answer reaches the \
 user's phone; a reminder: tell the user plainly. Stop a repeating one with schedule_stop when asked."""
 
+SEND_FILE = A._tool(
+    "send_file", "Send a file from this machine to the user's Telegram chat: an image (png, jpg, webp) arrives as a "
+    "photo, anything else as a document (at most 50 MB). Use it when the user asks for a file, a chart, a log or "
+    "something you generated; the caption is a short line about it.", path={"type": "string"},
+    caption={"type": "string", "description": "a short line shown under the file", "optional": True})
+TEXT_INLINE = 200_000                           # a sent text file up to this size goes into the message itself
 TG_NOTE = """
 You are reached through Telegram: the user reads you on the phone. Keep answers short and in plain text; the user \
-approves each write, edit and command with buttons."""
+approves each write, edit and command with buttons. Files the user sends are saved in the working directory \
+(telegram-files/) and their path comes with the message; send_file sends one back to the phone."""
 
 
 def log(*a):
@@ -92,16 +103,42 @@ class Bot:
         for i, p in enumerate(parts):
             markup = {"inline_keyboard": buttons} if buttons and i == len(parts) - 1 else None
             mid = self.call("sendMessage", chat_id=chat, text=p, reply_markup=markup,
-                            disable_notification=quiet or None)["message_id"]
+                            disable_notification=quiet or None,
+                            link_preview_options={"is_disabled": True})["message_id"]
         return mid
 
     def edit(self, chat, mid, text: str, buttons=None):
         try:
             self.call("editMessageText", chat_id=chat, message_id=mid, text=text[:LIMIT] or "…",
+                      link_preview_options={"is_disabled": True},
                       reply_markup={"inline_keyboard": buttons} if buttons is not None else None)
         except RuntimeError as e:
             if "not modified" not in str(e):
                 raise
+
+    def upload(self, chat, path: Path, caption: str = "") -> None:
+        """A file to the chat: an image as a photo (Telegram's 10 MB), anything else as a document (50 MB)."""
+        data = path.read_bytes()
+        photo = path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp") and len(data) <= 10 * 2**20
+        method, field = ("sendPhoto", "photo") if photo else ("sendDocument", "document")
+        boundary = "almond" + os.urandom(12).hex()
+        parts = []
+        for k, v in (("chat_id", str(chat)), ("caption", caption[:1000])):
+            if v:
+                parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode())
+        name = path.name.replace('"', "")
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; filename="{name}"\r\n'
+                     f"Content-Type: application/octet-stream\r\n\r\n".encode() + data + b"\r\n")
+        body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+        req = urllib.request.Request(self.url + method, data=body,
+                                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                out = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            out = json.loads(e.read() or b"{}")
+        if not out.get("ok"):
+            raise RuntimeError(f"{method}: {out.get('description')}")
 
     def download(self, file_id: str) -> bytes:
         path = self.call("getFile", file_id=file_id)["file_path"]
@@ -152,6 +189,20 @@ class TgAgent(A.Agent):
         self.chat.bot.send(self.chat.id, A.todo_text(A.TODO, color=False), quiet=True)
         return out
 
+    def tools(self) -> list:
+        return super().tools() + [SEND_FILE]
+
+    def t_send_file(self, path, caption=""):
+        p = self.path(path)
+        if not self.inside(p) and not self.allow("send_file", f"send {p} (outside {self.root})", True):
+            return "denied by the user"
+        if not p.is_file():
+            return f"error: {p} is not a file"
+        if p.stat().st_size > 50 * 2**20:
+            return f"error: {p.stat().st_size} bytes, over Telegram's 50 MB for a bot"
+        self.chat.bot.upload(self.chat.id, p, caption or "")
+        return f"sent {p.name} ({p.stat().st_size} bytes) to the user's chat"
+
     def t_schedule(self, when, prompt):
         return self.chat.schedule_tool(when, prompt)
 
@@ -162,6 +213,10 @@ class TgAgent(A.Agent):
 class Chat:
     """One Telegram chat: its conversation, model, agent, scheduled tasks, and a worker that takes its messages one
     at a time."""
+    # the CLI's context arithmetic, as it is (they read messages, model, ctx_used and wire())
+    est_tokens, token_rate = A.Chat.est_tokens, A.Chat.token_rate
+    _chars = staticmethod(A.Chat._chars)
+    should_compact, tail_start = A.Chat.should_compact, A.Chat.tail_start
 
     def __init__(self, bot: Bot, cid: int, conf: dict, models: list):
         self.bot, self.id, self.conf = bot, cid, conf
@@ -228,6 +283,8 @@ class Chat:
                         self.turn(v)
                 elif kind == "photo":
                     self.turn(v[0], images=[v[1]])
+                elif kind == "document":
+                    self.document(*v)
             except Exception as e:              # one bad turn must not end the chat's worker
                 log(f"chat {self.id}: {e}\n{traceback.format_exc()}")
                 try:
@@ -262,6 +319,35 @@ class Chat:
         w[0].set()
         return True
 
+    def document(self, doc: dict, caption: str):
+        """A file sent to the chat: saved in the working directory's telegram-files/, then a turn with its path; a
+        text file's content goes in the message too, an image goes to the model as a picture."""
+        name = Path(doc.get("file_name") or f"file-{doc.get('file_unique_id', 'x')}").name
+        if (doc.get("file_size") or 0) > 20 * 2**20:
+            self.bot.send(self.id, f"{name}: over 20 MB, the most a bot can download from Telegram")
+            return
+        data = self.bot.download(doc["file_id"])
+        d = (self.agent.root if self.agent else self.cwd()) / "telegram-files"
+        d.mkdir(parents=True, exist_ok=True)
+        dest = d / name
+        if dest.exists():
+            dest = d / f"{dest.stem}-{time.strftime('%Y%m%d-%H%M%S')}{dest.suffix}"
+        dest.write_bytes(data)
+        mime = doc.get("mime_type") or ""
+        note = f"[The user sent a file, saved as {dest} ({len(data)} bytes{', ' + mime if mime else ''})]"
+        images = []
+        if mime.startswith("image/") or dest.suffix.lower() in A.IMAGE_TYPES:
+            images = ["data:" + (mime or A.IMAGE_TYPES.get(dest.suffix.lower(), "image/png")) + ";base64,"
+                      + base64.b64encode(data).decode()]
+        elif len(data) <= TEXT_INLINE:
+            try:
+                note += f"\n[Its content]\n{data.decode('utf-8')}\n[End of the file]"
+            except UnicodeDecodeError:
+                pass
+        if not self.agent and not images and "[Its content]" not in note:
+            note += " (the agent is off: /agent on lets the model open it)"
+        self.turn((caption + "\n" if caption else "") + note, images=images or None)
+
     # ---- a turn
     def tools(self) -> list:
         if self.agent:
@@ -279,6 +365,8 @@ class Chat:
     def turn(self, text: str, images=None):
         content = [{"type": "text", "text": text}] + [{"type": "image_url", "image_url": {"url": u}} for u in images] \
             if images else text
+        if self.messages and self.should_compact(self.est_tokens([{"role": "user", "content": content}])):
+            self.compact("the conversation fills the context, before a new user turn")
         self.messages.append({"role": "user", "content": content})
         tools = self.agent or TgAgent(self)       # no agent: a bare one only for schedule / schedule_stop
         for _ in range(A.AGENT_STEPS):
@@ -303,6 +391,8 @@ class Chat:
                 else:
                     out = tools.run(c)
                 results.append({"role": "tool", "tool_call_id": c["id"], "content": out})
+            if self.should_compact(self.est_tokens(results), hard=True):
+                self.compact("a tool result does not leave room for the answer")
             self.messages += results
         self.save()
 
@@ -357,8 +447,11 @@ class Chat:
                 self.bot.edit(self.id, mid, parts[0])
                 for p in parts[1:]:
                     self.bot.send(self.id, p)
-        elif mid is not None:
-            self.bot.edit(self.id, mid, "…")
+        elif mid is not None:                   # only thinking, then a tool call: the placeholder goes
+            try:
+                self.bot.call("deleteMessage", chat_id=self.id, message_id=mid)
+            except RuntimeError:
+                self.bot.edit(self.id, mid, "…")
         msg = {"role": "assistant", "content": "".join(content)}
         if reasoning:
             msg["reasoning_content"] = "".join(reasoning)
@@ -371,6 +464,48 @@ class Chat:
             u = end["usage"]
             self.ctx_used = (u.get("prompt_tokens") or 0) + (u.get("completion_tokens") or 0)
         return calls
+
+    def compact(self, reason: str = "") -> bool:
+        """As the CLI's /compact: the model's summary of the conversation, then the summary plus the recent tail; the
+        full history kept in local/chats/compacted/.  The phone gets a line before and after."""
+        if len(self.messages) < 2:
+            self.bot.send(self.id, "nothing to compact")
+            return False
+        before, used, tail = len(self.messages), self.ctx_used, self.tail_start()
+        mid = self.bot.send(self.id, f"🗜 compacting the conversation ({reason}) …", quiet=True)
+        hist = self.wire()
+        if hist and hist[-1].get("tool_calls"):   # a call still waiting for its results: in the tail, not summarized
+            hist = hist[:-1]
+        body = {"model": self.model["id"], "stream": True, "tools": self.tools(), "max_tokens": A.COMPACT_SUMMARY_MAX,
+                "messages": hist + [{"role": "user", "content": A.COMPACT_PROMPT + (f"\n\nWhy now: {reason}" if reason else "")}]}
+        summary, t0 = [], time.time()
+        try:
+            for kind, v in self.api.stream(body):
+                if kind == "content":
+                    summary.append(v)
+                elif kind == "tool":
+                    break
+        except (RuntimeError, OSError, A.http.client.HTTPException) as e:
+            self.bot.edit(self.id, mid, f"🗜 compaction failed: {e}; the conversation is as it was")
+            return False
+        text = "".join(summary).strip()
+        if not text:
+            self.bot.edit(self.id, mid, "🗜 compaction: the summary was empty; the conversation is as it was")
+            return False
+        rate = self.token_rate()
+        self.save()
+        keep = A.CHATS / "compacted"
+        keep.mkdir(parents=True, exist_ok=True)
+        if self.file.exists():
+            (keep / f"{self.file.stem}-{time.strftime('%Y%m%d-%H%M%S')}.json").write_text(
+                self.file.read_text(encoding="utf-8"), encoding="utf-8")
+        extra = ("\n[Your task list so far:\n" + A.todo_text(A.TODO, color=False) + "]") if A.TODO and self.agent else ""
+        self.messages = [{"role": "user", "content": A.COMPACT_HEAD + text + A.COMPACT_TAIL + extra}] + self.messages[tail:]
+        self.ctx_used = self.est_tokens(self.wire(), rate)
+        self.save()
+        self.bot.edit(self.id, mid, f"🗜 compacted in {time.time() - t0:.0f} s: {before} messages, ~{used} tokens → "
+                                    f"the summary + {before - tail} recent messages, ~{self.ctx_used} tokens")
+        return True
 
     # ---- schedule (the tools and /schedule)
     def schedule_tool(self, when, prompt):
@@ -432,6 +567,8 @@ class Chat:
                     send(sched_line(self.sched, self.sched.add(arg)))
                 except ValueError as e:
                     send(f"{e}\n/schedule 30m PROMPT · at 9:00 PROMPT · at 9:00 tomorrow PROMPT · every 2h PROMPT")
+        elif cmd == "compact":
+            self.compact(arg or "asked by the user")
         elif cmd == "stop":
             send("nothing to stop")             # (a running answer is stopped from the poller: see Bridge)
         elif cmd == "status":
@@ -526,7 +663,9 @@ class Bridge:
         if c.waiting and c.waiting[3] and text and not text.startswith("/"):
             c.answer(text)                      # a typed answer to ask_user
             return
-        if m.get("photo"):
+        if m.get("document"):
+            c.inbox.put(("document", (m["document"], text)))
+        elif m.get("photo"):
             data = self.bot.download(m["photo"][-1]["file_id"])
             url = "data:image/jpeg;base64," + base64.b64encode(data).decode()
             c.inbox.put(("photo", (text or "What is in this image?", url)))

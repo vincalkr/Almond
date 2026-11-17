@@ -268,9 +268,14 @@ The command line goes over the file: `./almond telegram -m qwen27 --agent --yes`
 loads the model before the bot starts, and stops with the router's reason if it does not load.
 
 In the chat an answer streams by editing one message; messages sent meanwhile wait their turn; a photo goes with its
-caption to a `-vision` model. `/new`, `/model [NAME]`, `/agent on|off` (the agent's tools: each write, edit and command
+caption to a `-vision` model. A file sent to the chat (at most 20 MB, Telegram's limit for a bot) is saved in the
+agent's directory under `telegram-files/` and its path goes to the model, a text file's content too and an image as a
+picture; the agent's `send_file` tool sends a file back (png / jpg / webp as a photo, the rest as a document, at most
+50 MB). `/new`, `/model [NAME]`, `/agent on|off` (the agent's tools: each write, edit and command
 asks with Yes / No / Always buttons; off, the model only has `schedule` / `schedule_stop`), `/schedule` as in the CLI
-(a reminder reaches the phone), `/stop`, `/status`, `/help`. Each chat is kept in `local/chats/telegram-<chat id>.json`,
+(a reminder reaches the phone), `/compact [NOTE]`, `/stop`, `/status`, `/help`. The conversation is compacted
+by itself as in the CLI (at 85% of the context, or when a tool result would not fit), with a line on the phone before
+and after; checked against a stub model: 60 messages at 91% of an 8K context became the summary and the last 2. Each chat is kept in `local/chats/telegram-<chat id>.json`,
 which `./almond -c telegram-<chat id>` resumes on the terminal. Not here: `free_gpu` and background jobs (they need
 the terminal). Checked against a fake Bot API and a stub model (streaming, the queue, a stranger ignored, a schedule
 firing, a command approved with the button); not yet with a real bot.
