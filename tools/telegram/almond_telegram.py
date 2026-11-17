@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 import traceback
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -447,7 +448,11 @@ def sched_line(s, t) -> str:
 
 
 def pick(models: list, name: str | None, strict=False):
+    """A model by the CLI's names (qwen27, glm, deepseek, ... : almond_cli's Chat.find), else by its id's start."""
     if name:
+        m = A.Chat.find(SimpleNamespace(models=models), name)
+        if m:
+            return m
         n = name.lower()
         hits = [m for m in models if m["id"].lower() == n] or [m for m in models if m["id"].lower().startswith(n)] \
             or [m for m in models if n in m["id"].lower()]
