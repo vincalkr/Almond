@@ -264,6 +264,9 @@ The keys:
 | `url` | the router | `http://127.0.0.1:8150` |
 | `api_key` | only for a router started with `--api-key` | none |
 
+The command line goes over the file: `./almond telegram -m qwen27 --agent --yes` (also `--cwd DIR`, `--web`); `-m`
+loads the model before the bot starts, and stops with the router's reason if it does not load.
+
 In the chat an answer streams by editing one message; messages sent meanwhile wait their turn; a photo goes with its
 caption to a `-vision` model. `/new`, `/model [NAME]`, `/agent on|off` (the agent's tools: each write, edit and command
 asks with Yes / No / Always buttons; off, the model only has `schedule` / `schedule_stop`), `/schedule` as in the CLI

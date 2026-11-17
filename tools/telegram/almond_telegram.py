@@ -205,7 +205,7 @@ class Chat:
 
     def set_agent(self, on: bool, cwd: str | None = None):
         if on:
-            self.agent = TgAgent(self, web=bool(self.conf.get("web")))
+            self.agent = TgAgent(self, yes=bool(self.conf.get("yes")), web=bool(self.conf.get("web")))
             self.agent.root = Path(cwd).resolve() if cwd and Path(cwd).is_dir() else self.cwd()
         else:
             self.agent = None
@@ -532,14 +532,27 @@ class Bridge:
 
 
 def main() -> int:
-    if sys.argv[1:2] in (["-h"], ["--help"]):
-        print(__doc__)
-        return 0
+    import argparse
+    ap = argparse.ArgumentParser(prog="./almond telegram", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-m", "--model", help="the model to start with (over local/telegram.json's \"model\")")
+    ap.add_argument("--agent", action="store_true", help="the agent's tools on from the start")
+    ap.add_argument("--yes", action="store_true",
+                    help="with --agent: no buttons before a write, an edit or a command (a path outside cwd still asks)")
+    ap.add_argument("--cwd", help="the agent's directory (default: \"cwd\" in the file, else the home)")
+    ap.add_argument("--web", action="store_true", help="web_search / web_fetch for the agent")
+    a = ap.parse_args()
     try:
         conf = json.loads(CONF.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         print(f"almond telegram: {CONF}: {e}\n\n{__doc__}", file=sys.stderr)
         return 1
+    for k, v in (("model", a.model), ("cwd", a.cwd)):
+        if v:
+            conf[k] = v
+    for k in ("agent", "yes", "web"):
+        if getattr(a, k):
+            conf[k] = True
     if not conf.get("token"):
         print(f"almond telegram: no \"token\" in {CONF}", file=sys.stderr)
         return 1
@@ -549,6 +562,22 @@ def main() -> int:
             print(f"almond telegram: nothing answers at {conf['url']}", file=sys.stderr)
             return 1
         A.start_router(api, api.port)
+    if conf.get("model"):                       # the chosen model loaded now, not at the first message
+        models = api.get("/v1/models").get("data") or []
+        m = pick(models, conf["model"], strict=True)
+        if not m:
+            print(f"almond telegram: no model {conf['model']!r}; there are: " + ", ".join(x["id"] for x in models),
+                  file=sys.stderr)
+            return 1
+        conf["model"] = m["id"]
+        if (m.get("status") or {}).get("value") != "loaded":
+            log(f"loading {m['id']} ...")
+            try:
+                api.post("/models/load", {"model": m["id"]})
+            except RuntimeError as e:
+                print(f"almond telegram: {m['id']} did not load: {e} (local/router.log)", file=sys.stderr)
+                return 1
+            log(f"{m['id']} loaded")
     A.JOBS.enabled = False                      # background jobs need the terminal's chat: they run in the foreground
     try:
         Bridge(conf).run()
