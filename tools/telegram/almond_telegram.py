@@ -139,7 +139,12 @@ def tool_html(name: str, brief: str, state: str | None, out: str = "", secs: flo
         quote = f"\n<blockquote expandable>{html.escape(tail[-3000:])}</blockquote>" if tail else ""
     else:
         quote = ""
-    cmd = f"\n<pre>{html.escape(brief[:1500])}</pre>" if brief else ""
+    blines = brief.splitlines()
+    if len(blines) > 6:                         # a long script: its start, the whole in an expandable quote
+        cmd = (f"\n<pre>{html.escape(chr(10).join(blines[:4]))}</pre><i>+{len(blines) - 4} lines</i>"
+               f"\n<blockquote expandable><code>{html.escape(brief[:2500])}</code></blockquote>")
+    else:
+        cmd = f"\n<pre>{html.escape(brief[:1500])}</pre>" if brief else ""
     return f"⚙ <b>{html.escape(name)}</b> {state}{cmd}{quote}"
 
 
