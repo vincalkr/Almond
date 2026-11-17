@@ -194,6 +194,10 @@ instead.
 - `/image FILE` (png, jpg, webp, gif, bmp), or `/image` alone for the clipboard's image (`wl-paste` or `xclip`): sent
   with the next message, to a model with images on (the `-vision` configurations). Checked with
   `local/qwen27-local-vision.json`: a 175 KB png and a three-line pasted question, answered at 55 tok/s.
+- `/schedule 10m PROMPT` (or `in 1h30m`, `at 14:30`, `every 2h`): a prompt sent as a new turn later, for this
+  session only (nothing on disk). A due task waits for the prompt, never cuts into an answer, and what you were
+  typing stays; a missed `every` run is not repeated. `/schedule` alone lists them, `/schedule stop N|all` stops
+  them.
 
 Through the API the level is `reasoning_effort`, `reasoning.effort` (OpenAI) or `output_config.effort` / `thinking`
 (Anthropic). DeepSeek's goes into its prompt (`Reasoning Effort: N`), with no cap on the thinking, as DeepSeek's API

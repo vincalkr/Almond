@@ -41,6 +41,10 @@ Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium / xhigh).  In the convers
   /jobs [stop N]     the agent's background commands (run_command with background): each one's state; stop N stops
                      one.  When one ends its exit code and last lines go to the model: with the next tool result
                      while it works, as a new turn while the prompt waits (what you were typing stays)
+  /schedule [10m|in 1h30m|at 14:30|every 2h] PROMPT
+                     a prompt sent as a new turn later (DUR: 90s, 10m, 1h30m, 2d; a bare number is minutes; at:
+                     today, or tomorrow if past); it waits for the prompt, never cuts into an answer, and what you
+                     were typing stays.  /schedule alone: the list; /schedule stop N|all.  This session only
 
 On a terminal the last line is a status bar: the prompt's reading, the answer's speed, idle the last request's numbers.
 
@@ -282,7 +286,8 @@ COMMANDS = [    # (name, arguments, what it does): /help's order, Tab's suggesti
     ("cd", "DIR", "the agent's working directory"), ("hide", "", "hide the thinking"), ("show", "", "show the thinking"),
     ("status", "", "model, context, thinking, sampling, agent, conversation"), ("ctx", "", "the context in use"),
     ("stats", "", "the server's monitor"), ("forget", "", "clear the engine's conversation cache"),
-    ("jobs", "[stop N]", "the agent's background commands"), ("todo", "[clear]", "the agent's task list"),
+    ("jobs", "[stop N]", "the agent's background commands"),
+    ("schedule", "[DUR|at HH:MM|every DUR] PROMPT", "a prompt sent later (stop N|all; alone: the list)"), ("todo", "[clear]", "the agent's task list"),
     ("compact", "[NOTE]", "summarize the earlier conversation, keep the recent part"),
     ("export", "[FILE]", "the conversation as Markdown"), ("help", "", "the commands"), ("quit", "", "leave"),
 ]
@@ -825,6 +830,126 @@ class Jobs:
 
 
 JOBS = Jobs()
+
+
+def parse_duration(s: str) -> float:
+    """'90s', '10m', '1h30m', '2d', '45' (minutes) -> seconds; ValueError otherwise."""
+    if re.fullmatch(r"\d+(\.\d+)?", s):
+        return float(s) * 60
+    parts = re.findall(r"(\d+(?:\.\d+)?)([smhd])", s)
+    if not parts or "".join(a + b for a, b in parts) != s:
+        raise ValueError(f"{s}: not a duration (90s, 10m, 1h30m, 2d)")
+    return sum(float(a) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[b] for a, b in parts)
+
+
+class Schedule:
+    """/schedule's tasks, for this chat session only (nothing on disk): a prompt sent as a new turn once at a time,
+    after a delay, or every interval.  A due task waits for the prompt (it never cuts into an answer); notify wakes
+    the prompt as a job's end does."""
+
+    def __init__(self):
+        self.lock, self.tasks, self.next, self.notify = threading.Lock(), {}, 1, None
+        self.timer = None
+
+    def add(self, spec: str) -> dict:
+        """spec: 'in DUR PROMPT' / 'DUR PROMPT', 'at HH:MM PROMPT', 'every DUR PROMPT'."""
+        word, _, rest = spec.partition(" ")
+        every = None
+        if word == "every":
+            d, _, prompt = rest.strip().partition(" ")
+            every = parse_duration(d)
+            if every < 10:
+                raise ValueError("every: at least 10s")
+            t = time.time() + every
+        elif word == "at":
+            hm, _, prompt = rest.strip().partition(" ")
+            try:
+                h, m = (int(x) for x in hm.split(":"))
+                if not (0 <= h < 24 and 0 <= m < 60):
+                    raise ValueError
+                lt = time.localtime()
+                t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, h, m, 0, 0, 0, -1))
+            except (ValueError, OverflowError):
+                raise ValueError(f"{hm}: not a time (HH:MM)")
+            if t <= time.time():
+                t += 86400                      # tomorrow
+        else:
+            if word == "in":
+                word, _, rest = rest.strip().partition(" ")
+            t, prompt = time.time() + parse_duration(word), rest
+        prompt = prompt.strip()
+        if not prompt:
+            raise ValueError("no prompt")
+        with self.lock:
+            n, self.next = self.next, self.next + 1
+            task = {"id": n, "prompt": prompt, "at": t, "every": every, "runs": 0}
+            self.tasks[n] = task
+        self._arm()
+        return task
+
+    def stop(self, arg: str) -> list:
+        with self.lock:
+            ids = list(self.tasks) if arg in ("all", "") else [int(x) for x in arg.split() if x.isdigit()]
+            gone = [self.tasks.pop(i) for i in ids if i in self.tasks]
+        self._arm()
+        return gone
+
+    def due(self) -> list:
+        """The tasks whose time has come (an 'every' one moves to its next time; a missed run is not repeated)."""
+        now, out = time.time(), []
+        with self.lock:
+            for task in sorted(self.tasks.values(), key=lambda x: x["at"]):
+                if task["at"] <= now:
+                    out.append(task)
+                    task["runs"] += 1
+                    if task["every"]:
+                        while task["at"] <= now:
+                            task["at"] += task["every"]
+                    else:
+                        del self.tasks[task["id"]]
+        if out:
+            self._arm()
+        return out
+
+    def has_due(self) -> bool:
+        with self.lock:
+            return any(x["at"] <= time.time() for x in self.tasks.values())
+
+    def _arm(self):
+        """One timer for the earliest task; it calls notify when that one is due."""
+        with self.lock:
+            if self.timer:
+                self.timer.cancel()
+            self.timer = None
+            if self.tasks:
+                wait = max(0.0, min(x["at"] for x in self.tasks.values()) - time.time())
+                self.timer = threading.Timer(wait + 0.05, self._fire)
+                self.timer.daemon = True
+                self.timer.start()
+
+    def _fire(self):
+        if self.notify:
+            self.notify()
+
+    def text(self) -> str:
+        if not self.tasks:
+            return f"{DIM}no scheduled tasks{RESET}"
+        lines = []
+        for task in sorted(self.tasks.values(), key=lambda x: x["at"]):
+            when = time.strftime("%H:%M:%S" if task["at"] - time.time() < 86400 else "%a %H:%M", time.localtime(task["at"]))
+            rep = f", every {fmt_secs(task['every'])}, {task['runs']} runs" if task["every"] else ""
+            p = task["prompt"].replace("\n", " ")
+            lines.append(f"  {task['id']:>2}  {when}{rep}  {DIM}{p[:70] + ('…' if len(p) > 70 else '')}{RESET}")
+        return "\n".join(lines)
+
+
+def fmt_secs(s: float) -> str:
+    s = int(s)
+    return "".join(f"{v}{u}" for v, u in ((s // 86400, "d"), (s % 86400 // 3600, "h"), (s % 3600 // 60, "m"), (s % 60, "s"))
+                   if v) or "0s"
+
+
+SCHEDULE = Schedule()
 
 
 class JobsDone(Exception):
@@ -1863,6 +1988,21 @@ class Chat:
             mods = ((self.model or {}).get("architecture") or {}).get("input_modalities")
             note = f" ({self.model['id']} takes no images: switch to a vision model)" if mods and "image" not in mods else ""
             say(f"{DIM}{what}: sent with your next message{RESET}{RED}{note}{RESET}")
+        elif cmd == "schedule":
+            if not arg:
+                say(SCHEDULE.text())
+            elif arg.split()[0] == "stop":
+                gone = SCHEDULE.stop(arg[4:].strip())
+                say(f"{DIM}stopped: {', '.join(str(x['id']) for x in gone) or 'none'}{RESET}")
+            else:
+                try:
+                    t = SCHEDULE.add(arg)
+                except ValueError as e:
+                    say(f"{RED}{e}{RESET}  {DIM}/schedule 10m PROMPT, /schedule at 14:30 PROMPT, "
+                        f"/schedule every 1h PROMPT{RESET}")
+                    return True
+                say(f"{DIM}task {t['id']}: {time.strftime('%a %H:%M:%S', time.localtime(t['at']))}"
+                    + (f", then every {fmt_secs(t['every'])}" if t["every"] else "") + RESET)
         elif cmd == "todo":
             if arg == "clear":
                 TODO.clear()
@@ -2054,6 +2194,7 @@ class Chat:
         signal.signal(signal.SIGUSR1, wake_handler)     # a job's end wakes the prompt
         JOBS.notify = lambda: WAKE["armed"] and os.kill(os.getpid(), signal.SIGUSR1)
         JOBS.enabled = True
+        SCHEDULE.notify = JOBS.notify
         self.bar.start()
         try:
             self.talk()
@@ -2086,6 +2227,12 @@ class Chat:
 
     def talk(self):
         while True:
+            due = SCHEDULE.due()
+            if due:                             # due while the model answered or the prompt waited: a turn each
+                for t in due:
+                    say(f"{DIM}scheduled task {t['id']}: {t['prompt'].splitlines()[0][:80]}{RESET}")
+                    self.ask(t["prompt"])
+                continue
             if self.agent and JOBS.has_done():  # ended while the model answered (no tool result to carry it): a turn
                 notes = JOBS.notes()
                 if notes:
@@ -2096,7 +2243,7 @@ class Chat:
             try:
                 if TTY:                         # a rule between the turns
                     say(f"\n{GRAY}{'─' * term_width()}{RESET}")
-                line = read_input(PROMPT, self.prefill, wake=bool(self.agent))
+                line = read_input(PROMPT, self.prefill, wake=bool(self.agent) or bool(SCHEDULE.tasks))
                 self.prefill = ""
             except JobsDone as e:               # what was typed comes back after the turn
                 self.prefill = e.buf or self.prefill
@@ -2299,7 +2446,7 @@ def read_input(prompt: str, prefill: str = "", wake: bool = False) -> str:
     hist = readline.get_current_history_length() if readline else 0
     try:
         WAKE["armed"] = wake
-        if wake and JOBS.has_done():            # ended before the prompt was armed: no signal came for it
+        if wake and (JOBS.has_done() or SCHEDULE.has_due()):            # ended before the prompt was armed: no signal came for it
             WAKE["armed"] = False
             raise JobsDone(prefill)
         try:
