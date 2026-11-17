@@ -122,6 +122,27 @@ def _md_inline(t: str) -> str:
     return re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], t)
 
 
+def tool_html(name: str, brief: str, state: str | None, out: str = "", secs: float = 0.0) -> str:
+    """A tool's message: its name, the command or path in monospace, then the state while it runs, or ✅ / ❌ with
+    the time and the output's last lines in an expandable quote."""
+    import html
+    import re
+    if state is None:
+        code = re.search(r"\[exit code (-?\d+)\]\s*$", out or "")
+        bad = (code and code.group(1) != "0") or (out or "").startswith(("error", "denied")) or "[timed out" in (out or "")
+        state = f"{'❌' if bad else '✅'} {secs:.1f} s" + (f" · exit {code.group(1)}" if code and code.group(1) != "0" else "")
+        body = re.sub(r"\n?\[exit code -?\d+\]\s*$", "", out or "").strip()
+        lines = body.splitlines()
+        tail = "\n".join(lines[-15:])
+        if len(lines) > 15:
+            tail = f"… ({len(lines) - 15} lines before)\n" + tail
+        quote = f"\n<blockquote expandable>{html.escape(tail[-3000:])}</blockquote>" if tail else ""
+    else:
+        quote = ""
+    cmd = f"\n<pre>{html.escape(brief[:1500])}</pre>" if brief else ""
+    return f"⚙ <b>{html.escape(name)}</b> {state}{cmd}{quote}"
+
+
 def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
 
@@ -179,6 +200,27 @@ class Bot:
                     return
                 if not formatted:
                     raise
+
+    def send_html(self, chat, text: str, quiet=False) -> int | None:
+        """Our own HTML (tool lines); plain text if Telegram refuses it."""
+        try:
+            return self.call("sendMessage", chat_id=chat, text=text[:LIMIT], parse_mode="HTML",
+                             disable_notification=quiet or None, link_preview_options={"is_disabled": True})["message_id"]
+        except RuntimeError:
+            import re
+            return self.send(chat, re.sub(r"<[^>]+>", "", text), quiet=quiet)
+
+    def edit_html(self, chat, mid, text: str):
+        try:
+            self.call("editMessageText", chat_id=chat, message_id=mid, text=text[:LIMIT], parse_mode="HTML",
+                      link_preview_options={"is_disabled": True})
+        except RuntimeError as e:
+            if "not modified" not in str(e):
+                import re
+                try:
+                    self.edit(chat, mid, re.sub(r"<[^>]+>", "", text))
+                except RuntimeError:
+                    pass
 
     def upload(self, chat, path: Path, caption: str = "") -> None:
         """A file to the chat: an image as a photo (Telegram's 10 MB), anything else as a document (50 MB)."""
@@ -448,12 +490,16 @@ class Chat:
                     args = {}
                 brief = str(args.get("command") or args.get("path") or args.get("query") or args.get("url")
                             or args.get("when") or args.get("id") or "")
-                if c["name"] not in ("todo_write", "ask_user", "schedule"):   # (they show themselves)
-                    self.bot.send(self.id, f"⚙ {c['name']} {brief}"[:LIMIT], quiet=True)
+                shown = c["name"] not in ("todo_write", "ask_user", "schedule")   # (they show themselves)
+                tmid, t0 = None, time.time()
+                if shown:
+                    tmid = self.bot.send_html(self.id, tool_html(c["name"], brief, "⏳ running…"), quiet=True)
                 if not self.agent and c["name"] not in ("schedule", "schedule_stop"):
                     out = f"error: no tool {c['name']} (the agent is off: /agent on)"
                 else:
                     out = tools.run(c)
+                if tmid:
+                    self.bot.edit_html(self.id, tmid, tool_html(c["name"], brief, None, out, time.time() - t0))
                 results.append({"role": "tool", "tool_call_id": c["id"], "content": out})
             if self.should_compact(self.est_tokens(results), hard=True):
                 self.compact("a tool result does not leave room for the answer")
@@ -464,7 +510,7 @@ class Chat:
         """One answer streamed into one message (edited as it grows); its tool calls, None on an error."""
         body = {"model": self.model["id"], "stream": True, "messages": self.wire(), "tools": self.tools()}
         content, reasoning, calls, end = [], [], {}, None
-        mid, last, shown, self.stopped = None, 0.0, "", False
+        mid, last, shown, self.stopped, t0 = None, 0.0, "", False, time.time()
         try:
             self.bot.call("sendChatAction", chat_id=self.id, action="typing")
         except RuntimeError:
@@ -490,9 +536,10 @@ class Chat:
                 elif kind == "end":
                     end = v
                 now = time.time()
-                if now - last >= EDIT_EVERY:
-                    text = "".join(content).strip()
-                    view = (text[-LIMIT:] if text else ("💭 thinking…" if reasoning else "")) + " ▍"
+                text = "".join(content).strip()
+                # the answer: its text with a ▍ while it grows; only thinking so far: how long, every few seconds
+                if now - last >= (EDIT_EVERY if text else 3.0):
+                    view = text[-LIMIT:] + " ▍" if text else (f"💭 thinking… {now - t0:.0f} s" if reasoning else "")
                     if view.strip(" ▍") and view != shown:
                         if mid is None:
                             mid = self.bot.send(self.id, view)

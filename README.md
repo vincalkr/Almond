@@ -275,7 +275,9 @@ In the chat:
 - The commands are in the chat's `/` menu, and the model knows them too: `/new`, `/model [NAME]`, `/agent on|off`,
   `/schedule` (as in the CLI), `/compact [NOTE]`, `/stop`, `/status`, `/help`.
 - `/agent on`: the agent's tools in its directory; each write, edit and command asks with Yes / No / Always buttons
-  (`--yes`: they do not), its questions come with buttons too. Off, the model has only `schedule` / `schedule_stop`,
+  (`--yes`: they do not), its questions come with buttons too. Each tool call is one message: the command or path in monospace,
+  `⏳ running…` while it runs, then ✅ or ❌ with the time (and the exit code when not 0) and the output's last 15
+  lines in an expandable quote. Off, the model has only `schedule` / `schedule_stop`,
   so "remind me in 30 minutes" works anyway and the reminder reaches the phone.
 - Images and files: a photo goes with its caption to a `-vision` model. A file (at most 20 MB, Telegram's limit for a
   bot) is saved in the agent's directory under `telegram-files/` and its path goes to the model, a text file's
