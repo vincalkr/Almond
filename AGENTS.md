@@ -19,6 +19,8 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   of them
   behind one address.
   Never expose a server beyond `127.0.0.1` without `--api-key`. `./stop.sh` stops this folder's server.
+  `./almond telegram` the same chat on a Telegram bot (`tools/telegram/almond_telegram.py`, long polling, token and
+  allowed user ids in `local/telegram.json`, which git ignores).
 - DeepSeek: `local/ds41-local.json` on cards 0 and 1 (`--gpu 0` / `--gpu 1`: `local/ds41-local-1gpu.json`); with the
   image encoder in `models/vision-1017`, the `-vision` configurations (the pack lacks the image routing bias, which
   `DS41_VL_BIAS` adds from `local/rco-iq2xxs-meta/vl-bias.gguf`). The pack (`models/rco-iq2xxs`, four shards, 138.2

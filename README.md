@@ -223,6 +223,22 @@ instead.
   1,500 one of two runs ended with no answer; an ordinary question (count the .py files) used run_command, not
   free_gpu, 2 of 2.
 
+### Telegram
+
+`./almond telegram` puts the chat on a Telegram bot, for the phone (`tools/telegram/almond_telegram.py`). It asks
+Telegram for updates and talks to the router on `127.0.0.1`: nothing is exposed. Setup: a bot from @BotFather, then
+`local/telegram.json` (kept out of git) with `{"token": "...", "allowed_users": [YOUR_ID]}`; with `allowed_users`
+empty the bot only answers each sender with their id, with ids in it everyone else is ignored. Optional: `"model"`,
+`"agent": true`, `"cwd"` (the agent's directory, default the home), `"web": true`.
+
+In the chat an answer streams by editing one message; messages sent meanwhile wait their turn; a photo goes with its
+caption to a `-vision` model. `/new`, `/model [NAME]`, `/agent on|off` (the agent's tools: each write, edit and command
+asks with Yes / No / Always buttons; off, the model only has `schedule` / `schedule_stop`), `/schedule` as in the CLI
+(a reminder reaches the phone), `/stop`, `/status`, `/help`. Each chat is kept in `local/chats/telegram-<chat id>.json`,
+which `./almond -c telegram-<chat id>` resumes on the terminal. Not here: `free_gpu` and background jobs (they need
+the terminal). Checked against a fake Bot API and a stub model (streaming, the queue, a stranger ignored, a schedule
+firing, a command approved with the button); not yet with a real bot.
+
 Through the API the level is `reasoning_effort`, `reasoning.effort` (OpenAI) or `output_config.effort` / `thinking`
 (Anthropic). DeepSeek's goes into its prompt (`Reasoning Effort: N`), with no cap on the thinking, as DeepSeek's API
 (a request's `reasoning_budget_tokens` sets one). Thinking that loops is caught (`serve/loop_guard.py`) and closed so

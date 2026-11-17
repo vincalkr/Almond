@@ -2924,6 +2924,11 @@ def main() -> int:
             print(launch.__doc__)
             return 0
         return launch.serve(sys.argv[2:])
+    if sys.argv[1:2] == ["telegram"]:         # the Telegram bot (tools/telegram/almond_telegram.py)
+        sys.argv = [sys.argv[0]] + sys.argv[2:]
+        sys.path.insert(0, str(ROOT / "tools" / "telegram"))
+        import almond_telegram
+        return almond_telegram.main()
     if sys.argv[1:2] == ["stop"]:
         os.execv(str(ROOT / "stop.sh"), [str(ROOT / "stop.sh"), *sys.argv[2:]])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
