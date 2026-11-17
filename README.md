@@ -194,10 +194,27 @@ instead.
 - `/image FILE` (png, jpg, webp, gif, bmp), or `/image` alone for the clipboard's image (`wl-paste` or `xclip`): sent
   with the next message, to a model with images on (the `-vision` configurations). Checked with
   `local/qwen27-local-vision.json`: a 175 KB png and a three-line pasted question, answered at 55 tok/s.
+- `/free [COMMAND]`: the model unloaded through the router (its cards and RAM free), COMMAND run on the terminal
+  (`/free` alone waits for Enter, for work elsewhere), then the same model loaded again and the chat goes on. The agent
+  has the same with `run_command`'s `free_gpu` (it asks even with `--yes`; no timeout, Ctrl+C stops it). The conversation
+  stays in the CLI; the engine's copy of it is gone from the cards and RAM, so the next turn resumes from the
+  conversation disk where the configuration has one (`conversation_dir`, `--conversation-disk`,
+  `ALMOND_GLM_SLOT_DIR`), else the prompt is read again. Checked with `local/qwen27-local.json` on card 0
+  (2026-11-17): card 0 from 84% VRAM to 0% during the command, unloaded in 1 s and loaded again in 2 s (the model in
+  the page cache), and the next turn of a 10,770-token conversation reused 10,748 tokens from the conversation disk
+  (1.3 s, against 12.0 s for its first read). Asked through the agent prompt and tools (Qwen3.8-27B, 3 runs each),
+  "launch python train.py, a training on both GPUs" after reading the file called run_command with free_gpu 3 of 3.
 - `/schedule 10m PROMPT` (or `in 1h30m`, `at 14:30`, `every 2h`): a prompt sent as a new turn later, for this
   session only (nothing on disk). A due task waits for the prompt, never cuts into an answer, and what you were
   typing stays; a missed `every` run is not repeated. `/schedule` alone lists them, `/schedule stop N|all` stops
   them.
+  The agent has the same through its `schedule` and `schedule_stop` tools ("remind me in 30 minutes", "every 2 hours
+  check ..."): it writes the prompt to itself, and the turn comes back marked `[scheduled task N, HH:MM]`.
+  Qwen3.8-27B through the agent prompt (2026-11-17): "remind me to call Marco in 30 minutes" and "every 2 hours check
+  the free disk space" called schedule 2 of 2 each (`30m`, `every 2h`; the second also ran `df -h` first); "tomorrow at
+  9 remind me of the meeting" 3 of 3 with 4,000 tokens of room (`at 9:00 tomorrow`, `tomorrow at 9:00`), while with
+  1,500 one of two runs ended with no answer; an ordinary question (count the .py files) used run_command, not
+  free_gpu, 2 of 2.
 
 Through the API the level is `reasoning_effort`, `reasoning.effort` (OpenAI) or `output_config.effort` / `thinking`
 (Anthropic). DeepSeek's goes into its prompt (`Reasoning Effort: N`), with no cap on the thinking, as DeepSeek's API
