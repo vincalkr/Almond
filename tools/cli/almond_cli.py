@@ -19,7 +19,8 @@ Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium / xhigh).  In the convers
 
   /help  /quit  /models  /model NAME  /think [LEVEL]  /nothink  /read FILE  /system TEXT  /ctx  /status
   /image [FILE]      an image sent with the next message (no FILE: the clipboard's), to a -vision model
-  /new               a new conversation (the current one is saved first; /clear is the same)
+  /new               clear the screen and start a new conversation (the current one is saved first)
+  /clear             clear the screen only: the conversation and its context go on
   /save [NAME]  /sessions  /load N|NAME  /rename NAME  /delete N|NAME
                      the conversations saved in local/chats/ (on /new and on leaving too); ./almond -c resumes the
                      last one, and a conversation the engine still keeps is not read again
@@ -286,7 +287,8 @@ LOGO = launch.LOGO   # the header, the same at a server's start
 HISTORY = Path.home() / ".almond_history"
 CHATS = ROOT / "local" / "chats"
 COMMANDS = [    # (name, arguments, what it does): /help's order, Tab's suggestions
-    ("new", "", "a new conversation (the current one is saved)"), ("clear", "", "the same as /new"),
+    ("new", "", "clear the screen, a new conversation (the current one is saved)"),
+    ("clear", "", "clear the screen (the conversation goes on)"),
     ("save", "[NAME]", "save the conversation"), ("sessions", "", "the saved conversations"),
     ("load", "N|NAME", "resume a saved conversation"), ("rename", "NAME", "rename this conversation"),
     ("delete", "N|NAME", "a saved conversation to the trash"),
@@ -2160,6 +2162,16 @@ class Chat:
             + (f", agent in {os.getcwd()}" if self.agent else "") + ". /help for the commands.")
         say(f"{DIM}sampling: {self.sampling_text()}{RESET}")
 
+    def clear_screen(self):
+        """The screen and its scrollback emptied, the cursor at the top, the status bar drawn again."""
+        if not TTY:
+            return
+        sys.stdout.write("\x1b[r\x1b[H\x1b[2J\x1b[3J")
+        sys.stdout.flush()
+        if self.bar.on:
+            self.bar.h = 0
+            self.bar.region()
+
     def sampling_text(self) -> str:
         """The sampling a request gets: this chat's /set values over the model's defaults."""
         d = self.defaults()
@@ -2215,13 +2227,21 @@ class Chat:
                 say(f"{DIM}thinking {self.level_text()}{RESET}")
             elif self.set_level(arg):
                 say(f"{DIM}thinking {self.level_text()}{RESET}")
-        elif cmd in ("new", "clear"):
-            if self.messages:
-                say(f"{DIM}saved as {self.save()}{RESET}")
+        elif cmd == "clear":                    # the screen only: the conversation stays
+            self.clear_screen()
+            n = sum(1 for m in self.messages if m.get("role") == "user")
+            say(f"{DIM}screen cleared; the conversation goes on ({n} turn{'s' if n != 1 else ''}, "
+                f"context {_f(self.ctx_used)} / {_f(self.model.get('max_context'))}; /new starts a new one){RESET}")
+        elif cmd == "new":
+            saved = self.save() if self.messages else None
             self.messages, self.ctx_used, self.name = [], 0, None
+            self.pending, self.images = "", []
             TODO.clear()
             self.date = time.strftime("%Y-%m-%d")
-            say(f"{DIM}a new conversation{RESET}")
+            self.clear_screen()
+            say(f"{CYAN}{BOLD}{LOGO}{RESET}")
+            self.banner()
+            say(f"{DIM}a new conversation" + (f" (the last one saved as {saved})" if saved else "") + RESET)
         elif cmd == "save":
             say(f"{DIM}saved as {self.save(arg or None)}{RESET}" if self.messages else f"{DIM}nothing to save{RESET}")
         elif cmd == "sessions":

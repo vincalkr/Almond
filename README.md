@@ -172,7 +172,8 @@ instead.
   tool, this session); `--yes` asks only for paths outside, which always ask. Without `--system` the agent gets a
   short English system prompt (`AGENT_PROMPT` in `tools/cli/almond_cli.py`): the machine and directory, how to use the
   tools, and to report figures as the tools printed them.
-- Conversations: `/new` (the current one saved first), `/save [NAME]`, `/sessions`, `/load N|NAME`, `/rename`,
+- Conversations: `/new` (the screen cleared, the current one saved first; `/clear` clears only the screen and the
+  conversation goes on), `/save [NAME]`, `/sessions`, `/load N|NAME`, `/rename`,
   `/delete` (to the trash); they live in `local/chats/`, leaving saves too, `./almond -c` resumes the last one
   (`./almond -m qwen27 -c` that model's last, `./almond -c NAME` a given one); `./almond --chats [-m MODEL]` lists
   them from the shell without starting anything.
