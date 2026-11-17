@@ -41,6 +41,10 @@ Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium / xhigh).  In the convers
   /jobs [stop N]     the agent's background commands (run_command with background): each one's state; stop N stops
                      one.  When one ends its exit code and last lines go to the model: with the next tool result
                      while it works, as a new turn while the prompt waits (what you were typing stays)
+  /queue [clear|drop N]
+                     what you type while the model answers does not mix into the answer: it shows on the status bar,
+                     and each Enter queues a message (a pasted block is one), sent in order when the turn ends
+                     (a / command too); a line left unfinished comes back on the prompt
   /free [COMMAND]    unload the model (its GPUs and RAM free), run COMMAND in the working directory on this terminal
                      (alone: until Enter, for work in another terminal), load the same model again; through the
                      router only.  The agent does the same with run_command's free_gpu, which asks even with --yes
@@ -69,6 +73,12 @@ import subprocess
 import sys
 import threading
 import time
+import codecs
+import select
+try:
+    import termios
+except ImportError:                             # (not on Windows: no type-ahead there)
+    termios = None
 from pathlib import Path
 from html.parser import HTMLParser
 from urllib.parse import quote_plus, unquote, urlencode, urljoin, urlsplit, parse_qs
@@ -291,6 +301,7 @@ COMMANDS = [    # (name, arguments, what it does): /help's order, Tab's suggesti
     ("status", "", "model, context, thinking, sampling, agent, conversation"), ("ctx", "", "the context in use"),
     ("stats", "", "the server's monitor"), ("forget", "", "clear the engine's conversation cache"),
     ("jobs", "[stop N]", "the agent's background commands"),
+    ("queue", "[clear|drop N]", "the messages typed during an answer, sent when it ends"),
     ("free", "[COMMAND]", "unload the model, run COMMAND (alone: until Enter), load it again"),
     ("schedule", "[DUR|at HH:MM|every DUR] PROMPT", "a prompt sent later (stop N|all; alone: the list)"), ("todo", "[clear]", "the agent's task list"),
     ("compact", "[NOTE]", "summarize the earlier conversation, keep the recent part"),
@@ -484,8 +495,9 @@ class Bar:
             self.depth += 1
             try:
                 h, w = self.rows()
-                line = self.text[:w - 1]
-                sys.stdout.write(f"\x1b7\x1b[{h};1H\x1b[2K{DIM}{line}{RESET}\x1b8")
+                pre_p, pre_c = TYPEAHEAD.status()
+                line = self.text[:max(0, w - 1 - len(pre_p))]
+                sys.stdout.write(f"\x1b7\x1b[{h};1H\x1b[2K{pre_c}{DIM}{line}{RESET}\x1b8")
                 sys.stdout.flush()
             finally:
                 self.depth -= 1
@@ -759,6 +771,114 @@ def todo_from(messages: list) -> list:
                 except (ValueError, AttributeError):
                     pass
     return []
+
+
+class TypeAhead:
+    """What you type while the model answers: the terminal stops echoing it into the answer (no canonical mode, no
+    echo; Ctrl+C still stops), a thread reads the keys, the line you are writing and the messages waiting show on the
+    status bar, and each Enter queues a message; the chat sends them in order when the turn ends (/queue).  A block
+    pasted in one go is one message.  Only while an answer streams: a tool's y / n / a reads the terminal as before."""
+
+    def __init__(self):
+        self.lock, self.queue, self.buf = threading.Lock(), [], ""
+        self.on, self.stop_ev, self.thread, self.saved, self.redraw = False, None, None, None, None
+
+    def start(self, redraw=None):
+        if not (TTY and termios and sys.stdin.isatty()):
+            return
+        fd = sys.stdin.fileno()
+        try:
+            self.saved = termios.tcgetattr(fd)
+            new = termios.tcgetattr(fd)
+            new[3] &= ~(termios.ICANON | termios.ECHO)      # lflag; ISIG stays: Ctrl+C
+            new[6][termios.VMIN], new[6][termios.VTIME] = 1, 0
+            termios.tcsetattr(fd, termios.TCSANOW, new)
+        except termios.error:
+            self.saved = None
+            return
+        self.on, self.redraw, self.stop_ev = True, redraw, threading.Event()
+        self.thread = threading.Thread(target=self._loop, args=(fd, self.stop_ev), daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        if not self.on:
+            return
+        self.stop_ev.set()
+        self.thread.join(1)
+        try:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, self.saved)
+        except termios.error:
+            pass
+        self.on = False
+
+    def _loop(self, fd, ev):
+        dec = codecs.getincrementaldecoder("utf-8")("replace")
+        while not ev.is_set():
+            try:
+                r, _, _ = select.select([fd], [], [], 0.1)
+                if not r or ev.is_set():
+                    continue
+                data = os.read(fd, 4096)
+            except (OSError, ValueError):
+                return
+            if data:
+                self.feed(dec.decode(data))
+
+    def feed(self, text: str):
+        """Keys as they come: text, Backspace, Ctrl+U / Ctrl+W, Enter; escape sequences (arrows) dropped."""
+        text = re.sub(r"\x1b\[[0-9;?]*[@-~]|\x1bO.|\x1b.?", "", text).replace("\r\n", "\n").replace("\r", "\n")
+        pasted = text.strip("\n").count("\n") >= 1   # several lines in one read: a paste, one message
+        with self.lock:
+            if pasted:
+                body, _, rest = text.rpartition("\n") if not text.endswith("\n") else (text.rstrip("\n"), "", "")
+                msg = (self.buf + body).strip("\n")
+                if msg.strip():
+                    self.queue.append(msg)
+                self.buf = rest
+            else:
+                for ch in text:
+                    if ch == "\n":
+                        if self.buf.strip():
+                            self.queue.append(self.buf)
+                        self.buf = ""
+                    elif ch in ("\x7f", "\x08"):
+                        self.buf = self.buf[:-1]
+                    elif ch == "\x15":                 # Ctrl+U
+                        self.buf = ""
+                    elif ch == "\x17":                 # Ctrl+W
+                        self.buf = re.sub(r"\S*\s*$", "", self.buf)
+                    elif ch >= " " or ch == "\t":
+                        self.buf += ch
+        if self.redraw:
+            self.redraw()
+
+    def status(self) -> tuple[str, str]:
+        """(plain, colored) for the status bar's start: the messages waiting and the line being written."""
+        with self.lock:
+            n, buf = len(self.queue), self.buf
+        if not n and not buf and not self.on:
+            return "", ""
+        parts_p, parts_c = [], []
+        if n:
+            parts_p.append(f"{n} queued")
+            parts_c.append(f"{YELLOW}{n} queued{RESET}")
+        if self.on:
+            tail = buf[-40:] if len(buf) > 40 else buf
+            parts_p.append(f"› {tail}▏")
+            parts_c.append(f"{CYAN}›{RESET} {tail}{CYAN}▏{RESET}")
+        return " ".join(parts_p) + "  │ ", " ".join(parts_c) + f"  {GRAY}│{RESET} "
+
+    def pop(self) -> str | None:
+        with self.lock:
+            return self.queue.pop(0) if self.queue else None
+
+    def take_buf(self) -> str:
+        with self.lock:
+            b, self.buf = self.buf, ""
+            return b
+
+
+TYPEAHEAD = TypeAhead()
 
 
 class Jobs:
@@ -1780,6 +1900,7 @@ class Chat:
         bar.run(self.model["id"], self.ctx_used)
         if pretty:
             out.write("\n")
+            TYPEAHEAD.start(bar.draw)
         try:
             for kind, v in self.api.stream(body):
                 if kind in ("reasoning", "content") and first is None:
@@ -1827,10 +1948,13 @@ class Chat:
                 out.write(f"{RESET}\n{DIM}[stopped]{RESET}\n")
             end, self.stopped, calls = {"finish": "stopped"}, True, {}
         except (RuntimeError, OSError, http.client.HTTPException) as e:
+            TYPEAHEAD.stop()
             bar.done()
             end_blocks()
             say(f"{RESET}{RED}error: {e}{RESET}")
             return None
+        finally:
+            TYPEAHEAD.stop()
         bar.done()
         if pretty:
             end_blocks()
@@ -2222,6 +2346,21 @@ class Chat:
                 return True
             if arg:
                 say(f"{DIM}exit code {rc}{RESET}")
+        elif cmd == "queue":
+            if arg == "clear":
+                with TYPEAHEAD.lock:
+                    n, TYPEAHEAD.queue[:] = len(TYPEAHEAD.queue), []
+                say(f"  {GRAY}{n} queued message{'s' if n != 1 else ''} dropped{RESET}")
+            elif arg.startswith("drop"):
+                with TYPEAHEAD.lock:
+                    ids = sorted({int(x) for x in arg[4:].split() if x.isdigit()}, reverse=True)
+                    gone = [TYPEAHEAD.queue.pop(i - 1) for i in ids if 0 < i <= len(TYPEAHEAD.queue)]
+                say(f"  {GRAY}dropped {len(gone)}{RESET}")
+            with TYPEAHEAD.lock:
+                q = list(TYPEAHEAD.queue)
+            if not arg:
+                say("\n".join(f"  {GRAY}{i}{RESET}  {' '.join(x.split())[:term_width() - 8]}" for i, x in enumerate(q, 1))
+                    if q else f"  {GRAY}nothing queued{RESET}  {DIM}(type while the model answers: Enter queues a message){RESET}")
         elif cmd == "schedule":
             if not arg:
                 say(SCHEDULE.text())
@@ -2462,6 +2601,21 @@ class Chat:
 
     def talk(self):
         while True:
+            if not self.prefill and TYPEAHEAD.buf:      # a line left half-written during the answer: back on the prompt
+                self.prefill = TYPEAHEAD.take_buf()
+            queued = TYPEAHEAD.pop()
+            if queued is not None:              # typed during the answer: sent now, in order
+                first, more = queued.split("\n", 1)[0], "\n" in queued
+                say(f"\n{YELLOW}›{RESET} {first}" + (f" {DIM}(+{queued.count(chr(10))} lines){RESET}" if more else "")
+                    + (f"  {DIM}({len(TYPEAHEAD.queue)} more queued){RESET}" if TYPEAHEAD.queue else ""))
+                if queued.startswith("/") and not more:
+                    if not self.command(queued.strip()):
+                        break
+                else:
+                    text, self.pending = self.pending + queued, ""
+                    imgs, self.images = self.images, []
+                    self.ask(text, images=imgs)
+                continue
             due = SCHEDULE.due()
             if due:                             # due while the model answered or the prompt waited: a turn each
                 for t in due:

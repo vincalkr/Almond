@@ -194,6 +194,12 @@ instead.
 - `/image FILE` (png, jpg, webp, gif, bmp), or `/image` alone for the clipboard's image (`wl-paste` or `xclip`): sent
   with the next message, to a model with images on (the `-vision` configurations). Checked with
   `local/qwen27-local-vision.json`: a 175 KB png and a three-line pasted question, answered at 55 tok/s.
+- Type while the model answers: the keys do not mix into the answer, the line being written and the messages waiting
+  show on the status bar, each Enter queues a message (a block pasted in one go is one), and they go in order when
+  the turn ends, a `/` command too; a line left unfinished comes back on the prompt. `/queue` lists them, `/queue
+  clear` or `/queue drop N` drops them. Only while an answer streams: a tool's y / n / a reads the terminal as before.
+  Checked in a pty against a stub server: two messages typed during an answer went in order, the third half-written
+  came back on the prompt.
 - `/free [COMMAND]`: the model unloaded through the router (its cards and RAM free), COMMAND run on the terminal
   (`/free` alone waits for Enter, for work elsewhere), then the same model loaded again and the chat goes on. The agent
   has the same with `run_command`'s `free_gpu` (it asks even with `--yes`; no timeout, Ctrl+C stops it). The conversation
