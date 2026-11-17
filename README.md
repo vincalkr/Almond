@@ -226,10 +226,43 @@ instead.
 ### Telegram
 
 `./almond telegram` puts the chat on a Telegram bot, for the phone (`tools/telegram/almond_telegram.py`). It asks
-Telegram for updates and talks to the router on `127.0.0.1`: nothing is exposed. Setup: a bot from @BotFather, then
-`local/telegram.json` (kept out of git) with `{"token": "...", "allowed_users": [YOUR_ID]}`; with `allowed_users`
-empty the bot only answers each sender with their id, with ids in it everyone else is ignored. Optional: `"model"`,
-`"agent": true`, `"cwd"` (the agent's directory, default the home), `"web": true`.
+Telegram for updates and talks to the router on `127.0.0.1`: nothing is exposed.
+
+Setup:
+
+1. In Telegram, @BotFather, `/newbot`: a name (anything, shown on top of the chat) and a username (unique, ending in
+   `bot`, e.g. `almond_yourname_bot`); it gives the token.
+2. `local/telegram.json` (kept out of git) with the token and an empty list:
+   `{"token": "123456789:AAH...", "allowed_users": []}`
+3. `./almond telegram`, write anything to the bot: with the list empty it only answers with your Telegram id.
+4. Put the id in the list, `"allowed_users": [111222333]`, and start it again: from then on everyone else is ignored
+   (logged only).
+
+The keys:
+
+```json
+{
+  "token": "123456789:AAH...",
+  "allowed_users": [111222333],
+  "model": "qwen27",
+  "agent": false,
+  "cwd": "~/projects",
+  "web": false,
+  "url": "http://127.0.0.1:8150",
+  "api_key": ""
+}
+```
+
+| key | what | default |
+|---|---|---|
+| `token` | the bot's token from @BotFather (required) | - |
+| `allowed_users` | the Telegram user ids it answers | empty: it answers only with the sender's id |
+| `model` | the model to start with, as `-m` (`glm`, `qwen27`, `deepseek`, ...) | the loaded one, else the router's default |
+| `agent` | `true`: the agent's tools on from the start | `false` (`/agent on` in the chat) |
+| `cwd` | the agent's working directory | the home |
+| `web` | `true`: web_search / web_fetch for the agent | `false` |
+| `url` | the router | `http://127.0.0.1:8150` |
+| `api_key` | only for a router started with `--api-key` | none |
 
 In the chat an answer streams by editing one message; messages sent meanwhile wait their turn; a photo goes with its
 caption to a `-vision` model. `/new`, `/model [NAME]`, `/agent on|off` (the agent's tools: each write, edit and command
