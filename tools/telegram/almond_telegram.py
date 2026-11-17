@@ -53,10 +53,12 @@ LIMIT = 4000                                    # Telegram's 4096 per message, w
 EDIT_EVERY = 1.2                                # seconds between the edits of a streaming answer (Telegram's limits)
 
 CHAT_PROMPT = """You are a helpful assistant the user reaches through Telegram, from the phone. Answer in the \
-user's language, briefly; plain text (no Markdown tables). Date: {date}.
+user's language, briefly; simple Markdown is shown formatted (bold, italic, `code`, lists, links), no tables. \
+Date: {date}.
 When the user asks for something later or repeatedly ("remind me in 30 minutes", "every morning at 8 tell me ..."), \
 use the schedule tool: the prompt comes back to you as a turn marked [scheduled task N] and your answer reaches the \
-user's phone; a reminder: tell the user plainly. Stop a repeating one with schedule_stop when asked."""
+user's phone; a reminder: tell the user plainly. Stop a repeating one with schedule_stop when asked. Your tools now: \
+schedule and schedule_stop only (/agent on gives you files and commands)."""
 
 SEND_FILE = A._tool(
     "send_file", "Send a file from this machine to the user's Telegram chat: an image (png, jpg, webp) arrives as a "
@@ -65,9 +67,59 @@ SEND_FILE = A._tool(
     caption={"type": "string", "description": "a short line shown under the file", "optional": True})
 TEXT_INLINE = 200_000                           # a sent text file up to this size goes into the message itself
 TG_NOTE = """
-You are reached through Telegram: the user reads you on the phone. Keep answers short and in plain text; the user \
+You are reached through Telegram: the user reads you on the phone. Keep answers short; simple Markdown is shown \
+formatted (bold, italic, `code`, code blocks, lists, links), no tables; the user \
 approves each write, edit and command with buttons. Files the user sends are saved in the working directory \
 (telegram-files/) and their path comes with the message; send_file sends one back to the phone."""
+
+
+COMMANDS = [("new", "a new conversation"), ("model", "the models, or switch: /model NAME"),
+            ("agent", "the agent's tools: /agent on|off"), ("schedule", "reminders and tasks: /schedule 30m PROMPT"),
+            ("compact", "summarize the earlier conversation"), ("stop", "stop the answer"),
+            ("status", "model, agent, context, scheduled tasks"), ("help", "the commands")]
+COMMANDS_NOTE = ("\nThe user's own commands in this chat (typed by the user, not tools of yours): "
+                 + ", ".join(f"/{c} ({w})" for c, w in COMMANDS) + ".")
+
+
+def md_html(text: str) -> str:
+    """The model's Markdown as Telegram's HTML: code blocks, `code`, **bold**, *italic* / _italic_, [links](url),
+    # headings (bold), - bullets (•); the rest escaped.  A table stays as text in a code block."""
+    import html
+    import re
+    out, pos = [], 0
+    for m in re.finditer(r"```[^\n]*\n(.*?)```", text, re.S):     # fenced blocks first: nothing inside is touched
+        out.append(_md_inline(text[pos:m.start()]))
+        out.append("<pre>" + html.escape(m.group(1).rstrip("\n")) + "</pre>")
+        pos = m.end()
+    out.append(_md_inline(text[pos:]))
+    return "".join(out)
+
+
+def _md_inline(t: str) -> str:
+    import html
+    import re
+    codes = []
+
+    def keep(m):
+        codes.append("<code>" + html.escape(m.group(1)) + "</code>")
+        return f"\x00{len(codes) - 1}\x00"
+    t = re.sub(r"`([^`\n]+)`", keep, t)
+    lines = []
+    for line in t.split("\n"):
+        if re.match(r"^\s*\|.*\|\s*$", line):             # a table row: monospaced
+            lines.append("<code>" + html.escape(line) + "</code>")
+            continue
+        line = html.escape(line, quote=False)
+        line = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", line)
+        line = re.sub(r"^(\s*)[-*]\s+", r"\1• ", line)
+        line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+        line = re.sub(r"__(.+?)__", r"<b>\1</b>", line)
+        line = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<i>\1</i>", line)
+        line = re.sub(r"(?<![\w_])_(?!\s)(.+?)(?<!\s)_(?![\w_])", r"<i>\1</i>", line)
+        line = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', line)
+        lines.append(line)
+    t = "\n".join(lines)
+    return re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], t)
 
 
 def log(*a):
@@ -96,25 +148,37 @@ class Bot:
             raise RuntimeError(f"{method}: {out.get('description')}")
         return out.get("result")
 
-    def send(self, chat, text: str, buttons=None, quiet=False) -> int | None:
-        """text in as many messages as it takes; the last one's id (the buttons go on it)."""
+    def send(self, chat, text: str, buttons=None, quiet=False, md=False) -> int | None:
+        """text in as many messages as it takes; the last one's id (the buttons go on it).  md: the model's Markdown
+        shown formatted (Telegram's HTML; plain text again if Telegram refuses it)."""
         mid = None
         parts = split(text or "…")
         for i, p in enumerate(parts):
             markup = {"inline_keyboard": buttons} if buttons and i == len(parts) - 1 else None
-            mid = self.call("sendMessage", chat_id=chat, text=p, reply_markup=markup,
-                            disable_notification=quiet or None,
-                            link_preview_options={"is_disabled": True})["message_id"]
+            kw = dict(chat_id=chat, reply_markup=markup, disable_notification=quiet or None,
+                      link_preview_options={"is_disabled": True})
+            try:
+                mid = self.call("sendMessage", text=md_html(p) if md else p, parse_mode="HTML" if md else None,
+                                **kw)["message_id"]
+            except RuntimeError:
+                if not md:
+                    raise
+                mid = self.call("sendMessage", text=p, **kw)["message_id"]
         return mid
 
-    def edit(self, chat, mid, text: str, buttons=None):
-        try:
-            self.call("editMessageText", chat_id=chat, message_id=mid, text=text[:LIMIT] or "…",
-                      link_preview_options={"is_disabled": True},
-                      reply_markup={"inline_keyboard": buttons} if buttons is not None else None)
-        except RuntimeError as e:
-            if "not modified" not in str(e):
-                raise
+    def edit(self, chat, mid, text: str, buttons=None, md=False):
+        kw = dict(chat_id=chat, message_id=mid, link_preview_options={"is_disabled": True},
+                  reply_markup={"inline_keyboard": buttons} if buttons is not None else None)
+        for formatted in ((True, False) if md else (False,)):
+            try:
+                self.call("editMessageText", text=(md_html(text) if formatted else text)[:LIMIT] or "…",
+                          parse_mode="HTML" if formatted else None, **kw)
+                return
+            except RuntimeError as e:
+                if "not modified" in str(e):
+                    return
+                if not formatted:
+                    raise
 
     def upload(self, chat, path: Path, caption: str = "") -> None:
         """A file to the chat: an image as a photo (Telegram's 10 MB), anything else as a document (50 MB)."""
@@ -357,9 +421,9 @@ class Chat:
     def wire(self) -> list:
         if self.agent:
             text = (A.AGENT_PROMPT.format(os=A.agent_os(), cwd=self.agent.root, date=self.date)
-                    + (A.AGENT_WEB_PROMPT if self.agent.web else "") + TG_NOTE)
+                    + (A.AGENT_WEB_PROMPT if self.agent.web else "") + TG_NOTE + COMMANDS_NOTE)
         else:
-            text = CHAT_PROMPT.format(date=self.date)
+            text = CHAT_PROMPT.format(date=self.date) + COMMANDS_NOTE
         return [{"role": "system", "content": text}] + [dict(m) for m in self.messages]
 
     def turn(self, text: str, images=None):
@@ -442,11 +506,11 @@ class Chat:
         if text:
             parts = split(text)
             if mid is None:
-                self.bot.send(self.id, text)
+                self.bot.send(self.id, text, md=True)
             else:
-                self.bot.edit(self.id, mid, parts[0])
+                self.bot.edit(self.id, mid, parts[0], md=True)
                 for p in parts[1:]:
-                    self.bot.send(self.id, p)
+                    self.bot.send(self.id, p, md=True)
         elif mid is not None:                   # only thinking, then a tool call: the placeholder goes
             try:
                 self.bot.call("deleteMessage", chat_id=self.id, message_id=mid)
@@ -615,6 +679,10 @@ class Bridge:
 
     def run(self):
         me = self.bot.call("getMe")
+        try:                                    # the / menu in the chat
+            self.bot.call("setMyCommands", commands=[{"command": c, "description": w} for c, w in COMMANDS])
+        except RuntimeError as e:
+            log(f"setMyCommands: {e}")
         log(f"@{me.get('username')} ready; allowed users: {sorted(self.allowed) or 'none yet (answers with the id)'}")
         offset = None
         while True:

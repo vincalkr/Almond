@@ -267,18 +267,30 @@ The keys:
 The command line goes over the file: `./almond telegram -m qwen27 --agent --yes` (also `--cwd DIR`, `--web`); `-m`
 loads the model before the bot starts, and stops with the router's reason if it does not load.
 
-In the chat an answer streams by editing one message; messages sent meanwhile wait their turn; a photo goes with its
-caption to a `-vision` model. A file sent to the chat (at most 20 MB, Telegram's limit for a bot) is saved in the
-agent's directory under `telegram-files/` and its path goes to the model, a text file's content too and an image as a
-picture; the agent's `send_file` tool sends a file back (png / jpg / webp as a photo, the rest as a document, at most
-50 MB). `/new`, `/model [NAME]`, `/agent on|off` (the agent's tools: each write, edit and command
-asks with Yes / No / Always buttons; off, the model only has `schedule` / `schedule_stop`), `/schedule` as in the CLI
-(a reminder reaches the phone), `/compact [NOTE]`, `/stop`, `/status`, `/help`. The conversation is compacted
-by itself as in the CLI (at 85% of the context, or when a tool result would not fit), with a line on the phone before
-and after; checked against a stub model: 60 messages at 91% of an 8K context became the summary and the last 2. Each chat is kept in `local/chats/telegram-<chat id>.json`,
-which `./almond -c telegram-<chat id>` resumes on the terminal. Not here: `free_gpu` and background jobs (they need
-the terminal). Checked against a fake Bot API and a stub model (streaming, the queue, a stranger ignored, a schedule
-firing, a command approved with the button); not yet with a real bot.
+In the chat:
+
+- An answer streams by editing one message: plain while it streams, then the model's Markdown shown formatted (bold,
+  italic, code, code blocks, lists, links; plain text again if Telegram refuses it). Messages sent meanwhile wait
+  their turn.
+- The commands are in the chat's `/` menu, and the model knows them too: `/new`, `/model [NAME]`, `/agent on|off`,
+  `/schedule` (as in the CLI), `/compact [NOTE]`, `/stop`, `/status`, `/help`.
+- `/agent on`: the agent's tools in its directory; each write, edit and command asks with Yes / No / Always buttons
+  (`--yes`: they do not), its questions come with buttons too. Off, the model has only `schedule` / `schedule_stop`,
+  so "remind me in 30 minutes" works anyway and the reminder reaches the phone.
+- Images and files: a photo goes with its caption to a `-vision` model. A file (at most 20 MB, Telegram's limit for a
+  bot) is saved in the agent's directory under `telegram-files/` and its path goes to the model, a text file's
+  content too and an image as a picture. The agent's `send_file` sends a file back: png / jpg / webp as a photo, the
+  rest as a document, at most 50 MB.
+- The conversation is compacted by itself as in the CLI (at 85% of the context, or when a tool result would not fit),
+  with a line on the phone before and after.
+- Each chat is kept in `local/chats/telegram-<chat id>.json`, which `./almond -c telegram-<chat id>` resumes on the
+  terminal.
+- Not here: `free_gpu` and background jobs (they need the terminal).
+
+Checked against a fake Bot API and a stub model: streaming, the queue, a stranger ignored, a schedule firing, a
+command approved with the button, a file received and one sent back, 60 messages at 91% of an 8K context compacted to
+the summary and the last 2. With the real bot and Qwen3.8-27B (`-m qwen27 --agent`, 2026-11-17): a weather question
+answered through `run_command` (curl to open-meteo).
 
 Through the API the level is `reasoning_effort`, `reasoning.effort` (OpenAI) or `output_config.effort` / `thinking`
 (Anthropic). DeepSeek's goes into its prompt (`Reasoning Effort: N`), with no cap on the thinking, as DeepSeek's API
