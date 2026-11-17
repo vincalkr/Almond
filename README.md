@@ -287,6 +287,10 @@ In the chat:
   with a line on the phone before and after.
 - Each chat is kept in `local/chats/telegram-<chat id>.json`, which `./almond -c telegram-<chat id>` resumes on the
   terminal.
+- A dropped connection to Telegram or a Telegram 5xx is tried again (4 times, 1-8 s apart), a 429 waits what
+  Telegram asks; a live edit that still fails is skipped, the final one shows the whole answer.
+- Web searches: start it with `--web` (or `"web": true`), else the agent has no `web_search` / `web_fetch` and
+  tries with `curl`, which search engines answer with anti-bot pages.
 - Not here: `free_gpu` and background jobs (they need the terminal).
 
 Checked against a fake Bot API and a stub model: streaming, the queue, a stranger ignored, a schedule firing, a

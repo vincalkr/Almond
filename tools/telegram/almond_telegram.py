@@ -155,19 +155,38 @@ class Bot:
         self.url, self.file_url = f"{base}/bot{token}/", f"{base}/file/bot{token}/"
 
     def call(self, method: str, http_timeout=30, **params):
+        """One Bot API call; a dropped connection or a Telegram 5xx is tried again (4 times, 1-8 s apart), a 429
+        waits the retry_after Telegram gives (at most 60 s); anything else raises RuntimeError."""
         data = json.dumps({k: v for k, v in params.items() if v is not None}).encode()
-        req = urllib.request.Request(self.url + method, data=data, headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=http_timeout) as r:
-                out = json.loads(r.read())
-        except urllib.error.HTTPError as e:
+        for attempt in range(5):
+            req = urllib.request.Request(self.url + method, data=data, headers={"Content-Type": "application/json"})
             try:
-                out = json.loads(e.read())
-            except ValueError:
-                raise RuntimeError(f"{method}: HTTP {e.code}")
-        if not out.get("ok"):
+                with urllib.request.urlopen(req, timeout=http_timeout) as r:
+                    out = json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                try:
+                    out = json.loads(e.read())
+                except ValueError:
+                    out = {"ok": False, "error_code": e.code, "description": f"HTTP {e.code}"}
+            except (urllib.error.URLError, OSError, ValueError) as e:   # reset, timeout, a cut answer
+                if attempt == 4 or method == "getUpdates":
+                    raise RuntimeError(f"{method}: {e}")
+                log(f"{method}: {e}; again in {2 ** attempt} s")
+                time.sleep(2 ** attempt)
+                continue
+            if out.get("ok"):
+                return out.get("result")
+            code = out.get("error_code") or 0
+            if code == 429 and attempt < 4:
+                wait = min(60, int((out.get("parameters") or {}).get("retry_after") or 3))
+                log(f"{method}: too many requests, waiting {wait} s")
+                time.sleep(wait)
+                continue
+            if code >= 500 and attempt < 4:
+                time.sleep(2 ** attempt)
+                continue
             raise RuntimeError(f"{method}: {out.get('description')}")
-        return out.get("result")
+        raise RuntimeError(f"{method}: no answer from Telegram")
 
     def send(self, chat, text: str, buttons=None, quiet=False, md=False) -> int | None:
         """text in as many messages as it takes; the last one's id (the buttons go on it).  md: the model's Markdown
@@ -477,8 +496,10 @@ class Chat:
         tools = self.agent or TgAgent(self)       # no agent: a bare one only for schedule / schedule_stop
         for _ in range(A.AGENT_STEPS):
             calls = self.reply()
-            if calls is None:
-                self.messages.pop()
+            if calls is None:                   # (a user message with no answer goes; tool results stay)
+                if self.messages and self.messages[-1].get("role") == "user":
+                    self.messages.pop()
+                self.save()
                 return
             if not calls or self.stopped:
                 break
@@ -541,10 +562,13 @@ class Chat:
                 if now - last >= (EDIT_EVERY if text else 3.0):
                     view = text[-LIMIT:] + " ▍" if text else (f"💭 thinking… {now - t0:.0f} s" if reasoning else "")
                     if view.strip(" ▍") and view != shown:
-                        if mid is None:
-                            mid = self.bot.send(self.id, view)
-                        else:
-                            self.bot.edit(self.id, mid, view)
+                        try:                    # a live edit that fails is skipped: the final one shows it all
+                            if mid is None:
+                                mid = self.bot.send(self.id, view)
+                            else:
+                                self.bot.edit(self.id, mid, view)
+                        except RuntimeError as e:
+                            log(f"chat {self.id}: live edit: {e}")
                         shown, last = view, now
         except (RuntimeError, OSError, A.http.client.HTTPException) as e:
             self.bot.send(self.id, f"error: {e}")
