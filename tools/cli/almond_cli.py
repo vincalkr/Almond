@@ -80,6 +80,7 @@ DIM, BOLD, CYAN, RED, RESET = (("\x1b[2m", "\x1b[1m", "\x1b[36m", "\x1b[31m", "\
 MAGENTA = "\x1b[1;95m" if TTY else ""   # COMPACTING
 GREEN = "\x1b[32m" if TTY else ""
 GRAY = "\x1b[90m" if TTY else ""
+YELLOW = "\x1b[33m" if TTY else ""      # scheduled tasks
 # the prompt: readline counts what is between \001 and \002 as zero wide
 PROMPT = "\001\x1b[1;32m\002❯\001\x1b[0m\002 " if TTY else "> "
 
@@ -987,16 +988,67 @@ class Schedule:
             + (f", every {fmt_secs(x['every'])} ({x['runs']} runs so far)" if x["every"] else "") + f": {x['prompt']}"
             for x in tasks) if tasks else "no scheduled tasks"
 
+    @staticmethod
+    def when(task: dict) -> str:
+        """'09:50', 'tomorrow 09:00', 'Mon 1 Dec 09:00': the next time, as short as the day allows."""
+        lt, now = time.localtime(task["at"]), time.localtime()
+        if lt.tm_yday == now.tm_yday and lt.tm_year == now.tm_year:
+            day = ""
+        elif task["at"] - time.time() < 2 * 86400 and (lt.tm_yday - now.tm_yday) % 366 == 1:
+            day = "tomorrow "
+        else:
+            day = time.strftime("%a %-d %b ", lt)
+        return day + time.strftime("%H:%M", lt)
+
+    @staticmethod
+    def icon(task: dict) -> str:
+        return "↻" if task["every"] else "◷"
+
+    def line(self, task: dict) -> str:
+        """One task's confirmation: icon, number, time, in how long, the repetition, how to stop it."""
+        rep = f" {GRAY}·{RESET} every {fmt_secs(task['every'])}" if task["every"] else ""
+        return (f"  {YELLOW}{self.icon(task)}{RESET} {BOLD}task {task['id']}{RESET} {GRAY}·{RESET} {self.when(task)} "
+                f"{DIM}(in {fmt_in(task['at'] - time.time())}){RESET}{rep}  {GRAY}/schedule stop {task['id']}{RESET}")
+
     def text(self) -> str:
-        if not self.tasks:
-            return f"{DIM}no scheduled tasks{RESET}"
-        lines = []
-        for task in sorted(self.tasks.values(), key=lambda x: x["at"]):
-            when = time.strftime("%H:%M:%S" if task["at"] - time.time() < 86400 else "%a %H:%M", time.localtime(task["at"]))
-            rep = f", every {fmt_secs(task['every'])}, {task['runs']} runs" if task["every"] else ""
-            p = task["prompt"].replace("\n", " ")
-            lines.append(f"  {task['id']:>2}  {when}{rep}  {DIM}{p[:70] + ('…' if len(p) > 70 else '')}{RESET}")
-        return "\n".join(lines)
+        """/schedule: a table of the tasks, the soonest first."""
+        with self.lock:
+            tasks = sorted(self.tasks.values(), key=lambda x: x["at"])
+        if not tasks:
+            return f"  {GRAY}◷ no scheduled tasks{RESET}  {DIM}(/schedule 10m PROMPT, at 14:30, every 2h){RESET}"
+        rows = []
+        for x in tasks:
+            rep = f"every {fmt_secs(x['every'])}" + (f" · {x['runs']}×" if x["runs"] else "") if x["every"] else "once"
+            rows.append((str(x["id"]), self.icon(x), self.when(x), "in " + fmt_in(x["at"] - time.time()), rep,
+                         " ".join(x["prompt"].split())))
+        w = [max(len(r[k]) for r in rows) for k in range(5)]
+        room = max(20, term_width() - (w[0] + w[2] + w[3] + w[4] + 16))
+        out = [f"  {YELLOW}{BOLD}scheduled tasks{RESET} {GRAY}({len(tasks)}; /schedule stop N|all){RESET}"]
+        for n, ic, when, inn, rep, p in rows:
+            p = p if len(p) <= room else p[:room - 1] + "…"
+            out.append(f"  {GRAY}{n:>{w[0]}}{RESET}  {YELLOW}{ic}{RESET} {BOLD}{when:<{w[2]}}{RESET}  "
+                       f"{DIM}{inn:<{w[3]}}{RESET}  {CYAN if rep != 'once' else GRAY}{rep:<{w[4]}}{RESET}  {p}")
+        return "\n".join(out)
+
+    def banner(self, task: dict) -> str:
+        """A due task, before its turn: a yellow rule with its number, then its prompt."""
+        rep = f" · every {fmt_secs(task['every'])} · run {task['runs']}" if task["every"] else ""
+        head = f"⏰ scheduled task {task['id']}{rep} · {time.strftime('%H:%M')} "
+        rule = "─" * max(0, min(term_width(), 100) - len(head) - 3)
+        body = "\n".join("  " + x for x in task["prompt"].splitlines()[:6])
+        return f"\n{YELLOW}── {BOLD}{head}{RESET}{YELLOW}{rule}{RESET}\n{DIM}{body}{RESET}"
+
+
+def fmt_in(s: float) -> str:
+    """How long until: '45s', '28m', '1h58m', '2d3h'."""
+    s = max(0, int(s))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h{s % 3600 // 60:02d}m"
+    return f"{s // 86400}d{s % 86400 // 3600}h"
 
 
 def fmt_secs(s: float) -> str:
@@ -1303,8 +1355,7 @@ class Agent:
             t = SCHEDULE.add_when(when, prompt)
         except ValueError as e:
             return f"error: {e}; nothing scheduled"
-        say(f"    {DIM}task {t['id']}: {time.strftime('%a %H:%M:%S', time.localtime(t['at']))}"
-            + (f", then every {fmt_secs(t['every'])}" if t["every"] else "") + f" (/schedule lists, /schedule stop {t['id']} stops){RESET}")
+        say("  " + SCHEDULE.line(t))
         return (f"scheduled task {t['id']}: first at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t['at']))}"
                 + (f", then every {fmt_secs(t['every'])}" if t["every"] else "") + "\n" + SCHEDULE.plain())
 
@@ -2176,16 +2227,16 @@ class Chat:
                 say(SCHEDULE.text())
             elif arg.split()[0] == "stop":
                 gone = SCHEDULE.stop(arg[4:].strip())
-                say(f"{DIM}stopped: {', '.join(str(x['id']) for x in gone) or 'none'}{RESET}")
+                say("\n".join(f"  {GRAY}{SCHEDULE.icon(x)} task {x['id']} stopped{RESET} {DIM}{' '.join(x['prompt'].split())[:60]}{RESET}"
+                               for x in gone) or f"  {GRAY}nothing to stop{RESET}")
             else:
                 try:
                     t = SCHEDULE.add(arg)
                 except ValueError as e:
-                    say(f"{RED}{e}{RESET}  {DIM}/schedule 10m PROMPT, /schedule at 14:30 PROMPT, "
-                        f"/schedule every 1h PROMPT{RESET}")
+                    say(f"  {RED}{e}{RESET}\n  {DIM}/schedule 10m PROMPT · /schedule at 14:30 PROMPT · "
+                        f"/schedule at 9:00 tomorrow PROMPT · /schedule every 2h PROMPT{RESET}")
                     return True
-                say(f"{DIM}task {t['id']}: {time.strftime('%a %H:%M:%S', time.localtime(t['at']))}"
-                    + (f", then every {fmt_secs(t['every'])}" if t["every"] else "") + RESET)
+                say(SCHEDULE.line(t))
         elif cmd == "todo":
             if arg == "clear":
                 TODO.clear()
@@ -2414,7 +2465,7 @@ class Chat:
             due = SCHEDULE.due()
             if due:                             # due while the model answered or the prompt waited: a turn each
                 for t in due:
-                    say(f"{DIM}scheduled task {t['id']}: {t['prompt'].splitlines()[0][:80]}{RESET}")
+                    say(SCHEDULE.banner(t))
                     rep = f", every {fmt_secs(t['every'])}" if t["every"] else ""
                     self.ask(f"[scheduled task {t['id']}{rep}, {time.strftime('%H:%M')}] {t['prompt']}")
                 continue
