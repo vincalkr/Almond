@@ -1,6 +1,14 @@
 #!/bin/sh
 # almond - the terminal chat (tools/cli/almond_cli.py); ./almond --help
 R=$(cd "$(dirname "$0")" && pwd) || exit 1
+allow_root=0                                    # --allow-root overrides the refusal to run as root
+for a in "$@"; do [ "$a" = "--allow-root" ] && allow_root=1; done
+if [ "$(id -u)" = 0 ] && [ "$allow_root" = 0 ]; then
+    echo "almond: refusing to run as root (sudo/pkexec detected)." >&2
+    echo "Start it as your user; use pkexec only for the individual commands that need root." >&2
+    echo "(--allow-root overrides this)" >&2
+    exit 1
+fi
 PY=${ALMOND_PY:-$R/.venv/bin/python}
 [ -x "$PY" ] || PY=python3
 exec "$PY" "$R/tools/cli/almond_cli.py" "$@"

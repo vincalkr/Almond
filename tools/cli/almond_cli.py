@@ -633,6 +633,7 @@ in_progress, each marked completed as soon as it is done.
 instead of guessing; do not ask what the files or a command can tell you.
 - Never run destructive commands (rm -rf, overwriting data, changing system settings) unless the user asked for \
 exactly that.
+- If a command needs root privileges and polkit is present on the system, you can elevate it with pkexec.
 
 Accuracy:
 - Report numbers, sizes, paths and names exactly as the tools printed them, with the units they printed. Do not \
@@ -2919,6 +2920,12 @@ def ctx_arg(text: str) -> int:
 
 
 def main() -> int:
+    # no root by default (sudo/pkexec): state files (local/, history, venv) would be left root-owned;
+    # --allow-root overrides it
+    if hasattr(os, "geteuid") and os.geteuid() == 0 and "--allow-root" not in sys.argv[1:]:
+        sys.exit("almond: refusing to run as root (uid 0 detected).\n"
+                 "Start it as your user; use pkexec only for the individual commands that need root.\n"
+                 "(--allow-root overrides this)")
     if sys.argv[1:2] == ["serve"]:
         if sys.argv[2:3] in (["-h"], ["--help"]):
             print(launch.__doc__)
@@ -2981,6 +2988,9 @@ def main() -> int:
     ap.add_argument("--hide-thinking", action="store_true", help="do not print the thinking")
     ap.add_argument("--no-start", action="store_true", help="never start the router")
     ap.add_argument("--keep", action="store_true", help="leave a router this started running on exit")
+    ap.add_argument("--allow-root", action="store_true",
+                    help="run as root (sudo/pkexec): by default almond refuses uid 0, because the state files it "
+                         "writes (local/, history, venv) would be left root-owned")
     a = ap.parse_args()
 
     if a.sessions:
