@@ -38,7 +38,8 @@ Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium / xhigh).  In the convers
   /hide /show        the thinking
   /agent [on|off]    the agent: the model reads, writes and edits files, runs commands in the working directory and
                      searches and reads the web (--no-web: not the web); a write, an edit, a command, a search, a
-                     page or a path outside it asks y / n / a (a: always, for that tool)
+                     page asks y / n / a (a: always, for that tool); a path outside the working directory asks y / n / a
+                     (a: only that path, this session)
   /todo [clear]      the agent's task list (todo_write); it asks you with ask_user when a decision is yours
   /jobs [stop N]     the agent's background commands (run_command with background): each one's state; stop N stops
                      one.  When one ends its exit code and last lines go to the model: with the next tool result
@@ -1338,11 +1339,12 @@ def _unescape(s: str) -> str:
 
 class Agent:
     """The tools the model may call, and the asking: reads and listings inside the working directory go ahead;
-    a write, an edit, a command or any path outside it asks y (yes) / n (no) / a (always, for that tool, until the
-    end of the session); --yes asks only for a path outside the working directory, which always asks."""
+    a write, an edit or a command inside it asks y (yes) / n (no) / a (always, for that tool, until the end of the
+    session); a path outside the working directory asks y / n / a, and "a" allows only that one path, this session
+    (never the whole tool: it would open the whole disk); --yes asks only for a path outside, which always asks."""
 
     def __init__(self, yes: bool = False, web: bool = False):
-        self.root, self.yes, self.always, self.web = Path.cwd().resolve(), yes, set(), web
+        self.root, self.yes, self.always, self.allowed_paths, self.web = Path.cwd().resolve(), yes, set(), set(), web
 
     def tools(self) -> list:
         return TOOLS + (WEB_TOOLS if self.web else [])
@@ -1353,12 +1355,17 @@ class Agent:
     def inside(self, p: Path) -> bool:
         return p == self.root or self.root in p.parents
 
-    def allow(self, name: str, what: str, outside: bool = False) -> bool:
+    def allow(self, name: str, what: str, path: Path | None = None) -> bool:
+        outside = path is not None and not self.inside(path)
+        if outside and path in self.allowed_paths:
+            return True
         if not outside and (self.yes or name in self.always):
             return True
         while True:
-            # outside the working directory there is no "always" (it would open the whole disk): only y / n, said so
-            opts = "[y/n] (outside the working directory it asks each time; /cd DIR moves it)" if outside else "[y/n/a]"
+            # outside the working directory, "always" allows that one path only (never the whole tool: it would
+            # open the whole disk); inside, it is for the tool
+            opts = ("[y/n/a] (a: only this path, this session; /cd DIR moves the working directory)"
+                    if outside else "[y/n/a] (a: always, for this tool, this session)")
             try:
                 a = input(f"{BOLD}{what}{RESET} - allow? {opts} " if TTY else f"{what} - allow? {opts} ").strip().lower()
             except EOFError:
@@ -1368,10 +1375,11 @@ class Agent:
             if a in ("n", "no", ""):
                 return False
             if a in ("a", "always"):
-                if outside:                     # a path outside the working directory asks each time
-                    say(f"{DIM}  outside {self.root} it asks each time: y or n{RESET}")
-                    continue
-                self.always.add(name)
+                if outside:
+                    self.allowed_paths.add(path)
+                    say(f"{DIM}  allowed from now on (this session): only {path}{RESET}")
+                else:
+                    self.always.add(name)
                 return True
 
     def ask_free(self) -> bool:
@@ -1493,7 +1501,7 @@ class Agent:
 
     def t_read_file(self, path, offset=1, limit=None):
         p = self.path(path)
-        if not self.inside(p) and not self.allow("read_file", f"read {p} (outside {self.root})", True):
+        if not self.inside(p) and not self.allow("read_file", f"read {p} (outside {self.root})", p):
             return "denied by the user"
         raw = p.read_bytes()
         if b"\0" in raw[:8192]:
@@ -1513,7 +1521,7 @@ class Agent:
 
     def t_list_dir(self, path="."):
         p = self.path(path)
-        if not self.inside(p) and not self.allow("list_dir", f"list {p} (outside {self.root})", True):
+        if not self.inside(p) and not self.allow("list_dir", f"list {p} (outside {self.root})", p):
             return "denied by the user"
         return "\n".join(sorted(x.name + ("/" if x.is_dir() else "") for x in p.iterdir())) or "(empty)"
 
@@ -1523,7 +1531,7 @@ class Agent:
         say(diff_text(old or "", content, str(p)) if old is not None else
             f"{DIM}  a new file, {len(content.splitlines())} lines{RESET}")
         where = "" if self.inside(p) else f" (outside {self.root})"
-        if not self.allow("write_file", f"write {p}{where}", bool(where)):
+        if not self.allow("write_file", f"write {p}{where}", p):
             return "denied by the user"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -1545,7 +1553,7 @@ class Agent:
         after = text.replace(old, new)
         say(diff_text(text, after, str(p)))
         where = "" if self.inside(p) else f" (outside {self.root})"
-        if not self.allow("edit_file", f"edit {p}{where}", bool(where)):
+        if not self.allow("edit_file", f"edit {p}{where}", p):
             return "denied by the user"
         p.write_text(after, encoding="utf-8")
         return f"edited {p}" + (f" ({n} places)" if n > 1 else "")

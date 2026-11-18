@@ -169,8 +169,9 @@ instead.
 - `--agent` (or `/agent on`): the model gets tools - `read_file`, `write_file`, `edit_file`, `list_dir`,
   `run_command` (bash in the working directory, the output cut to 8 KB) - and the chat runs them until an answer
   without calls (at most 50 steps; Ctrl+C stops). Reads and listings inside the working directory go ahead; a write,
-  an edit (shown as a diff first), a command (shown first) or any path outside asks y / n / a (always, for that
-  tool, this session); `--yes` asks only for paths outside, which always ask. Without `--system` the agent gets a
+  an edit (shown as a diff first) or a command (shown first) asks y / n / a (always, for that tool, this session);
+  a path outside asks y / n / a, and "a" allows only that one path, this session (never the whole tool: it would
+  open the whole disk); `--yes` asks only for paths outside, which always ask. Without `--system` the agent gets a
   short English system prompt (`AGENT_PROMPT` in `tools/cli/almond_cli.py`): the machine and directory, how to use the
   tools, and to report figures as the tools printed them.
 - Conversations: `/new` (the screen cleared, the current one saved first; `/clear` clears only the screen and the
