@@ -60,7 +60,7 @@ On a terminal the last line is a status bar: the prompt's reading, the answer's 
 
   ./almond --monitor   the same as /stats, refreshed every second (Ctrl+C leaves)
 
-A line ending in \\ goes on to the next; \"\"\" starts and ends a block of several lines.  Ctrl+C stops the answer and
+Shift+Enter (Alt+Enter where the terminal sends Shift+Enter as Enter) or a line ending in \\ goes on to the next; \"\"\" starts and ends a block of several lines.  Ctrl+C stops the answer and
 returns to the prompt; Ctrl+D (or /quit) leaves.  It speaks Almond's OpenAI API (the router's, ./almond serve --router,
 or one model's server, ./almond serve): the history and the thinking level live here, the model there.
 """
@@ -458,6 +458,7 @@ class Bar:
         self.region()
 
     def on_resize(self, *_):
+        rl_resize()                         # this handler replaces readline's own: tell it the new width
         self.resized = True
         if self.depth == 0:
             self.region()
@@ -2537,6 +2538,11 @@ class Chat:
         # Python turns readline's bracketed paste off: a pasted block then sent its first line on its own. On, the
         # whole block lands in the line and goes out on Enter.
         readline.parse_and_bind("set enable-bracketed-paste on")
+        # Shift+Enter (and Alt+Enter, for terminals that send Shift+Enter as a plain Enter): a new line, through the
+        # trailing \ continuation (end of line, \, Enter). Shift+Enter is told apart with xterm's modifyOtherKeys
+        # (CSI 27;2;13~, turned on around the prompt) or the kitty protocol's CSI 13;2u.
+        for seq in (r"\e[27;2;13~", r"\e[13;2u", r"\e\C-m"):
+            readline.parse_and_bind(f'"{seq}": "\\C-e\\\\\\C-m"')
         readline.set_completer(self.complete)
         readline.set_completion_display_matches_hook(self.show_matches)
         self.readline = readline
@@ -2853,6 +2859,19 @@ def run_monitor(api: Api):
         pass
 
 
+def rl_resize():
+    """readline's rl_resize_terminal: its SIGWINCH handler is replaced by the bar's, and with a stale width a line
+    longer than the screen wrapped in the wrong place and was written over its own start."""
+    try:
+        import ctypes
+        import readline
+        lib = rl_resize.__dict__.get("lib") or ctypes.CDLL(readline.__file__)
+        rl_resize.lib = lib
+        lib.rl_resize_terminal()
+    except (ImportError, OSError, AttributeError):
+        pass
+
+
 def read_input(prompt: str, prefill: str = "", wake: bool = False) -> str:
     """One message: a line, lines joined by a trailing \\, or a \"\"\" block; prefill: the line's start (/edit).
     wake: a background job's end interrupts the first line (JobsDone, with what was typed); the rest of a block
@@ -2864,13 +2883,15 @@ def read_input(prompt: str, prefill: str = "", wake: bool = False) -> str:
     if prefill and readline:
         readline.set_startup_hook(lambda: readline.insert_text(prefill))
     hist = readline.get_current_history_length() if readline else 0
+    if readline and TTY:
+        rl_resize()
     try:
         WAKE["armed"] = wake
         if wake and (JOBS.has_done() or SCHEDULE.has_due()):            # ended before the prompt was armed: no signal came for it
             WAKE["armed"] = False
             raise JobsDone(prefill)
         try:
-            line = input(prompt)
+            line = _input(prompt, readline)
         except JobsDone:
             # the signal can land just after input() returned the line, before it reached `line`: readline put
             # it in the history, take it from there
@@ -2892,8 +2913,20 @@ def read_input(prompt: str, prefill: str = "", wake: bool = False) -> str:
     lines = [line]
     while lines[-1].endswith("\\"):
         lines[-1] = lines[-1][:-1]
-        lines.append(input(". "))
+        lines.append(_input(". ", readline))
     return "\n".join(lines)
+
+
+def _input(prompt: str, readline) -> str:
+    """input() with xterm's modifyOtherKeys 1 on, so Shift+Enter comes as CSI 27;2;13~ and not as Enter."""
+    if not (readline and TTY):
+        return input(prompt)
+    sys.stdout.write("\x1b[>4;1m")
+    try:
+        return input(prompt)
+    finally:
+        sys.stdout.write("\x1b[>4m")
+        sys.stdout.flush()
 
 
 def say(text: str):
