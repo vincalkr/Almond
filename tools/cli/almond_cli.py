@@ -12,6 +12,7 @@
   ./almond stop [--force]        stop this folder's servers (./stop.sh)
   ./almond --chats [-m MODEL]    the saved conversations (local/chats/), newest first, without starting anything
   ./almond -c [NAME]             resume the last saved conversation (with -m MODEL: that model's last), or NAME
+  ./almond --cwd DIR             the working directory the agent runs in (default: the current one)
 
 Thinking: --nothink, --think (the model's default), --think-max, --think-level LEVEL - the levels are the model's own
 (GLM-5.3-Flash: low / high / max, it always thinks; DeepSeek-V4.1: off / low / high / max = 0 / 50 / 75 / 100;
@@ -2991,7 +2992,18 @@ def main() -> int:
     ap.add_argument("--allow-root", action="store_true",
                     help="run as root (sudo/pkexec): by default almond refuses uid 0, because the state files it "
                          "writes (local/, history, venv) would be left root-owned")
+    ap.add_argument("--cwd", metavar="DIR", default=None,
+                    help="the working directory the agent runs in (default: the current one; /cd changes it during "
+                         "a conversation, a resumed one goes back to its own)")
     a = ap.parse_args()
+
+    if a.cwd:
+        wd = Path(a.cwd).expanduser()
+        wd = (Path.cwd() / wd) if not wd.is_absolute() else wd
+        wd = wd.resolve()
+        if not wd.is_dir():
+            raise SystemExit(f"almond: no such directory: {a.cwd}")
+        os.chdir(wd)
 
     if a.sessions:
         print(sessions_text())

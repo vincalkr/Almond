@@ -130,6 +130,7 @@ instead.
 ./almond -m glm --think-level low -p "..." # one prompt, the answer on stdout (the thinking on stderr)
 ./almond --monitor                         # the server's state, refreshed every second (no web pages)
 ./almond --session-log                     # the servers it starts log every request and answer to local/session-log/<date>.jsonl
+./almond --cwd DIR                         # the agent's working directory (default: the current one; /cd in the chat)
 ```
 
 - `--agent` gives the model tools to read, write and edit files and run commands in the working directory (each
