@@ -26,10 +26,10 @@ struct Hy4EngineOptions {
     int expert_layers_gpu = -1;    ///< routed-expert layers in VRAM; -1 = as many as fit
     std::string engram = "auto";  ///< the Engram table: ram, ssd (O_DIRECT rows), or auto (RAM when it fits)
     bool dense_q8 = false;
-    bool dense_f16 = false;        ///< the BF16 matrices stored as F16 on the cards (--dense-f16): the same values
     bool mtp = false;
     bool fused_hc = false;
-    bool fused_proj = false;       ///< with --dense-q8: the attention input's four projections as one product (--fused-proj)         ///< iHC through the vendored ggml's fused DeepSeek-V4 ops (--fused-hc)
+    bool fused_proj = false;
+    std::string down_requant;      ///< ffn_down_exps (Q4_K in the file) requantized for the cards: q3_k, iq3_s, iq3_xxs, q2_k       ///< with --dense-q8: the attention input's four projections as one product (--fused-proj)         ///< iHC through the vendored ggml's fused DeepSeek-V4 ops (--fused-hc)
     int mtp_n = 1;                 ///< guesses per step (--mtp-n)              ///< load the MTP block (layer 42) and draft one token ahead (--mtp)         ///< the 2-D BF16 matrices quantized to Q8_0 on load (--dense-q8)
     bool verbose = true;
 };

@@ -35,6 +35,7 @@ struct Args {
     uint64_t seed = 1;
     bool no_cache = false;               // rerun the whole prefix each step (the old path, for comparison)
     std::string ppl;                     // a file of token ids: perplexity over chunks of -c tokens
+    std::string ppl_save, ppl_ref;       // the scored rows' top-64 log-probs to a file / KL and top-1 against such a file
     bool serve = false;                  // the serve protocol on stdin/stdout (serve/server.py)
     std::vector<int64_t> eos{ 120025 };  // <｜hy_end｜> (tokenizer.ggml.eos_token_id)
     bool cpu = false;                    // the CPU reference path (hy4_forward.cpp) instead of the engine
@@ -103,10 +104,13 @@ int parse(int argc, char ** argv, Args & a) {
             if (parse_csv(argv[i], a.eos)) return 2;
         }
         else if (!std::strcmp(s, "--dense-q8")) a.eo.dense_q8 = true;
-        else if (!std::strcmp(s, "--dense-f16")) a.eo.dense_f16 = true;
         else if (!std::strcmp(s, "--mtp")) a.eo.mtp = true;
         else if (!std::strcmp(s, "--fused-hc")) a.eo.fused_hc = true;
         else if (!std::strcmp(s, "--fused-proj")) a.eo.fused_proj = true;
+        else if (!std::strcmp(s, "--down-requant")) {
+            if (++i >= argc) return 2;
+            a.eo.down_requant = argv[i];
+        }
         else if (!std::strcmp(s, "--reserve-mib")) {
             if (++i >= argc) return 2;
             a.eo.reserve_mib = std::atoll(argv[i]);
@@ -119,6 +123,13 @@ int parse(int argc, char ** argv, Args & a) {
             if (++i >= argc) return 2;
             a.eo.engram = argv[i];
             if (a.eo.engram != "auto" && a.eo.engram != "ram" && a.eo.engram != "ssd") return 2;
+        }
+        else if (!std::strcmp(s, "--ppl-save")) {
+            if (++i >= argc) return 2;
+            a.ppl_save = argv[i];
+        } else if (!std::strcmp(s, "--ppl-ref")) {
+            if (++i >= argc) return 2;
+            a.ppl_ref = argv[i];
         }
         else if (!std::strcmp(s, "--ppl")) {
             if (++i >= argc) return 2;
@@ -248,6 +259,13 @@ int hy4_main(int argc, char ** argv) {
         if (!eng.load(a.model, a.eo, e)) { std::fprintf(stderr, "hy4: %s\n", e.c_str()); return 1; }
         const int64_t n_ctx = a.eo.n_ctx, V = G.n_vocab;
         double nll = 0; int64_t cnt = 0;
+        // --ppl-save / --ppl-ref: per scored row the reference's 64 most likely ids and their log-probs; against it, the
+        // KL over those 64 (the reference renormalized there, as Lucebox scores against its teacher's top 256) and how
+        // often both rank the same token first
+        constexpr int TOPK = 64;
+        std::FILE * fsave = a.ppl_save.empty() ? nullptr : std::fopen(a.ppl_save.c_str(), "wb");
+        std::FILE * fref = a.ppl_ref.empty() ? nullptr : std::fopen(a.ppl_ref.c_str(), "rb");
+        double kl = 0; int64_t agree = 0, nref = 0;
         auto t0 = std::chrono::steady_clock::now();
         std::vector<float> lg;
         for (int64_t s0 = 0; s0 + n_ctx <= (int64_t) ids.size(); s0 += n_ctx) {
@@ -259,11 +277,45 @@ int hy4_main(int argc, char ** argv) {
                 for (int64_t k = 1; k < V; ++k) mx = std::max(mx, r[k]);
                 double se = 0;
                 for (int64_t k = 0; k < V; ++k) se += std::exp((double) (r[k] - mx));
-                nll += std::log(se) + mx - r[ids[(size_t) (s0 + i + 1)]];
+                const double lse = std::log(se) + mx;
+                nll += lse - r[ids[(size_t) (s0 + i + 1)]];
                 ++cnt;
+                if (fsave || fref) {
+                    int64_t am = 0;
+                    for (int64_t k = 1; k < V; ++k) if (r[k] > r[am]) am = k;
+                    if (fsave) {
+                        std::vector<int32_t> top((size_t) V);
+                        for (int64_t k = 0; k < V; ++k) top[(size_t) k] = (int32_t) k;
+                        std::partial_sort(top.begin(), top.begin() + TOPK, top.end(), [&](int32_t x, int32_t y) { return r[x] > r[y]; });
+                        float lp[TOPK];
+                        for (int k = 0; k < TOPK; ++k) lp[k] = (float) (r[top[(size_t) k]] - lse);
+                        std::fwrite(top.data(), 4, TOPK, fsave);
+                        std::fwrite(lp, 4, TOPK, fsave);
+                    }
+                    if (fref) {
+                        int32_t ti[TOPK]; float tl[TOPK];
+                        if (std::fread(ti, 4, TOPK, fref) == TOPK && std::fread(tl, 4, TOPK, fref) == TOPK) {
+                            double z = 0, ours = 0;
+                            for (int k = 0; k < TOPK; ++k) { z += std::exp((double) tl[k]); ours += std::exp((double) r[ti[k]] - lse); }
+                            for (int k = 0; k < TOPK; ++k) {
+                                const double pt = std::exp((double) tl[k]) / z;
+                                const double po = std::exp((double) r[ti[k]] - lse) / ours;
+                                kl += pt * (std::log(pt) - std::log(std::max(po, 1e-30)));
+                            }
+                            agree += ti[0] == am;
+                            ++nref;
+                        }
+                    }
+                }
             }
             std::printf("hy4: chunk %lld: ppl %.4f\n", (long long) (s0 / n_ctx + 1), std::exp(nll / cnt));
             std::fflush(stdout);
+        }
+        if (fsave) std::fclose(fsave);
+        if (fref) {
+            std::fclose(fref);
+            std::printf("hy4: against %s: KL %.5f, top-1 agreement %.2f%% over %lld rows\n", a.ppl_ref.c_str(),
+                        kl / std::max<int64_t>(nref, 1), 100.0 * agree / std::max<int64_t>(nref, 1), (long long) nref);
         }
         std::printf("hy4: ppl %.4f over %lld tokens (%.1f s)\n", std::exp(nll / std::max<int64_t>(cnt, 1)), (long long) cnt,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());

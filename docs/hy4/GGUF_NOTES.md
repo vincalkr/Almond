@@ -313,8 +313,8 @@ measurable; the Engram rows from the SSD cost about 5% against the table in the 
   1 sits on a PCIe x2 link (its port reports x16, the card's own switch), so this is latency, not bandwidth.
 - `--dense-q8` and `--reserve-mib 1400` (the compute buffers take 1.33 GiB a card at 64K): experts of 29 layers in
   VRAM instead of 26, 15.5 -> 16.8-17.1 tok/s; perplexity 28.82 / 40.74. That +2.4-4.8% is inside the noise of this
-  2-bit model: `--dense-f16`, an exact conversion of the same BF16 matrices, moves the 2,048-chunk perplexity to 41.18
-  (and is not faster: 15.4-15.9 tok/s, so it stays off).
+  2-bit model: an exact conversion of the same BF16 matrices to F16 moved the 2,048-chunk perplexity to 41.18 and was
+  not faster (15.4-15.9 tok/s); that option was removed on 2026-11-19.
 - The SwiGLUs are written as `ggml_swiglu_split` (the same values; no measurable change), and a step that completes no
   indexer group pools the last one again, so the graph keeps one shape (no change either: the graphs were reused).
 
@@ -443,6 +443,36 @@ product for the MoE's input, the shared expert's SwiGLU on views of it). Measure
 perplexity on the 60 KB text at 2,048-token chunks 41.85, then 41.63 (from 41.72: noise). Through the server with
 MTP, the three chat prompts: 21.48 / 22.88 / 21.82 greedy and 20.74 / 21.42 / 21.75 at temperature 0.9, the same as
 before within the spread: the verify step runs two tokens, where the views need their copies back.
+
+## `ffn_down_exps` requantized for the cards (`--down-requant`, 2026-11-19)
+
+The routed experts' `down` is Q4_K in this GGUF (648 MiB a layer, more than half of a layer's 1.21 GiB of experts;
+`gate` and `up` are IQ2_XXS). `--down-requant q3_k|iq3_s|iq3_xxs|q2_k` dequantizes it at load and quantizes it again
+for the layers whose experts go to the cards (those in RAM keep the file's Q4_K): more layers fit in VRAM. Measured on
+2026-11-19 with `--fused-hc --dense-q8 --reserve-mib 1400 --fused-proj`, 64K:
+
+| | experts in VRAM | load | greedy, no MTP | server + MTP, greedy | server + MTP, temperature 0.9 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Q4_K (the file) | 29 of 42 layers | ~45 s | 19.12 / 18.88 | 21.48 / 22.88 / 21.82 | 20.74 / 21.42 / 21.75 |
+| `q3_k` | 33 | 45 s | 20.48 | 24.64 / 24.74 / 24.81 | 23.14 / 23.26 / 23.12 |
+| `q2_k` | 36 | 110 s | 20.54 | 24.97 / 27.26 / 27.33 | 24.63 / 25.10 / 26.47 |
+
+Quality, with `--ppl-save` / `--ppl-ref` (the scored rows' top-64 log-probs of a reference run, then the KL over those
+64 and how often both rank the same token first; the 60 KB text at 2,048-token chunks, 7,161 rows; the reference is
+the configuration above with the file's Q4_K):
+
+| run against the reference | KL | top-1 agreement | perplexity |
+| --- | ---: | ---: | ---: |
+| the same configuration again | 0.000 | 100% | 41.72 |
+| without `--fused-proj` (the same Q8_0 rows) | 0.003 | 98.99% | 41.74 |
+| without `--fused-hc` (iHC's eps in another place) | 0.184 | 85.95% | 39.79 |
+| without `--dense-q8` (BF16 matrices, fewer expert layers in VRAM) | 0.202 | 85.04% | 40.23 |
+| `--down-requant q3_k` | 0.303 | 81.37% | 37.58 |
+| `--down-requant q2_k` | 0.484 | 75.74% | 37.57 |
+
+This 2-bit model moves about 0.2 in KL from changes that compute the same thing in another order, which is also why
+its perplexity on 7,161 tokens moves by several percent; `q3_k` is a little past that, `q2_k` about two and a half
+times. Off by default: faster, measurably further from the file's weights.
 
 ## What is not here
 

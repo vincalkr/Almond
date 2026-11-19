@@ -73,6 +73,7 @@ struct Hy4Engine::Impl {
     std::map<int64_t, ProjCat> proj_cat;
     struct FfnCat { int64_t rd = -1, sg = -1, su = -1; };   // ffn_routed_down, ffn_gate_shexp, ffn_up_shexp in blk.L.ffn_in_cat
     std::map<int64_t, FfnCat> ffn_cat;
+    enum ggml_type down_type = GGML_TYPE_COUNT;   // --down-requant's type, COUNT when off
     int64_t n_alloc = 0;              // layers with weights and caches: the trunk, plus the MTP block with --mtp
     int64_t draft_off = 0;            // a chained draft: its position past n_past
     std::vector<float> draft_h;       // and the state it starts from (the previous draft's), empty = the trunk's
@@ -132,8 +133,8 @@ struct Hy4Engine::Impl {
             t.name != "token_embd.weight" && t.name.find("attn_k_b") == std::string::npos &&
             t.name.find("attn_v_b") == std::string::npos)
             return GGML_TYPE_Q8_0;
-        if (o.dense_f16 && t.type == ty::BF16 && t.shape.size() >= 2 && t.name != "token_embd.weight")
-            return GGML_TYPE_F16;
+        if (down_type != GGML_TYPE_COUNT && t.name.find("ffn_down_exps") != std::string::npos && t.type == ty::Q4_K)
+            return down_type;    // --down-requant: on the cards only (a layer whose experts stay in RAM reads the file)
         return (enum ggml_type) t.type;
     }
     uint64_t kept_bytes(const TensorInfo & t) const {
@@ -354,19 +355,25 @@ struct Hy4Engine::Impl {
                 const uint16_t * h = reinterpret_cast<const uint16_t *>(src);
                 for (uint64_t i = 0; i < n; ++i) conv[i] = bf16_to_f32(h[i]);
                 ggml_backend_tensor_set(it.g, conv.data(), 0, bytes);
-            } else if (it.g->type == GGML_TYPE_F16 && it.t->type == ty::BF16) {   // --dense-f16: exact unless out of range
-                const uint64_t n = it.t->elements();
-                const uint16_t * h = reinterpret_cast<const uint16_t *>(src);
-                std::vector<ggml_fp16_t> f((size_t) n);
-                uint64_t clipped = 0;
-                for (uint64_t i = 0; i < n; ++i) {
-                    float v = bf16_to_f32(h[i]);
-                    if (std::fabs(v) > 65504.0f) { v = v > 0 ? 65504.0f : -65504.0f; ++clipped; }
-                    f[i] = ggml_fp32_to_fp16(v);
-                }
-                if (clipped) std::fprintf(stderr, "hy4: %s: %llu values past the F16 range clipped\n", it.t->name.c_str(),
-                                          (unsigned long long) clipped);
-                ggml_backend_tensor_set(it.g, f.data(), 0, bytes);
+            } else if (it.t->type == ty::Q4_K && it.g->type != GGML_TYPE_Q4_K) {   // --down-requant: Q4_K -> down_type
+                const int64_t ne0 = it.g->ne[0], nrows = ggml_nrows(it.g);
+                const auto * tr = ggml_get_type_traits(GGML_TYPE_Q4_K);
+                const size_t srb = ggml_row_size(GGML_TYPE_Q4_K, ne0), drb = ggml_row_size(it.g->type, ne0);
+                std::vector<uint8_t> q(bytes);
+                const int nth = (int) std::max(1u, std::thread::hardware_concurrency());
+                std::vector<std::thread> th;
+                for (int k = 0; k < nth; ++k)
+                    th.emplace_back([&, k] {
+                        const int64_t r0 = nrows * k / nth, r1 = nrows * (k + 1) / nth;
+                        std::vector<float> f((size_t) (ne0 * 64));
+                        for (int64_t r = r0; r < r1; r += 64) {
+                            const int64_t n = std::min<int64_t>(64, r1 - r);
+                            tr->to_float(src + (size_t) r * srb, f.data(), n * ne0);
+                            ggml_quantize_chunk(it.g->type, f.data(), q.data() + (size_t) r * drb, 0, n, ne0, nullptr);
+                        }
+                    });
+                for (auto & t : th) t.join();
+                ggml_backend_tensor_set(it.g, q.data(), 0, bytes);
             } else if (it.g->type != (enum ggml_type) it.t->type) {     // BF16 -> Q8_0, rows split over threads
                 const int64_t ne0 = it.g->ne[0], nrows = ggml_nrows(it.g);
                 conv.resize((size_t) (ne0 * nrows));
@@ -1315,6 +1322,12 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
     P.L = hy4_engram_layout(P.G);
     P.n_trunk = P.G.n_layer - P.G.n_nextn;
     P.n_alloc = P.n_trunk + (o.mtp && P.G.n_nextn > 0 ? 1 : 0);
+    if (!o.down_requant.empty()) {
+        const std::string & d = o.down_requant;
+        P.down_type = d == "q3_k" ? GGML_TYPE_Q3_K : d == "q2_k" ? GGML_TYPE_Q2_K : d == "iq3_xxs" ? GGML_TYPE_IQ3_XXS
+                    : d == "iq3_s" ? GGML_TYPE_IQ3_S : d == "q4_k" ? GGML_TYPE_COUNT : GGML_TYPE_COUNT;
+        if (P.down_type == GGML_TYPE_COUNT && d != "q4_k") { err = "--down-requant takes q3_k, iq3_s, iq3_xxs or q2_k"; return false; }
+    }
     P.n_ctx = pad_to(std::max<int64_t>(o.n_ctx, KV_PAD), KV_PAD);
     for (int g : o.gpus) {
         ggml_backend_t b = ggml_backend_cuda_init(g);
