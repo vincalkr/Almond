@@ -1,0 +1,20 @@
+#!/bin/sh
+# gguf-inspect - browse a GGUF file's metadata, tensors and quantizations (tools/gguf_ui.py)
+#   ./gguf-inspect MODEL.gguf                 the interface (Textual; the curses one when textual is missing)
+#   ./gguf-inspect MODEL.gguf --export [DIR]  Markdown + JSON report
+#   ./gguf-inspect MODEL.gguf --dump          plain-text report on stdout
+R=$(cd "$(dirname "$0")" && pwd) || exit 1
+PY=${ALMOND_PY:-$R/.venv/bin/python}
+[ -x "$PY" ] || PY=python3
+if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    sed -n '2,5s/^# \{0,1\}//p' "$0"; exit 0
+fi
+for a in "$@"; do [ "$a" = "--dump" ] && exec "$PY" "$R/tools/gguf_tui.py" "$@"; done
+if "$PY" -c "import textual" 2>/dev/null; then
+    exec "$PY" "$R/tools/gguf_ui.py" "$@"
+fi
+for a in "$@"; do
+    [ "$a" = "--export" ] && { echo "gguf-inspect: --export needs textual ($PY -m pip install textual)" >&2; exit 1; }
+done
+echo "gguf-inspect: textual not installed, using the plain curses interface" >&2
+exec "$PY" "$R/tools/gguf_tui.py" "$@"

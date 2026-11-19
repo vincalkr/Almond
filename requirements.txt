@@ -9,3 +9,5 @@ markupsafe==3.0.4
 numpy
 # pyyaml: local/glm-pack.sh (gguf-py, which engines/glm/tools/iq_pack.py reads the GGUF with)
 pyyaml
+# textual: ./gguf-inspect, the GGUF browser (tools/gguf_ui.py)
+textual
