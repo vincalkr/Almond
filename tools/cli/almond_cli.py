@@ -31,6 +31,7 @@ Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium / xhigh).  In the convers
   /set [KEY VALUE]   sampling: temp, top_p, top_k, min_p, repeat_penalty, presence_penalty, seed, max_tokens
                      (/set alone shows them and the model's defaults; /set KEY default goes back to the model's)
   /stats             what the server's monitor shows: speed, GPUs, VRAM, CPU, RAM, disk, context, experts, requests
+  /tokens            this conversation's tokens: prompt, what the cache gave back, what was written, the last request
   /forget            clear the conversation cache the engine keeps
   /compact [NOTE]    summarize the earlier conversation and keep the recent part verbatim (it also happens by itself
                      at 85% of the context, or when a tool result would not fit; the full history goes to
@@ -40,6 +41,16 @@ Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium / xhigh).  In the convers
                      searches and reads the web (--no-web: not the web); a write, an edit, a command, a search, a
                      page asks y / n / a (a: always, for that tool); a path outside the working directory asks y / n / a
                      (a: only that path, this session)
+  /plan [on|off|TASK]
+                     plan mode: the agent only reads (files, listings, the web; a command asks every time, even with
+                     --yes; writes and edits are refused) and ends with a plan; you approve it (y), keep planning (n,
+                     then your notes) or leave plan mode (o).  /plan TASK turns it on and sends TASK.  The tools and the
+                     system prompt stay the same, so the engine's conversation cache is kept
+  /goal [CONDITION|clear]
+                     a goal: after each answer the model says whether CONDITION holds (its answer ends with
+                     "GOAL: DONE" or "GOAL: NOT DONE"); while it does not, Almond sends it back to work, at most
+                     ALMOND_GOAL_ROUNDS times (20) per message; Ctrl+C stops.  /goal CONDITION sets it and starts;
+                     /goal alone shows it; /goal clear drops it
   /todo [clear]      the agent's task list (todo_write); it asks you with ask_user when a decision is yours
   /jobs [stop N]     the agent's background commands (run_command with background): each one's state; stop N stops
                      one.  When one ends its exit code and last lines go to the model: with the next tool result
@@ -56,7 +67,8 @@ Qwen3.8-Flash-Next and Qwen3.8-27B: off / low / medium / xhigh).  In the convers
                      today, or tomorrow if past; the agent has the same with its schedule tool); it waits for the prompt, never cuts into an answer, and what you
                      were typing stays.  /schedule alone: the list; /schedule stop N|all.  This session only
 
-On a terminal the last line is a status bar: the prompt's reading, the answer's speed, idle the last request's numbers.
+On a terminal the last line is a status bar: the prompt's reading, the answer's speed, idle the context, the
+conversation's cache hit and reused tokens, the thinking level and the model; what a single request did is in /tokens.
 
   ./almond --monitor   the same as /stats, refreshed every second (Ctrl+C leaves)
 
@@ -301,9 +313,13 @@ COMMANDS = [    # (name, arguments, what it does): /help's order, Tab's suggesti
     ("set", "[KEY VALUE]", "sampling"), ("system", "TEXT", "the system prompt"),
     ("read", "FILE", "a file sent with your next message"),
     ("image", "[FILE]", "an image sent with your next message (no FILE: the clipboard's)"), ("agent", "[on|off]", "the agent's tools"),
+    ("goal", "[CONDITION|clear]", "work until CONDITION holds"),
+    ("plan", "[on|off|TASK]", "plan mode: read only, then a plan to approve"),
     ("cd", "DIR", "the agent's working directory"), ("hide", "", "hide the thinking"), ("show", "", "show the thinking"),
     ("status", "", "model, context, thinking, sampling, agent, conversation"), ("ctx", "", "the context in use"),
-    ("stats", "", "the server's monitor"), ("forget", "", "clear the engine's conversation cache"),
+    ("stats", "", "the server's monitor"),
+    ("tokens", "", "this conversation's tokens: cache hit, reused, read, written, the last request"),
+    ("forget", "", "clear the engine's conversation cache"),
     ("jobs", "[stop N]", "the agent's background commands"),
     ("queue", "[clear|drop N]", "the messages typed during an answer, sent when it ends"),
     ("free", "[COMMAND]", "unload the model, run COMMAND (alone: until Enter), load it again"),
@@ -433,8 +449,9 @@ class Bar:
     """The status line at the bottom of the terminal: a scroll region (DECSTBM) over every
     row but the last, so the conversation scrolls above it.  While a request runs a thread reads /metrics' live state
     four times a second (the prompt's reading: a bar, read / total, tok/s; the answer: tokens, tok/s, the time,
-    thinking or answer); idle, the last request's numbers, the model, the thinking level and the context.  Only on a
-    terminal: -p into a pipe never sees it."""
+    thinking or answer); idle, the context, this conversation's cache hit and reused tokens, the thinking level and
+    the model - what one request did is /tokens, the line stays short.  Only on a terminal: -p into a pipe never
+    sees it."""
 
     def __init__(self, api: Api):
         self.api, self.on, self.text = api, False, ""
@@ -571,18 +588,15 @@ class Bar:
             self.busy = None
 
     def idle(self, chat):
-        """The last request's numbers (/metrics' requests[0]), the model, the thinking level, the context."""
+        """The context, the conversation's cache hit and its reused tokens, the thinking level, the model.  What one
+        request did (prompt / reused / output / tok/s) is /tokens: the line has to stay short."""
         if not self.on:
             return
-        try:
-            last = (self.api.get("/metrics", timeout=2).get("requests") or [None])[0]
-        except (OSError, RuntimeError, ValueError, http.client.HTTPException):
-            last = None
-        parts = [f"context {_f(chat.ctx_used)} / {_f(chat.model.get('max_context'))}", f"thinking {chat.level_text()}",
-                 chat.model["id"]]
-        if last and chat.messages:
-            parts.insert(0, f"last: prompt {_f(last.get('prompt_tokens'))}, reused {_f(last.get('reused'))}, "
-                         f"output {_f(last.get('output_tokens'))} at {_f(last.get('decode_tok_s'), 1)} tok/s")
+        parts = [f"context {_f(chat.ctx_used)} / {_f(chat.model.get('max_context'))}"]
+        used = chat.usage_line()                # cache hit and reused; a narrow terminal cuts the line's end,
+        if used:                                # which is the model's name
+            parts.append(used)
+        parts += [f"thinking {chat.level_text()}", chat.model["id"]]
         self.draw("  ".join(parts))
 
 
@@ -647,6 +661,22 @@ convert units by hand; if a conversion is needed, compute it with a command.
 
 Answer in the user's language, briefly and to the point; no filler, no apologies, no restating the question.
 """
+PLAN_TOOLS_REFUSED = ("write_file", "edit_file", "job_stop", "schedule", "schedule_stop")
+# plan mode goes in the user's message, not the system prompt or the tool list: either one changed would make the
+# engine read the whole conversation again
+PLAN_NOTE = ("[Almond, plan mode: research only. Read files, list directories, search and read the web; run only "
+             "commands that change nothing (each one asks the user). write_file, edit_file, schedule and job_stop are "
+             "refused. When you know enough, end your answer with the plan: the steps in order, the files each one "
+             "touches, how to verify it, and any open question. Do not carry it out: the user approves it first.]\n\n")
+GOAL_ROUNDS = int(os.environ.get("ALMOND_GOAL_ROUNDS", "20"))
+GOAL_NOTE = ("[Almond, goal: {goal}\nWork toward it with your tools. End every answer with a last line that is "
+             "exactly \"GOAL: DONE\" once you checked that the goal holds, or \"GOAL: NOT DONE\" and why.]\n\n")
+GOAL_MORE = ("[Almond, goal] Not reached yet: {goal}\nKeep working toward it; end with \"GOAL: DONE\" or "
+             "\"GOAL: NOT DONE\" as before.")
+PLAN_GO = "[Almond] The user approved the plan. Plan mode is over: carry it out now, with all your tools."
+PLAN_MORE = "[Almond, plan mode] The user did not approve the plan yet. Their notes:\n\n"
+
+
 AGENT_WEB_PROMPT = """
 Web: web_search finds pages (titles, addresses, snippets) and web_fetch reads one page as text. Search when \
 the answer depends on facts you may not know or that change (versions, releases, prices, documentation, errors); \
@@ -1346,6 +1376,7 @@ class Agent:
 
     def __init__(self, yes: bool = False, web: bool = False):
         self.root, self.yes, self.always, self.allowed_paths, self.web = Path.cwd().resolve(), yes, set(), set(), web
+        self.plan = False                       # plan mode (Chat sets it): read only
 
     def tools(self) -> list:
         return TOOLS + (WEB_TOOLS if self.web else [])
@@ -1360,7 +1391,7 @@ class Agent:
         outside = path is not None and not self.inside(path)
         if outside and path in self.allowed_paths:
             return True
-        if not outside and (self.yes or name in self.always):
+        if not outside and not (self.plan and name == "run_command") and (self.yes or name in self.always):
             return True
         while True:
             # outside the working directory, "always" allows that one path only (never the whole tool: it would
@@ -1427,6 +1458,12 @@ class Agent:
         say(f"\n  {CYAN}{BOLD}⚙ {name}{RESET} {line}")
         if fn is None:
             return f"error: no tool {name}"
+        if self.plan and name in PLAN_TOOLS_REFUSED:
+            say(f"    {DIM}refused: plan mode{RESET}")
+            return f"error: plan mode, {name} is refused until the user approves the plan; finish the plan instead"
+        if self.plan and name == "run_command" and (flag(args.get("background")) or flag(args.get("free_gpu"))):
+            say(f"    {DIM}refused: plan mode{RESET}")
+            return "error: plan mode, no background or free_gpu commands; run only short commands that change nothing"
         try:
             text = fn(**args)
         except (TypeError, OSError, ValueError) as e:      # (ValueError: UnicodeDecodeError, a bad number)
@@ -1712,6 +1749,14 @@ def diff_text(old: str, new: str, name: str) -> str:
     return "\n".join(out + ([f"  {DIM}... {more} more lines{RESET}"] if more > 0 else []))
 
 
+def usage_new() -> dict:
+    """The token counts of one conversation: what its requests asked, what the engine's conversation cache gave
+    back without reading it, what was written, and the two times.  The CLI adds them up itself (the server's
+    /metrics totals are since the server started, not since the conversation began)."""
+    return {"requests": 0, "prompt_tokens": 0, "cached": 0, "read": 0, "output": 0, "prompt_ms": 0.0,
+            "decode_ms": 0.0}
+
+
 class Chat:
     def __init__(self, api: Api, a):
         self.api, self.a = api, a
@@ -1726,6 +1771,7 @@ class Chat:
         self.routed = False                     # through the router (it can unload the model: /free)
         self.level = None                       # None: the model's default
         self.ctx_used = 0
+        self.usage = usage_new()                # this conversation's token counts (the bar's item and /tokens)
         self.bar = Bar(api)
         self.web = not a.no_web
         # the agent prompt's date: the day the conversation started, kept with it - today's date in a resumed
@@ -1735,6 +1781,8 @@ class Chat:
         self.yes, self.stopped = a.yes, False
         self.name = None                        # the conversation's name in local/chats/ once saved
         self.prefill = ""                       # /edit: the text the next prompt starts with
+        self.plan = False                       # /plan: the agent reads only, then a plan to approve
+        self.goal = None                        # /goal: the condition the model works toward
 
     # ---- models and levels
     def free(self, fn):
@@ -1840,6 +1888,74 @@ class Chat:
 
     # ---- one turn
     def ask(self, text: str, out=None, images: list | None = None) -> bool:
+        if self.plan and self.agent:
+            self.agent.plan = True
+            text = PLAN_NOTE + text
+            ok = self.ask_goal(text, out, images)
+            while ok and self.plan and TTY:
+                try:
+                    a = input(f"{BOLD}carry out the plan?{RESET} [y: yes / n: keep planning / o: leave plan mode] ").strip().lower()
+                except EOFError:
+                    return ok
+                if a in ("y", "yes", "s", "si"):
+                    self.set_plan(False)
+                    return self.ask_goal(PLAN_GO, out)
+                if a in ("o", "off"):
+                    self.set_plan(False)
+                    return ok
+                if a in ("n", "no"):
+                    try:
+                        note = input(f"{BOLD}your notes:{RESET} ").strip()
+                    except EOFError:
+                        return ok
+                    if note:
+                        ok = self.ask_goal(PLAN_MORE + note, out)
+                    continue
+            return ok
+        if self.agent:
+            self.agent.plan = False
+        return self.ask_goal(text, out, images)
+
+    def goal_state(self) -> str | None:
+        """The last answer's goal line: "done", "not done", or None when it has none."""
+        last = next((m for m in reversed(self.messages) if m.get("role") == "assistant"), None)
+        lines = [x.strip().strip("*`_ ").upper() for x in text_of((last or {}).get("content") or "").splitlines() if x.strip()]
+        for x in reversed(lines[-3:]):
+            if x.startswith("GOAL: NOT DONE") or x.startswith("GOAL:NOT DONE"):
+                return "not done"
+            if x.startswith("GOAL: DONE") or x.startswith("GOAL:DONE"):
+                return "done"
+        return None
+
+    def ask_goal(self, text: str, out=None, images: list | None = None) -> bool:
+        """A turn; with a goal, more turns until the model says it holds (or GOAL_ROUNDS, or Ctrl+C)."""
+        if not self.goal:
+            return self.ask_once(text, out, images)
+        ok = self.ask_once(GOAL_NOTE.format(goal=self.goal) + text, out, images)
+        for _ in range(GOAL_ROUNDS):
+            if not ok or not self.goal or self.stopped or self.plan:
+                return ok                       # plan mode: the plan is approved first, then the goal runs
+            st = self.goal_state()
+            if st == "done":
+                say(f"{CYAN}goal reached:{RESET} {self.goal} {DIM}(/goal clear drops it){RESET}")
+                self.goal = None
+                return ok
+            say(f"{DIM}[goal {st or 'not reported'}: sending the model back to work; Ctrl+C stops]{RESET}")
+            try:
+                ok = self.ask_once(GOAL_MORE.format(goal=self.goal), out)
+            except KeyboardInterrupt:
+                say(f"{DIM}[goal loop stopped; the goal stays: /goal clear drops it]{RESET}")
+                return ok
+        say(f"{DIM}[goal not reached after {GOAL_ROUNDS} rounds; send a message to go on, /goal clear to drop it]{RESET}")
+        return ok
+
+    def set_plan(self, on: bool):
+        self.plan = on
+        if self.agent:
+            self.agent.plan = on
+        say(f"{DIM}plan mode {'on: the agent only reads, then writes a plan for you to approve' if on else 'off'}{RESET}")
+
+    def ask_once(self, text: str, out=None, images: list | None = None) -> bool:
         out = out or sys.stdout
         content = [{"type": "text", "text": text}] + [{"type": "image_url", "image_url": {"url": u}} for u in images] \
             if images else text
@@ -1861,6 +1977,7 @@ class Chat:
                     results.append({"role": "tool", "tool_call_id": c["id"], "content": self.agent.run(c)})
             except KeyboardInterrupt:
                 say(f"{RESET}\n{DIM}[stopped]{RESET}")
+                self.stopped = True             # the /goal loop stops too
                 done = {r["tool_call_id"] for r in results}   # every call answered: a history the model accepts
                 self.messages += results + [{"role": "tool", "tool_call_id": c["id"], "content": "stopped by the user"}
                                             for c in calls if c["id"] not in done]
@@ -1990,6 +2107,7 @@ class Chat:
         if end and end.get("usage"):
             u = end["usage"]
             self.ctx_used = u.get("prompt_tokens", 0) + u.get("completion_tokens", 0)
+            self.count(u, end.get("timings") or {})
         if TTY and end:
             t = end.get("timings") or {}
             n = (end.get("usage") or {}).get("completion_tokens")
@@ -1999,6 +2117,74 @@ class Chat:
                      f"{time.time() - t0:.1f} s", end.get("finish") if end.get("finish") not in ("stop", None) else None]
             say(f"{DIM}  [{', '.join(p for p in parts if p)}]{RESET}")
         return calls
+
+    # ---- this conversation's tokens (the bar's item and /tokens)
+    def count(self, u: dict, t: dict):
+        """One finished request added up: its prompt and its output, and how much of the prompt the engine's
+        conversation cache already had (`timings.cache_n`; a server that says nothing reused nothing)."""
+        p, written = u.get("prompt_tokens") or 0, u.get("completion_tokens") or 0
+        cached = max(0, min(p, t.get("cache_n") or 0))
+        s = self.usage
+        s["requests"] += 1
+        s["prompt_tokens"] += p
+        s["cached"] += cached
+        s["read"] += p - cached
+        s["output"] += written
+        s["prompt_ms"] += t.get("prompt_ms") or 0.0
+        s["decode_ms"] += t.get("predicted_ms") or 0.0
+
+    def usage_line(self) -> str:
+        """The bar's item: the conversation's cache hit and the prompt tokens its requests did not read again.
+        The rest of the counts (/tokens): a long agent session runs into the millions, hence the short form."""
+        s = self.usage
+        if not s["requests"] or not s["prompt_tokens"]:
+            return ""
+        return f"cache hit {100 * s['cached'] / s['prompt_tokens']:.0f}%, reused {_tok(s['cached'])}"
+
+    def token_row(self, label: str, n, prompt, cached, read, written, read_s, out_s) -> str:
+        """One line of the /tokens table: the cache column carries its own share of the prompt."""
+        cell = lambda x, nd=0: "-" if x is None else f"{x:,.{nd}f}"
+        cache = "-" if cached is None else f"{cached:,}" + (f" ({100 * cached / prompt:.0f}%)" if prompt else "")
+        return (f"{label:<18}{cell(n):>9}{cell(prompt):>11}{cache:>17}{cell(read):>9}{cell(written):>9}"
+                f"{cell(read_s):>8}{cell(out_s, 1):>9}")
+
+    def tokens_text(self) -> str:
+        """`/tokens`: the counts as a table - this conversation, its last request (/metrics' requests[0]) and the
+        server since it started.  The bar carries only the cache hit and the reused tokens; everything else is here."""
+        s = self.usage
+        try:
+            m = self.api.get("/metrics", timeout=2)
+        except (OSError, RuntimeError, ValueError, http.client.HTTPException):
+            m = {}
+        t, last = m.get("totals") or {}, (m.get("requests") or [None])[0]
+        lines = [f"{DIM}{'':<18}{'requests':>9}{'prompt':>11}{'from the cache':>17}{'read':>9}{'written':>9}"
+                 f"{'read/s':>8}{'out/s':>9}{RESET}",
+                 self.token_row("this conversation",
+                                s["requests"] or None, s["prompt_tokens"] or None, s["cached"] or None,
+                                s["read"] or None, s["output"] or None,
+                                1000 * s["read"] / s["prompt_ms"] if s["prompt_ms"] else None,
+                                1000 * s["output"] / s["decode_ms"] if s["decode_ms"] else None)]
+        if last:
+            l_read = max(0, (last.get("prompt_tokens") or 0) - (last.get("reused") or 0))
+            lines.append(self.token_row("the last request", 1, last.get("prompt_tokens"), last.get("reused"),
+                                        l_read or None, last.get("output_tokens"),
+                                        1000 * l_read / last["prompt_ms"] if last.get("prompt_ms") else None,
+                                        last.get("decode_tok_s")))
+        if t.get("requests"):
+            t_read = (t.get("prompt_tokens") or 0) - (t.get("reused") or 0)
+            lines.append(self.token_row("the server", t["requests"], t.get("prompt_tokens"), t.get("reused"),
+                                        t_read or None, t.get("output_tokens"),
+                                        1000 * t_read / t["prompt_ms"] if t.get("prompt_ms") else None,
+                                        1000 * (t.get("output_tokens") or 0) / t["decode_ms"] if t.get("decode_ms")
+                                        else None))
+            lines.append(f"{DIM}the model server's line counts since it started; "
+                         f"{len(self.messages)} messages in this conversation{RESET}")
+        if not s["requests"]:
+            lines.append(f"{DIM}nothing asked yet in this conversation{RESET}")
+        lines.append(f"context            {_f(self.ctx_used)} of {_f(self.model.get('max_context'))} tokens in use"
+                     + (f" ({100 * self.ctx_used / self.model['max_context']:.0f}%)"
+                        if self.model.get("max_context") else ""))
+        return "\n".join(lines)
 
     # ---- compaction
     def est_tokens(self, msgs: list, rate: float | None = None) -> int:
@@ -2080,6 +2266,8 @@ class Chat:
                     self.bar.write(sys.stdout, (DIM if TTY else "") + v)
                 elif kind == "tool":            # a tool call while summarizing: the summary stops before it
                     break
+                elif kind == "end" and v.get("usage"):
+                    self.count(v["usage"], v.get("timings") or {})   # the summary is part of this conversation too
         except KeyboardInterrupt:
             self.bar.done()
             try:
@@ -2246,6 +2434,7 @@ class Chat:
         elif cmd == "new":
             saved = self.save() if self.messages else None
             self.messages, self.ctx_used, self.name = [], 0, None
+            self.usage = usage_new()
             self.pending, self.images = "", []
             TODO.clear()
             self.date = time.strftime("%Y-%m-%d")
@@ -2285,6 +2474,7 @@ class Chat:
                 say(f"{DIM}{f.stem} moved to the trash{RESET}")
                 if f.stem == self.name:         # this conversation: a new one, so leaving does not save it again
                     self.messages, self.ctx_used, self.name = [], 0, None
+                    self.usage = usage_new()
                     say(f"{DIM}a new conversation{RESET}")
         elif cmd in ("retry", "undo", "edit"):
             i = next((j for j in range(len(self.messages) - 1, -1, -1) if self.messages[j]["role"] == "user"), None)
@@ -2308,7 +2498,8 @@ class Chat:
             say(f"{self.model['id']}, thinking {self.level_text()}\n"
                 f"context    {self.ctx_used} of {self.model.get('max_context') or '?'} tokens, {len(self.messages)} messages\n"
                 f"sampling   {self.sampling_text()}\n"
-                f"agent      {('on in ' + str(self.agent.root)) if self.agent else 'off'}\n"
+                f"agent      {('on in ' + str(self.agent.root)) if self.agent else 'off'}{', plan mode' if self.plan else ''}\n"
+                f"goal       {self.goal or '-'}\n"
                 f"saved as   {self.name or '-'}")
         elif cmd == "cd":
             d = Path(os.path.expanduser(arg or "~")).resolve()
@@ -2329,6 +2520,8 @@ class Chat:
                 say(monitor_text(self.api.get("/metrics"), self.model))
             except (OSError, RuntimeError, ValueError) as e:
                 say(f"{RED}{e}{RESET}")
+        elif cmd == "tokens":
+            say(self.tokens_text())
         elif cmd == "forget":
             try:
                 r = self.api.post("/conversation-cache/clear", {})
@@ -2432,6 +2625,26 @@ class Chat:
                 + (f": tools read_file, write_file, edit_file, list_dir, run_command (also in the background: /jobs), job_output, job_stop, schedule, schedule_stop"
                    + (", web_search, web_fetch" if self.agent.web else "") + f" in {os.getcwd()}" if self.agent else "")
                 + RESET)
+        elif cmd == "goal":
+            if not arg:
+                say(f"{DIM}goal: {self.goal or 'none'}{RESET}")
+            elif arg in ("clear", "off"):
+                self.goal = None
+                say(f"{DIM}goal dropped{RESET}")
+            elif not self.agent:
+                say(f"{RED}/goal needs the agent (/agent on){RESET}")
+            else:
+                self.goal = arg
+                say(f"{DIM}goal: {arg}{RESET}")
+                self.ask(f"Work toward the goal: {arg}")
+        elif cmd == "plan":
+            if not self.agent:
+                say(f"{RED}plan mode needs the agent (/agent on){RESET}")
+            elif arg in ("", "on", "off"):
+                self.set_plan(arg != "off" if arg else not self.plan)
+            else:
+                self.set_plan(True)
+                self.ask(arg)
         elif cmd in ("hide", "show"):
             self.show = cmd == "show"
             say(f"{DIM}thinking {'shown' if self.show else 'hidden'}{RESET}")
@@ -2450,6 +2663,7 @@ class Chat:
         CHATS.mkdir(parents=True, exist_ok=True)
         data = {"model": self.model["id"], "level": self.level, "sampling": self.sampling, "system": self.system,
                 "cwd": str(self.agent.root if self.agent else Path.cwd()), "ctx_used": self.ctx_used,
+                "usage": self.usage,
                 "agent": bool(self.agent), "web": bool(self.agent and self.agent.web), "date": self.date,
                 "messages": self.messages}
         (CHATS / f"{self.name}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -2500,6 +2714,7 @@ class Chat:
             say(f"{DIM}an agent conversation: the agent is on (tools{' and web' if web else ''}, in {self.agent.root}); "
                 f"/agent off turns it off{RESET}")
         self.ctx_used, self.name = d.get("ctx_used", 0), f.stem
+        self.usage = dict(usage_new(), **(d.get("usage") or {}))    # an older file has none: the counts start over
         self.sampling = d.get("sampling") or self.sampling
         if d.get("level") in self.values():
             self.level = d["level"]
@@ -2558,7 +2773,7 @@ class Chat:
             else:
                 cmd = head.split()[0][1:]
                 opts = {"model": lambda: [m["id"] for m in self.models],
-                        "think": self.values, "agent": lambda: ["on", "off"],
+                        "think": self.values, "agent": lambda: ["on", "off"], "plan": lambda: ["on", "off"], "goal": lambda: ["clear"],
                         "set": lambda: ["temp", "top_p", "top_k", "min_p", "repeat_penalty", "presence_penalty",
                                         "seed", "max_tokens"],
                         "load": lambda: [f.stem for f, _ in self.saved()],
@@ -2694,6 +2909,17 @@ class Chat:
 
 def _f(x, nd=0):
     return "-" if x is None else f"{x:,.{nd}f}"
+
+
+def _tok(x) -> str:
+    """Tokens in the bar's short form: an agent session's count runs into the millions (9,310 / 412K / 19.8M)."""
+    if x is None:
+        return "-"
+    if x >= 1e6:
+        return f"{x / 1e6:.1f}M".replace(".0M", "M")
+    if x >= 1e4:
+        return f"{x / 1e3:.0f}K"
+    return f"{x:,.0f}"
 
 
 def monitor_text(m: dict, model: dict | None = None) -> str:

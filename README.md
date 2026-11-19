@@ -166,11 +166,13 @@ instead.
   `--max-tokens`; `/set KEY VALUE` in the chat, `/set` alone shows them next to the model's defaults (`/props`).
 - `/stats` (or `--monitor`): `GET /metrics` as text - state, speed, context, experts in VRAM, each GPU's load, VRAM,
   temperature and power, PCIe, CPU, RAM, disk, the conversation cache, the last requests and the totals.
-  `/forget` clears the conversation cache.
+  `/tokens` shows the same counts as a table, one line each for this conversation, its last request and the server
+  since it started: requests, prompt tokens, how many the conversation cache gave back without reading them (with
+  their share), the rest read, what was written, and the two speeds. `/forget` clears the conversation cache.
 - on a terminal the last line is a status bar (a scroll region the chat scrolls above): reading the
   prompt a bar with tokens read / total and tok/s, writing the tokens, tok/s, the time and thinking or answer, idle the
-  last request's prompt / reused / output and tok/s, the context in use, the thinking level and the model (from
-  `/metrics`); `-p` and piped output have none.
+  context in use, this conversation's cache hit and reused tokens (`cache hit 97%, reused 18.9M`), the thinking level
+  and the model - one request's own numbers are in `/tokens`, so the line stays short; `-p` and piped output have none.
 - `--agent` (or `/agent on`): the model gets tools - `read_file`, `write_file`, `edit_file`, `list_dir`,
   `run_command` (bash in the working directory, the output cut to 8 KB) - and the chat runs them until an answer
   without calls (at most 50 steps; Ctrl+C stops). Reads and listings inside the working directory go ahead; a write,
