@@ -41,6 +41,7 @@
     "threads": 12
   },
   "env": {
-    "ALMOND_VISION_HY4_ROWS": "1"
+    "ALMOND_VISION_HY4_ROWS": "1",
+    "ALMOND_MMVF_ROWS": "1"
   }
 }

@@ -513,6 +513,26 @@ tokens a round, where a 6-token check costs 2.4 times a 2-token one (the 14 laye
 experts per extra token); the break-even with MTP for 5 guesses is about 3.3 tokens a round. So `--dfly` stays off;
 MTP with one guess remains the default.
 
+## A matrix-vector kernel for short BF16 rows on RDNA3 (`ALMOND_MMVF_ROWS=1`, 2026-11-19)
+
+A kernel trace (rocprofv3, 64 greedy tokens, 64K, no MTP) put the per-head BF16 products of every layer's attention,
+`attn_k_b` (rows of 192 values) and `attn_v_b` (rows of 512), at 26-60 us each, 200-350 GB/s, about 3.9 ms a token:
+ggml's `mul_mat_vec_f` runs one block of 96 or 256 threads per row, most of them idle or in the block's reduction.
+`mul_mat_vec_bf16_rows` (vendored ggml, kept as `tools/v41/ggml/mmvf-rows.patch`, opt-in with
+`ALMOND_MMVF_ROWS=1`) gives a row to one RDNA3 wave of 32 lanes and 8 rows to a block; each lane reads 8 BF16 (16
+bytes) at a time and the wave sums with shuffles; up to 8 columns of y, no ids, no fusion. Measured:
+
+- those products: 18.7 us on average (5,292 calls), about 1.6 ms a token;
+- greedy with MTP, the three chat prompts, 400 tokens: 21.65 / 22.63 / 22.25 -> 23.24 / 24.36 / 23.15 tok/s;
+  without MTP, 64 tokens: 18.71 -> 18.78 and 19.18 -> 19.89;
+- the greedy text: the same 32 first ids on two of the three prompts, another on the third (the sums run in
+  another order);
+- one token per step (`-c 512 --ubatch 1`, doc.ids): perplexity 28.04 -> 28.60, KL 0.107 and top-1 agreement
+  87.5% against the run without it (the same run repeated: KL 0.00000), within the 0.18-0.20 / ~85% that equivalent
+  variants of this 2-bit model differ by (see `--down-requant`). In 8-token steps it is not used.
+
+`local/hy4-local.json` and `local/hy4-local-vision.json` set it in their `env`; the other models do not.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the
