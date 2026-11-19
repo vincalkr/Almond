@@ -32,6 +32,16 @@ suite ("N truncated" beside the score): many of them mean the limit, not the mod
 qwen3.8-27b (2026-11-19): 2,048 tokens left IFEval's first prompt (a 300-word summary under three rules) with
 reasoning only, and 4,096 cut one MMLU-Pro answer in 14.
 
+8,192 is not always enough either: at Almond's default thinking level (high) qwen3.8-27b-q8 reasoned to the limit
+on 3 of 13 IFEval prompts and qwen3.8-flash-next on 3 of 15 (ifeval-1154 and ifeval-1216 on both; 2026-11-19). For a
+truncated task the run keeps the last 3,000 characters of the reasoning and the share of its lines already written
+before ("looping" in the note above 50%), shown under the answer in Results: a model going round in circles and one
+still making progress need different fixes (a lower level, or a higher `--max-tokens`).
+
+The thinking level is sent as `reasoning_effort` (`--reasoning none|low|medium|high`, "Thinking" in the
+interface; unset: the server's default, Almond's high) and recorded in the run; Compare shows it beside the model.
+Scores at different levels measure different things: compare quantizations at the same level.
+
 Graders checked against the reference answers (2026-11-19): math500 500/500 with the dataset's own answers;
 humaneval+ 163/164 and mbpp+ 377/378 with the canonical solutions (the one failure in each is that solution failing
 EvalPlus's own tests); bfcl 1,226/1,240 with the ground truth turned into calls (the 14 are nested arguments the
@@ -98,6 +108,7 @@ GPQA is gated: accept its terms on huggingface.co/datasets/Idavidrein/gpqa, then
 ./almond-bench run --model glm-5.3-flash --suites ifeval,bfcl --preset full
 ./almond-bench run --model qwen3.8-27b --suites arena-hard --judge-model qwen3.8-27b-q8
 ./almond-bench run --resume local/bench/runs/<file>.json # continue a stopped run
+./almond-bench run --model qwen3.8-27b --reasoning medium # a thinking level instead of the server's default
 ```
 
 The model names are the router's (`/v1/models`). The interface starts the router when nothing answers at a local
