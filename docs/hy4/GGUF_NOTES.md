@@ -222,7 +222,8 @@ layer whose experts are on the CPU (10 layers in VRAM: 9.4 tok/s, 20: 12.2, 29: 
 
 ## The server
 
-`./almond serve --model hy4` (`local/hy4-local.json`, `tools/hy4/serve/serve_hy4.py`, router entry `hy4`, chat
+`./almond serve --model hy4` (`local/hy4-local.json`; `local/hy4-local-vision.json` when the image encoder and
+`build-vision-hy4` are there, as for the other models; `tools/hy4/serve/serve_hy4.py`, router entry `hy4`, chat
 `./almond -m hy4`). The tokenizer directory is extracted from the GGUF by `tools/almond_tokenizer.py` (pre-split
 `hy_v4`, the same regexes as `joyai-llm`) together with the model's chat template. The shim maps the reasoning levels
 (none / low / high, the default / max), ends a turn on `<｜hy_end｜>` (120025) and rewrites Hy4's tags
@@ -353,7 +354,7 @@ i % 3 == 2, below pair 30, and the time plane otherwise. A picture of H lines of
 line, starting at position p0, puts row (y, x) at t = p0, h = p0 + y, w = p0 + x; the text after it starts at
 p0 + max(H, W + 1), so a token's rotation position is no longer its index in the cache.
 
-- `almond-vision --hy4-rows` (or `ALMOND_VISION_HY4_ROWS=1`, set in `local/hy4-local.json`): mtmd gives this
+- `almond-vision --hy4-rows` (or `ALMOND_VISION_HY4_ROWS=1`, set in `local/hy4-local-vision.json`): mtmd gives this
   projector no grid, so the record's grid is taken from n = H * (W + 1) and the picture's aspect ratio (the test
   picture, 448x336: 165 rows -> 15 x 11). Without the flag nothing changes (GLM's and Qwen's encoders).
 - The engine keeps (t, h, w) for every cached position (also in the session files, now version 2). A step whose

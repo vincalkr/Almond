@@ -752,7 +752,8 @@ weights at about a quarter of the speed.
 Tencent's Hy4-flash (GGUF architecture `hy_v4_flash`: 42 trunk layers, MLA with sinks, 30 sliding-window layers and
 12 sparse layers with a k-pool indexer, LatentMoE with 512 experts and 16 per token, four Engram modules, iHC with 4
 streams) from `AngelSlim/Hy4-flash-GGUF`: routed experts IQ2_XXS / Q4_K, the Engram table FP8 (59 GiB, the second
-shard). `local/fetch.sh hy4`, `./almond serve --model hy4` (`local/hy4-local.json`: cards 0 and 1, 64K context). The
+shard). `local/fetch.sh hy4`, `./almond serve --model hy4` (`local/hy4-local.json`: cards 0 and 1, 64K context;
+`local/hy4-local-vision.json`, which `./almond serve` picks when the encoder and `build-vision-hy4` are there). The
 engine is `src/hy4/hy4_engine.cpp`; how it was built and checked against llama.cpp PR #32517, and every number, in
 docs/hy4/GGUF_NOTES.md. Measured on 2026-11-18: 14.9 tok/s generating with a short prompt (the PR: 10.4 on the same
 machine), 11.8 tok/s after a 15,000-token prompt read at 237 tok/s; perplexity within the PR's own run-to-run spread

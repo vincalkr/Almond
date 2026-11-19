@@ -148,7 +148,11 @@ def pick_config(o: dict) -> str:
     if m == "hy4":
         # Hy4-flash on src/hy4 (--hy4): two cards, the routed experts that do not fit in VRAM read from RAM, the
         # Engram table in RAM when it fits or from the SSD (--engram auto)
-        return str(ROOT / "local/hy4-local.json")
+        # with its encoder (local/fetch.sh hy4-vision) and the almond-vision built against llama.cpp PR #32517's mtmd
+        # (build.sh, build-vision-hy4): images on, read on the CPU
+        on = (ROOT / "build-vision-hy4/bin/almond-vision").exists() and \
+            whole(ROOT / "models/hy4-iq2ah/mmproj-Hy4-flash-bf16.gguf")
+        return str(ROOT / ("local/hy4-local-vision.json" if on else "local/hy4-local.json"))
     if m == "qwen27":
         # the dense Qwen3.8-27B on src/qwen35 (--qwen35), one card; with its encoder (the mmproj in
         # models/qwen38-27b) and almond-vision built: images on, read on the CPU

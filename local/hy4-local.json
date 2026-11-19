@@ -30,16 +30,5 @@
   "loop_guard": true,
   "fit_max_tokens": true,
   "conversation_dir": "local/hy4-slots",
-  "conversation_dir_gib": 16,
-  "vision": {
-    "exe": "build-vision-hy4/bin/almond-vision",
-    "mmproj": "models/hy4-iq2ah/mmproj-Hy4-flash-bf16.gguf",
-    "model": "models/hy4-iq2ah/Hy4-flash-IQ2_AH-00001-of-00002.gguf",
-    "gpu": false,
-    "max_tokens": 1024,
-    "threads": 12
-  },
-  "env": {
-    "ALMOND_VISION_HY4_ROWS": "1"
-  }
+  "conversation_dir_gib": 16
 }
