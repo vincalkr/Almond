@@ -71,6 +71,8 @@ struct Hy4Engine::Impl {
     // layer has none) inside blk.L.attn_in_cat, the four Q8_0 matrices that read the attention input stacked as one
     struct ProjCat { int64_t qa = -1, kv = -1, gate = -1, ik = -1; };
     std::map<int64_t, ProjCat> proj_cat;
+    struct FfnCat { int64_t rd = -1, sg = -1, su = -1; };   // ffn_routed_down, ffn_gate_shexp, ffn_up_shexp in blk.L.ffn_in_cat
+    std::map<int64_t, FfnCat> ffn_cat;
     int64_t n_alloc = 0;              // layers with weights and caches: the trunk, plus the MTP block with --mtp
     int64_t draft_off = 0;            // a chained draft: its position past n_past
     std::vector<float> draft_h;       // and the state it starts from (the previous draft's), empty = the trunk's
@@ -260,8 +262,11 @@ struct Hy4Engine::Impl {
         }
         struct Item { const TensorInfo * t; size_t shard; ggml_tensor * g; int d; };
         std::vector<Item> items;
-        static const char * PROJ_PARTS[4] = { "attn_q_a.weight", "attn_kv_a_mqa.weight", "attn_gate.weight",
-                                              "indexer.attn_k.weight" };
+        // two groups of matrices that read the same input: the attention's (0) and the MoE's (1); key = 2 * layer + group
+        static const char * PROJ_PARTS[2][4] = {
+            { "attn_q_a.weight", "attn_kv_a_mqa.weight", "attn_gate.weight", "indexer.attn_k.weight" },
+            { "ffn_routed_down.weight", "ffn_gate_shexp.weight", "ffn_up_shexp.weight", nullptr } };
+        static const char * CAT_NAME[2] = { "attn_in_cat", "ffn_in_cat" };
         std::map<int64_t, std::array<std::pair<const TensorInfo *, size_t>, 4>> cat_parts;
         for (size_t s = 0; s < model->size(); ++s)
             for (const auto & t : model->shard(s).tensors()) {
@@ -277,9 +282,10 @@ struct Hy4Engine::Impl {
                 if (o.fused_proj && l >= 0 && d < NG && type == GGML_TYPE_Q8_0 && t.shape.size() == 2 &&
                     (int64_t) t.shape[0] == G.n_embd) {
                     const std::string b = "blk." + std::to_string(l) + ".";
-                    int k = -1;
-                    for (int j = 0; j < 4; ++j) if (n == b + PROJ_PARTS[j]) k = j;
-                    if (k >= 0) { cat_parts[l][k] = { &t, s }; continue; }
+                    int k = -1, grp = -1;
+                    for (int gi = 0; gi < 2; ++gi)
+                        for (int j = 0; j < 4; ++j) if (PROJ_PARTS[gi][j] && n == b + PROJ_PARTS[gi][j]) { k = j; grp = gi; }
+                    if (k >= 0) { cat_parts[2 * (int64_t) l + grp][(size_t) k] = { &t, s }; continue; }
                 }
                 int64_t ne[4] = { 1, 1, 1, 1 };
                 for (size_t i = 0; i < t.shape.size() && i < 4; ++i) ne[i] = (int64_t) t.shape[i];
@@ -290,18 +296,25 @@ struct Hy4Engine::Impl {
             }
         // --fused-proj: the stacked matrix of each layer whose parts were all kept as Q8_0
         std::map<int64_t, ggml_tensor *> cat_t;
-        for (auto & [l, parts] : cat_parts) {
+        for (auto & [key, parts] : cat_parts) {
+            const int64_t l = key / 2;
+            const int grp = (int) (key % 2);
             ProjCat pc;
+            FfnCat fc;
             int64_t rows = 0;
             int64_t * offs[4] = { &pc.qa, &pc.kv, &pc.gate, &pc.ik };
+            int64_t * offs_f[4] = { &fc.rd, &fc.sg, &fc.su, nullptr };
             for (int j = 0; j < 4; ++j)
-                if (parts[(size_t) j].first) { *offs[j] = rows; rows += (int64_t) parts[(size_t) j].first->shape[1]; }
+                if (parts[(size_t) j].first) {
+                    *(grp == 0 ? offs[j] : offs_f[j]) = rows;
+                    rows += (int64_t) parts[(size_t) j].first->shape[1];
+                }
             ggml_tensor * g = ggml_new_tensor_2d(wctx[(size_t) dev[(size_t) l]], GGML_TYPE_Q8_0, G.n_embd, rows);
-            const std::string name = "blk." + std::to_string(l) + ".attn_in_cat";
+            const std::string name = "blk." + std::to_string(l) + "." + CAT_NAME[grp];
             ggml_set_name(g, name.c_str());
             w[name] = g;
-            cat_t[l] = g;
-            proj_cat[l] = pc;
+            cat_t[key] = g;
+            if (grp == 0) proj_cat[l] = pc; else ffn_cat[l] = fc;
         }
         wbuf.assign((size_t) NG + 1, nullptr);
         for (int d = 0; d < NG; ++d) {
@@ -378,8 +391,8 @@ struct Hy4Engine::Impl {
             const uintptr_t a = (uintptr_t) src & ~(uintptr_t) 4095;
             ::madvise((void *) a, it.t->elements() ? tensor_payload_bytes(*it.t) + ((uintptr_t) src - a) : 0, MADV_PAGEOUT);
         }
-        for (auto & [l, parts] : cat_parts) {
-            ggml_tensor * g = cat_t[l];
+        for (auto & [key, parts] : cat_parts) {
+            ggml_tensor * g = cat_t[key];
             const size_t rb = ggml_row_size(GGML_TYPE_Q8_0, G.n_embd);
             size_t at = 0;
             for (int j = 0; j < 4; ++j) {
@@ -494,13 +507,13 @@ struct Hy4Engine::Impl {
         const int64_t R = G.d_rope;
         if (!pos4) return ggml_rope_ext(c, x, pos, nullptr, (int) R, 0, 0, base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         const int64_t H = x->ne[1], n = x->ne[2];
-        ggml_tensor * v = ggml_reshape_4d(c, ggml_cont(c, x), 2, R / 2, H, n);
-        v = ggml_reshape_3d(c, ggml_cont(c, ggml_permute(c, v, 1, 0, 2, 3)), R, H, n);       // (2j + r) -> (j + 32 r)
+        ggml_tensor * v = ggml_reshape_4d(c, cont(c, x), 2, R / 2, H, n);
+        v = ggml_reshape_3d(c, cont(c, ggml_permute(c, v, 1, 0, 2, 3)), R, H, n);       // (2j + r) -> (j + 32 r)
         int sections[GGML_MROPE_SECTIONS] = { 12, 10, 10, 0 };
         v = ggml_rope_multi(c, v, pos4, nullptr, (int) R, sections, GGML_ROPE_TYPE_IMROPE, 0, base, 1.0f, 0.0f, 1.0f,
                             0.0f, 0.0f);
         v = ggml_reshape_4d(c, v, R / 2, 2, H, n);
-        return ggml_reshape_3d(c, ggml_cont(c, ggml_permute(c, v, 1, 0, 2, 3)), R, H, n);    // back to (2j + r)
+        return ggml_reshape_3d(c, cont(c, ggml_permute(c, v, 1, 0, 2, 3)), R, H, n);    // back to (2j + r)
     }
 
     /// The trailing rope_dim values of each indexer head rotated, the front left as it is.
@@ -508,8 +521,8 @@ struct Hy4Engine::Impl {
         const int64_t R = G.d_rope, nope = G.idx_dim - R;
         ggml_tensor * front = ggml_view_3d(c, x, nope, x->ne[1], x->ne[2], x->nb[1], x->nb[2], 0);
         ggml_tensor * back = ggml_view_3d(c, x, R, x->ne[1], x->ne[2], x->nb[1], x->nb[2], ggml_row_size(x->type, nope));
-        back = rope(c, ggml_cont(c, back), pos, pos4, base);
-        return ggml_concat(c, ggml_cont(c, front), back, 0);
+        back = rope(c, cont(c, back), pos, pos4, base);
+        return ggml_concat(c, cont(c, front), back, 0);
     }
 
     /// PR #32517's build_kpool_select: stores this ubatch's indexer rows, pools the groups it completed, and (when
@@ -533,9 +546,9 @@ struct Hy4Engine::Impl {
             ggml_tensor * pk = ggml_view_3d(c, rows, NI, kp, sh.n_new, rows->nb[1], rows->nb[2], 0);
             ggml_tensor * pg = ggml_view_3d(c, rows, NI, kp, sh.n_new, rows->nb[1], rows->nb[2], ggml_row_size(rows->type, NI));
             ggml_tensor * lg = ggml_add(c, pg, W(b + "indexer_compressor_ape.weight"));      // ape [NI, kp]
-            lg = ggml_cont(c, ggml_permute(c, lg, 1, 0, 2, 3));                       // [kp, NI, n_new]
+            lg = cont(c, ggml_permute(c, lg, 1, 0, 2, 3));                       // [kp, NI, n_new]
             ggml_tensor * pr = ggml_reshape_3d(c, ggml_soft_max(c, ggml_reshape_2d(c, lg, kp, NI * sh.n_new)), kp, NI, sh.n_new);
-            pk = ggml_cont(c, ggml_permute(c, pk, 1, 0, 2, 3));
+            pk = cont(c, ggml_permute(c, pk, 1, 0, 2, 3));
             ggml_tensor * pooled = ggml_reshape_2d(c, ggml_sum_rows(c, ggml_mul(c, pr, pk)), NI, sh.n_new);
             pooled = ggml_mul(c, ggml_rms_norm(c, pooled, eps), W(b + "indexer_compressor_norm.weight"));
             pooled = ggml_reshape_2d(c, idx_rope(c, ggml_reshape_3d(c, pooled, NI, 1, sh.n_new), in.new_pos, in.new_pos4, base), NI, sh.n_new);
@@ -549,13 +562,13 @@ struct Hy4Engine::Impl {
         ggml_tensor * wts = ggml_scale(c, ggml_mul_mat(c, W(b + "indexer.proj.weight"), x), 1.0f / sqrtf((float) (NI * NH)));
         ggml_tensor * qp = ggml_permute(c, iq, 0, 2, 1, 3);                          // [NI, nt, NH]
         ggml_tensor * kq = ggml_mul_mat(c, pooled, qp);                               // [n_pool, nt, NH]
-        kq = ggml_relu(c, ggml_cont(c, ggml_permute(c, kq, 2, 1, 0, 3)));             // [NH, nt, n_pool]
+        kq = ggml_relu(c, cont(c, ggml_permute(c, kq, 2, 1, 0, 3)));             // [NH, nt, n_pool]
         kq = ggml_mul(c, kq, ggml_reshape_3d(c, wts, NH, nt, 1));
         ggml_tensor * score = ggml_sum_rows(c, kq);                                   // [1, nt, n_pool]
-        score = ggml_reshape_2d(c, ggml_cont(c, ggml_permute(c, score, 2, 1, 0, 3)), sh.n_pool, nt);
+        score = ggml_reshape_2d(c, cont(c, ggml_permute(c, score, 2, 1, 0, 3)), sh.n_pool, nt);
         score = ggml_add(c, score, in.pool_mask);
         ggml_tensor * top = ggml_argsort_top_k(c, score, (int) sh.n_top);            // [n_top, nt], best first
-        ggml_tensor * sel = ggml_get_rows(c, in.pool_idx, ggml_reshape_1d(c, ggml_cont(c, top), sh.n_top * nt));
+        ggml_tensor * sel = ggml_get_rows(c, in.pool_idx, ggml_reshape_1d(c, cont(c, top), sh.n_top * nt));
         sel = ggml_reshape_2d(c, sel, kp * sh.n_top, nt);
         if (G.idx_tail) sel = ggml_concat(c, sel, in.tail, 0);                        // [n_sel, nt]
         // a slot that is not real (a pool the token cannot see yet, a tail cell before the start) writes its own dump
@@ -564,9 +577,13 @@ struct Hy4Engine::Impl {
         f = ggml_add(c, ggml_mul(c, ggml_sub(c, f, in.dump), in.live), in.dump);
         ggml_tensor * idx = ggml_cast(c, f, GGML_TYPE_I32);
         ggml_tensor * m = ggml_set_rows(c, ggml_dup(c, in.mask_base), in.zeros, ggml_reshape_3d(c, idx, sh.n_sel, nt, 1));
-        m = ggml_cont(c, ggml_view_2d(c, m, sh.n_kv, nt, m->nb[2], 0));
+        m = cont(c, ggml_view_2d(c, m, sh.n_kv, nt, m->nb[2], 0));
         return ggml_cast(c, m, GGML_TYPE_F16);
     }
+
+    /// ggml_cont only where the tensor is not laid out contiguously already: in a one-token step most views are, and
+    /// a copy of them is a kernel (a device memcpy) for nothing
+    static ggml_tensor * cont(ggml_context * c, ggml_tensor * t) { return ggml_is_contiguous(t) ? t : ggml_cont(c, t); }
 
     ggml_tensor * hc_pre(ggml_context * c, ggml_tensor * x, const std::string & p, int64_t nt, ggml_tensor ** post) {
         const int64_t D = G.n_embd, HC = G.hc;
@@ -576,7 +593,7 @@ struct Hy4Engine::Impl {
         ggml_tensor * mixes = ggml_mul_mat(c, fn, ggml_rms_norm(c, flat, eps));    // [2HC, nt]
         if (o.fused_hc && G.hc_mag == 2.0) {
             // --fused-hc: DeepSeek-V4's fused ops (vendored ggml); Hy4's eps inside the sigmoid is in the base (upload)
-            ggml_tensor * g = ggml_dsv41_hc_mixes(c, ggml_cont(c, mixes), sc, bs, 0.0f);         // [HC, 2 nt]
+            ggml_tensor * g = ggml_dsv41_hc_mixes(c, cont(c, mixes), sc, bs, 0.0f);         // [HC, 2 nt]
             ggml_tensor * pre = ggml_view_2d(c, g, HC, nt, g->nb[1], 0);
             *post = ggml_view_2d(c, g, HC, nt, g->nb[1], (size_t) nt * g->nb[1]);
             return ggml_dsv4_hc_pre(c, x, pre);
@@ -589,9 +606,9 @@ struct Hy4Engine::Impl {
         ggml_tensor * po = ggml_sigmoid(c, ggml_scale_bias(c, ggml_add(c, ggml_mul(c, pg, s1), b1), 1.0f, eps));
         *post = ggml_scale_bias(c, ggml_scale(c, po, (float) G.hc_mag), 1.0f, eps);
         // sum_h x[:, h, :] * pre[h, :]
-        ggml_tensor * pw = ggml_reshape_3d(c, ggml_cont(c, pre), 1, HC, nt);
+        ggml_tensor * pw = ggml_reshape_3d(c, cont(c, pre), 1, HC, nt);
         ggml_tensor * prod = ggml_mul(c, x, pw);                                      // [D, HC, nt]
-        ggml_tensor * red = ggml_sum_rows(c, ggml_cont(c, ggml_permute(c, prod, 1, 0, 2, 3)));   // [1, D, nt]
+        ggml_tensor * red = ggml_sum_rows(c, cont(c, ggml_permute(c, prod, 1, 0, 2, 3)));   // [1, D, nt]
         return ggml_reshape_2d(c, red, D, nt);
     }
 
@@ -600,7 +617,7 @@ struct Hy4Engine::Impl {
         if (o.fused_hc) return ggml_dsv4_hc_post(c, y, residual, post, nullptr);   // residual + y * post, one kernel
         // residual[:, h, :] + y * post[h, :]
         ggml_tensor * yb = ggml_reshape_3d(c, y, D, 1, nt);
-        ggml_tensor * pw = ggml_reshape_3d(c, ggml_cont(c, post), 1, HC, nt);
+        ggml_tensor * pw = ggml_reshape_3d(c, cont(c, post), 1, HC, nt);
         ggml_tensor * add = ggml_mul(c, ggml_repeat_4d(c, yb, D, HC, nt, 1), pw);
         return ggml_add(c, residual, add);
     }
@@ -617,8 +634,8 @@ struct Hy4Engine::Impl {
         r = ggml_reshape_2d(c, r, dim * cols, nt);
         ggml_tensor * kvt = ggml_mul_mat(c, W(b + "engram_kv.weight"), r);
         kvt = ggml_add(c, ggml_reshape_3d(c, kvt, D, HC + 1, nt), W(b + "engram_kv_b.weight"));
-        ggml_tensor * key = ggml_cont(c, ggml_view_3d(c, kvt, D, HC, nt, kvt->nb[1], kvt->nb[2], 0));
-        ggml_tensor * value = ggml_cont(c, ggml_view_3d(c, kvt, D, 1, nt, kvt->nb[1], kvt->nb[2], HC * kvt->nb[1]));
+        ggml_tensor * key = cont(c, ggml_view_3d(c, kvt, D, HC, nt, kvt->nb[1], kvt->nb[2], 0));
+        ggml_tensor * value = cont(c, ggml_view_3d(c, kvt, D, 1, nt, kvt->nb[1], kvt->nb[2], HC * kvt->nb[1]));
         ggml_tensor * dot = ggml_mul(c, ggml_mul(c, ggml_rms_norm(c, x, eps), ggml_rms_norm(c, key, eps)),
                                      W(b + "engram_gate.weight"));
         dot = ggml_scale(c, ggml_sum_rows(c, dot), 1.0f / sqrtf((float) D));
@@ -654,7 +671,7 @@ struct Hy4Engine::Impl {
             v_gate = rows(it->second.gate, H * VD);
             if (it->second.ik >= 0) v_ik = rows(it->second.ik, G.idx_dim);
         }
-        auto contig = [&](ggml_tensor * v) { return ggml_is_contiguous(v) ? v : ggml_cont(c, v); };   // one token: as is
+        auto contig = [&](ggml_tensor * v) { return ggml_is_contiguous(v) ? v : cont(c, v); };   // one token: as is
         if (v_ik) v_ik = contig(v_ik);
         ggml_tensor * qr = norm(c, v_qa ? contig(v_qa) : ggml_mul_mat(c, W(b + "attn_q_a.weight"), x),
                                 b + "attn_q_a_norm.weight");
@@ -671,8 +688,8 @@ struct Hy4Engine::Impl {
         ggml_tensor * kvc = v_kv ? v_kv : ggml_mul_mat(c, W(b + "attn_kv_a_mqa.weight"), x);   // [KR + R, nt]
         ggml_tensor * lat = ggml_view_2d(c, kvc, KR, nt, kvc->nb[1], 0);
         ggml_tensor * kp = ggml_view_2d(c, kvc, R, nt, kvc->nb[1], (size_t) KR * ggml_element_size(kvc));
-        lat = norm(c, ggml_cont(c, lat), b + "attn_kv_a_norm.weight");
-        kp = rope(c, ggml_reshape_3d(c, ggml_cont(c, kp), R, 1, nt), in.pos, in.pos4, base);
+        lat = norm(c, cont(c, lat), b + "attn_kv_a_norm.weight");
+        kp = rope(c, ggml_reshape_3d(c, cont(c, kp), R, 1, nt), in.pos, in.pos4, base);
         ggml_tensor * Knew = ggml_concat(c, lat, ggml_reshape_2d(c, kp, R, nt), 0);    // [khead, nt]
         ggml_tensor * cache = ggml_set_rows(c, kv[(size_t) il], Knew, swa ? in.kidx_swa : in.kidx);
         ggml_build_forward_expand(gf, cache);
@@ -690,7 +707,7 @@ struct Hy4Engine::Impl {
         ggml_tensor * A = ggml_reshape_3d(c, attn, KR, H, nt);
         ggml_tensor * wvb = ggml_reshape_3d(c, W(b + "attn_v_b.weight"), KR, VD, H);
         A = ggml_mul_mat(c, wvb, ggml_permute(c, A, 0, 2, 1, 3));                   // [VD, nt, H]
-        A = ggml_reshape_2d(c, ggml_cont(c, ggml_permute(c, A, 0, 2, 1, 3)), H * VD, nt);
+        A = ggml_reshape_2d(c, cont(c, ggml_permute(c, A, 0, 2, 1, 3)), H * VD, nt);
         A = ggml_mul(c, A, ggml_sigmoid(c, v_gate ? contig(v_gate) : ggml_mul_mat(c, W(b + "attn_gate.weight"), x)));
         ggml_tensor * y = ggml_mul_mat(c, W(b + "attn_output.weight"), A);
         return norm(c, y, b + "post_attention_norm.weight");
@@ -718,16 +735,27 @@ struct Hy4Engine::Impl {
         wts = ggml_reshape_3d(c, ggml_div(c, w2, wsum), 1, USED, nt);
         wts = ggml_scale(c, wts, (float) G.weights_scale);
         ggml_build_forward_expand(gf, wts);
-        ggml_tensor * routed = ggml_mul_mat(c, W(b + "ffn_routed_down.weight"), x);  // [LAT, nt]
+        // --fused-proj: one product for routed_down and the shared expert's gate / up, then views of its rows
+        ggml_tensor * f_rd = nullptr, * f_sg = nullptr, * f_su = nullptr;
+        if (auto it = ffn_cat.find(il); it != ffn_cat.end()) {
+            ggml_tensor * fc = ggml_mul_mat(c, W(b + "ffn_in_cat"), x);
+            auto rows = [&](int64_t off, int64_t n) {
+                return cont(c, ggml_view_2d(c, fc, n, nt, fc->nb[1], (size_t) off * ggml_element_size(fc)));
+            };
+            f_rd = rows(it->second.rd, LAT);
+            f_sg = rows(it->second.sg, G.d_expert);
+            f_su = rows(it->second.su, G.d_expert);
+        }
+        ggml_tensor * routed = f_rd ? f_rd : ggml_mul_mat(c, W(b + "ffn_routed_down.weight"), x);  // [LAT, nt]
         routed = ggml_reshape_3d(c, routed, LAT, 1, nt);
         ggml_tensor * g = ggml_mul_mat_id(c, W(b + "ffn_gate_exps.weight"), routed, ids);
         ggml_tensor * u = ggml_mul_mat_id(c, W(b + "ffn_up_exps.weight"), routed, ids);
         ggml_tensor * d = ggml_mul_mat_id(c, W(b + "ffn_down_exps.weight"), ggml_swiglu_split(c, g, u), ids);
         d = ggml_mul(c, d, wts);                                                    // [LAT, USED, nt]
-        ggml_tensor * summed = ggml_sum_rows(c, ggml_cont(c, ggml_permute(c, d, 1, 0, 2, 3)));   // [1, LAT, nt]
+        ggml_tensor * summed = ggml_sum_rows(c, cont(c, ggml_permute(c, d, 1, 0, 2, 3)));   // [1, LAT, nt]
         ggml_tensor * moe = ggml_mul_mat(c, W(b + "ffn_routed_up.weight"), ggml_reshape_2d(c, summed, LAT, nt));
-        ggml_tensor * sg = ggml_mul_mat(c, W(b + "ffn_gate_shexp.weight"), x);
-        ggml_tensor * su = ggml_mul_mat(c, W(b + "ffn_up_shexp.weight"), x);
+        ggml_tensor * sg = f_sg ? f_sg : ggml_mul_mat(c, W(b + "ffn_gate_shexp.weight"), x);
+        ggml_tensor * su = f_su ? f_su : ggml_mul_mat(c, W(b + "ffn_up_shexp.weight"), x);
         ggml_tensor * sh = ggml_mul_mat(c, W(b + "ffn_down_shexp.weight"), ggml_swiglu_split(c, sg, su));
         return ggml_add(c, moe, sh);
     }
@@ -841,17 +869,17 @@ struct Hy4Engine::Impl {
         // iHC head, output norm, vocabulary projection: the last token only, or every token
         const bool mtp = n_alloc > n_trunk;
         const int64_t no = all_logits || mtp ? nt : 1;
-        ggml_tensor * xl = no == nt ? x : ggml_cont(c, ggml_view_3d(c, x, D, HC, 1, x->nb[1], x->nb[2],
+        ggml_tensor * xl = no == nt ? x : cont(c, ggml_view_3d(c, x, D, HC, 1, x->nb[1], x->nb[2],
                                                                     (size_t) (nt - 1) * x->nb[2]));
         ggml_tensor * flat = ggml_reshape_2d(c, xl, HC * D, no);
         ggml_tensor * mixes = ggml_mul_mat(c, W("output_hc_fn.weight"), ggml_rms_norm(c, flat, eps));   // [HC, no]
         ggml_tensor * gates = ggml_sigmoid(c, ggml_scale_bias(c, ggml_add(c, ggml_mul(c, mixes, W("output_hc_scale.weight")),
                                                                          W("output_hc_base.weight")), 1.0f, eps));
         ggml_tensor * prod = ggml_mul(c, xl, ggml_reshape_3d(c, gates, 1, HC, no));
-        ggml_tensor * red = ggml_reshape_2d(c, ggml_sum_rows(c, ggml_cont(c, ggml_permute(c, prod, 1, 0, 2, 3))), D, no);
+        ggml_tensor * red = ggml_reshape_2d(c, ggml_sum_rows(c, cont(c, ggml_permute(c, prod, 1, 0, 2, 3))), D, no);
         ggml_tensor * hn = norm(c, red, "output_norm.weight");                     // [D, no]
         ggml_tensor * hl = hn;
-        if (no == nt && !all_logits) hl = ggml_cont(c, ggml_view_2d(c, hn, D, 1, hn->nb[1], (size_t) (nt - 1) * hn->nb[1]));
+        if (no == nt && !all_logits) hl = cont(c, ggml_view_2d(c, hn, D, 1, hn->nb[1], (size_t) (nt - 1) * hn->nb[1]));
         ggml_tensor * y = ggml_mul_mat(c, W("output.weight"), hl);
         ggml_set_output(y);
         ggml_set_name(y, "logits");

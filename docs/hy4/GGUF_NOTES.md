@@ -432,6 +432,18 @@ against 29 on both cards, and greedy generation is 14.20 tok/s against 17.51 (20
 experts are in RAM costs about 0.7 ms when the rest of the step is on the same card, but 32 of them outweigh card 1's
 x2 link. Both cards stay.
 
+## Fewer copies, and the MoE's input stacked too (2026-11-19)
+
+A kernel trace with `--fused-proj` counted about 2,490 kernels a token (from ~4,000 at the start of these notes):
+quantize + Q8_0 product ~384 each, RMS norms ~366, device memcpys ~270, F32 / BF16 products ~217. The memcpys were
+`ggml_cont` of tensors already laid out contiguously (in a one-token step most views are); the graph now copies only
+where the layout needs it. `--fused-proj` also stacks `ffn_routed_down`, `ffn_gate_shexp` and `ffn_up_shexp` (one
+product for the MoE's input, the shared expert's SwiGLU on views of it). Measured on 2026-11-19, 64K, greedy, no MTP:
+18.60 / 18.53 tok/s with the copies skipped, 19.12 / 18.88 with the MoE stacking as well (from 18.18 / 18.33);
+perplexity on the 60 KB text at 2,048-token chunks 41.85, then 41.63 (from 41.72: noise). Through the server with
+MTP, the three chat prompts: 21.48 / 22.88 / 21.82 greedy and 20.74 / 21.42 / 21.75 at temperature 0.9, the same as
+before within the spread: the verify step runs two tokens, where the views need their copies back.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the
