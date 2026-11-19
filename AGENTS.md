@@ -39,6 +39,10 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   `models/qwen38-mtp` (`tools/qwen/mtp_fetch.py`, `mtp_pack.py`, `mtp_rt.py`); `local/qwen-q8-local.json` unsloth's
   Q8_0 on two cards with at most 56 GiB of experts in RAM (`./almond -m qwen-q8`, ~16 tok/s; a whole-RAM arena
   stalled the machine).
+- `./almond-bench`: quality benchmarks against the router (MMLU-Pro, GPQA, MATH-500, HumanEval+/MBPP+, IFEval,
+  BFCL graded without a judge, Arena-Hard with a judge model, KL divergence from logit dumps), Textual UI;
+  `./almond-bench fetch` downloads the missing datasets into `local/bench/data` (`--update` newer revisions; a
+  manifest keeps each one's revision and sha256; not committed), `run` works without the UI; docs/BENCH.md.
 - The model files live in `models/`, inside this folder (gitignored); `local/fetch.sh` downloads and prepares them,
   `./setup.sh` walks a new installation.
 

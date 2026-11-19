@@ -389,6 +389,14 @@ NVMe. `--vram-margin` (0.5 GiB) is the VRAM left free beside the expert cache; r
 card. With one card use `./almond serve --gpu 0` (the two-card default stops at startup: "peer device 1 does not
 exist").
 
+## Benchmarks
+
+`./almond-bench` measures the models' quality and what each quantization loses: MMLU-Pro, GPQA Diamond, MATH-500,
+HumanEval+ and MBPP+, IFEval and BFCL graded by code (no judge model), Arena-Hard with a judge model, and the KL
+divergence against a reference build from logit dumps. A Textual interface (Run, Results, Compare), or
+`./almond-bench run --model NAME` without it. The datasets are downloaded, not committed: `./almond-bench fetch`
+gets the missing ones, `fetch --update` newer revisions. Everything in [docs/BENCH.md](docs/BENCH.md).
+
 ## Development
 
 - Server tests (no GPU or model): `.venv/bin/python -m unittest discover -s serve -p "test_*.py" -t .`

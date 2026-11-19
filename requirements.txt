@@ -11,3 +11,5 @@ numpy
 pyyaml
 # textual: ./gguf-inspect, the GGUF browser (tools/gguf_ui.py)
 textual
+# pyarrow: ./almond-bench fetch reads MMLU-Pro, MBPP+ and HumanEval+ from their Parquet files (without it: the slow datasets-server)
+pyarrow
