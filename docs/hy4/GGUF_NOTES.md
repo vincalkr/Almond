@@ -533,6 +533,22 @@ bytes) at a time and the wave sums with shuffles; up to 8 columns of y, no ids, 
 
 `local/hy4-local.json` and `local/hy4-local-vision.json` set it in their `env`; the other models do not.
 
+## The same for Q8_0 rows (`ALMOND_MMVQ_ROWS=1`, measured, left off, 2026-11-19)
+
+RDNA3's mmvq table gives a one-token Q8_0 row 8 waves (64 blocks a pass), so rows of 1,024-3,072 values leave a
+quarter to a half of the threads idle. `mul_mat_vec_q8_0_rows` (vendored ggml, `tools/v41/ggml/mmvq-rows.patch`,
+opt-in) takes a row with one wave (4 lanes a block, dp4a against the Q8_1 input), 2 or 4 waves for rows past 2,048 /
+4,096 values, up to 8 columns, no ids, no fusion. Per call (rocprofv3, 64K): `attn_q_b` 1,024 -> 16,384 47 -> 22 us,
+the stacked attention input 83 -> 67 us, the output head 496 -> 431 us; about 2.5 ms of kernels a token less.
+
+- Without MTP (prompt 2, 200 tokens): 19.75 / 20.17 -> 20.86 / 21.24 tok/s (+5.5%).
+- With MTP the trunk's steps have 2 tokens, where ggml's table already gives a row one wave: the two kernels take the
+  same time (the stacked input at ~850 GB/s), and the three prompts, run alternately twice with a VM busy on the CPU,
+  gave 22.57 / 24.00 / 23.33 / 23.20 / 24.09 / 23.50 without it against 22.16 / 22.83 / 23.06 / 22.82 / 22.62 / 24.20
+  with it. The greedy text was the same on all three.
+
+The configurations use MTP, so it stays off there.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the
