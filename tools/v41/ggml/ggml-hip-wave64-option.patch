@@ -1,0 +1,30 @@
+diff --git a/third_party/llama.cpp/ggml/src/ggml-hip/CMakeLists.txt b/third_party/llama.cpp/ggml/src/ggml-hip/CMakeLists.txt
+index 75d4d60..1b99808 100644
+--- a/third_party/llama.cpp/ggml/src/ggml-hip/CMakeLists.txt
++++ b/third_party/llama.cpp/ggml/src/ggml-hip/CMakeLists.txt
+@@ -133,6 +133,25 @@ else()
+     set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE HIP)
+ endif()
+ 
++# Almond (opt-in, off by default): RDNA3 kernels in wave64, the files that need wave32 (WMMA / mma.cuh, softmax, the
++# FA vec instances) kept at wave32 - the recipe measured in llama.cpp issue #20934 (+0-16% generation on gfx1100).
++# -mwavefrontsize64 is not supported by AMD on RDNA: a build with it is checked by results, not by the compiler.
++option(GGML_HIP_WAVE64 "ggml-hip: compile for wave64 on RDNA3 (unsupported flag, opt-in)" OFF)
++if (GGML_HIP_WAVE64)
++    target_compile_options(ggml-hip PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-mwavefrontsize64>)
++    set(_w32 "")
++    foreach(_f IN LISTS GGML_SOURCES_ROCM)
++        get_filename_component(_n "${_f}" NAME)
++        if (_n MATCHES "^(conv2d|conv3d|fattn|mmq|mmf|mmvf|lightning-indexer|softmax)[.]cu$" OR
++            _n MATCHES "^(mmq|mmf|fattn-mma|fattn-vec).*[.]cu$")
++            list(APPEND _w32 "${_f}")
++        endif()
++    endforeach()
++    set_source_files_properties(${_w32} PROPERTIES COMPILE_OPTIONS "-mno-wavefrontsize64")
++    list(LENGTH _w32 _n32)
++    message(STATUS "ggml-hip: wave64, ${_n32} files kept at wave32")
++endif()
++
+ if (GGML_STATIC)
+     message(FATAL_ERROR "Static linking not supported for HIP/ROCm")
+ endif()

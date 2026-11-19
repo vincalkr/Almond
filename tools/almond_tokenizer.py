@@ -101,6 +101,7 @@ GLM4_PATTERN = (
 PRE_PATTERNS = {
     "qwen35": [QWEN35_PATTERN],
     "joyai-llm": JOYAI_LLM_PATTERNS,
+    "hy_v4": JOYAI_LLM_PATTERNS,     # Hy4-flash: llama.cpp PR #32517 groups LLAMA_VOCAB_PRE_TYPE_HY_V4 with JOYAI_LLM
     "glm4": [GLM4_PATTERN],
     "glm5": [GLM4_PATTERN],
 }

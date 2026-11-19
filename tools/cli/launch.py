@@ -55,8 +55,9 @@ def logo():
 
 
 SHIMS = {"ds41": "tools/v41/serve/serve_ds41.py", "glm": "tools/glm/serve/serve_glm.py",
-         "qwen": "tools/qwen/serve/serve_qwen.py", "qwen27": "tools/qwen/serve/serve_qwen.py"}
-SERVERS = r"tools/(v41/serve/serve_ds41|glm/serve/serve_glm|qwen/serve/serve_qwen|router/almond_router)[.]py"
+         "qwen": "tools/qwen/serve/serve_qwen.py", "qwen27": "tools/qwen/serve/serve_qwen.py",
+         "hy4": "tools/hy4/serve/serve_hy4.py"}
+SERVERS = r"tools/(v41/serve/serve_ds41|glm/serve/serve_glm|qwen/serve/serve_qwen|hy4/serve/serve_hy4|router/almond_router)[.]py"
 
 
 def say(text: str):
@@ -117,7 +118,7 @@ def config_model(cfg: str, default: str) -> str:
         args = json.loads((ROOT / cfg).read_text() if not os.path.isabs(cfg) else open(cfg).read()).get("args", [])
     except (OSError, ValueError, AttributeError):
         return default
-    for flag, model in (("--qwen35", "qwen27"), ("--qwen", "qwen"), ("--glm-pack", "glm")):
+    for flag, model in (("--qwen35", "qwen27"), ("--qwen", "qwen"), ("--glm-pack", "glm"), ("--hy4", "hy4")):
         if flag in args:
             return model
     return default
@@ -127,10 +128,10 @@ def pick_config(o: dict) -> str:
     """The configuration run for --model / --gpu when --config does not name one."""
     m = o["model"]
     if m not in SHIMS:
-        fail(f"--model takes ds41, glm, qwen or qwen27 (got '{m}')")
+        fail(f"--model takes ds41, glm, qwen, qwen27 or hy4 (got '{m}')")
     if m != "ds41" and not os.access(ROOT / "build-hip-fused/almond-engine", os.X_OK):
         fail("build-hip-fused/almond-engine is not built (./build.sh builds it)")
-    if m not in ("ds41", "qwen27"):   # the dense 27B has no experts
+    if m not in ("ds41", "qwen27", "hy4"):   # the dense 27B has no experts; Hy4 places its experts by layer
         # the expert profile the engine starts its VRAM pools from and saves what it learns into: its shipped one
         # until this machine has its own
         prof = ROOT / f"local/{m}-expert-profile.bin"
@@ -144,6 +145,10 @@ def pick_config(o: dict) -> str:
         # with the image encoder (local/fetch.sh glm-vision) and almond-vision built: images on, loaded per picture
         on = vision and whole(ROOT / "models/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf")
         return str(ROOT / ("local/glm-local-vision.json" if on else "local/glm-local.json"))
+    if m == "hy4":
+        # Hy4-flash on src/hy4 (--hy4): two cards, the routed experts that do not fit in VRAM read from RAM, the
+        # Engram table in RAM when it fits or from the SSD (--engram auto)
+        return str(ROOT / "local/hy4-local.json")
     if m == "qwen27":
         # the dense Qwen3.8-27B on src/qwen35 (--qwen35), one card; with its encoder (the mmproj in
         # models/qwen38-27b) and almond-vision built: images on, read on the CPU

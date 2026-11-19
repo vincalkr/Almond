@@ -5,6 +5,8 @@
 #   ./local/fetch.sh glm glm-mtp   those items, no question
 #   ./local/fetch.sh qwen qwen-mtp  Qwen3.8-Flash-Next and its draft block
 #   ./local/fetch.sh qwen27-q8   the dense Qwen3.8-27B at Q8_0 (the quantization is chosen here: qwen27 or qwen27-q8)
+#   ./local/fetch.sh hy4        Hy4-flash IQ2-AH: the two GGUF shards (aria2c, 4 connections)
+#   ./local/fetch.sh hy4-vision Hy4-flash's image encoder (mmproj BF16)
 #   ./local/fetch.sh --list     the list only
 #
 # Every file goes to models/ with aria2c (CONN=4 connections, resumable); a file counts as present when its size is
@@ -30,9 +32,11 @@ Q27=$M/qwen38-27b
 QWEN_Q8_REPO=unsloth/Qwen3.8-Flash-Next-GGUF
 QWEN_Q8_SHARDS=$(for i in 1 2 3 4 5 6; do echo "$M/qwen38-q8/Qwen3.8-Flash-Next-Q8_0-0000$i-of-00006.gguf"; done)
 DS_SHARDS=$(for i in 1 2 3 4; do echo "$M/rco-iq2xxs/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-0000$i-of-00004.gguf"; done)
+HY4_REPO=AngelSlim/Hy4-flash-GGUF
+HY4_SHARDS=$(for i in 1 2; do echo "$M/hy4-iq2ah/Hy4-flash-IQ2_AH-0000$i-of-00002.gguf"; done)
 
 ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision qwen qwen-q8 qwen-mtp qwen-vision
-       qwen27 qwen27-q8 qwen27-dspine qwen27-vision)
+       qwen27 qwen27-q8 qwen27-dspine qwen27-vision hy4 hy4-vision)
 desc() {
     case $1 in
         deepseek)            echo "DeepSeek-V4.1-Flash-1017, GSQ-RCO IQ2_XXS pack + Engram IQ4_NL (ISTA-DASLab)   ~249 GB";;
@@ -49,6 +53,8 @@ desc() {
         qwen27-q8)           echo "Qwen3.8-27B dense, Q8_0 + MTP block (unsloth), two cards                       29.0 GB";;
         qwen27-dspine)       echo "Qwen3.8-27B DSpine drafter Q4_K_M (aj9o9 of tencent): drafts inside code         1.3 GB";;
         qwen27-vision)       echo "Qwen3.8-27B image encoder (mmproj BF16)                                          0.9 GB";;
+        hy4)                 echo "Hy4-flash IQ2-AH (Tencent/AngelSlim): experts IQ2_XXS, Engram FP8 table         135 GB";;
+        hy4-vision)          echo "Hy4-flash image encoder (mmproj BF16, AngelSlim)                                 1.0 GB";;
     esac
 }
 files() {   # the files that make the item present
@@ -67,6 +73,8 @@ files() {   # the files that make the item present
         qwen27-q8)           echo "$Q27/Qwen3.8-27B-Q8_0.gguf"; echo "$Q27/tokenizer";;
         qwen27-dspine)       echo "$Q27/Qwen3.8-27B-DSpine-b16-Q4_K_M.gguf";;
         qwen27-vision)       echo "$Q27/mmproj-Qwen3.8-27B-BF16.gguf";;
+        hy4)                 echo "$HY4_SHARDS";;
+        hy4-vision)          echo "$M/hy4-iq2ah/mmproj-Hy4-flash-bf16.gguf";;
     esac
 }
 state() {   # present / partial / missing (by the files being there; sizes are checked at download)
@@ -137,6 +145,8 @@ fetch() {
                              tok27 "$Q27/Qwen3.8-27B-Q8_0.gguf";;
         qwen27-dspine)       get aj9o9/Qwen3.8-27B-DSpine-b16-GGUF Qwen3.8-27B-DSpine-b16-Q4_K_M.gguf "$Q27/Qwen3.8-27B-DSpine-b16-Q4_K_M.gguf";;
         qwen27-vision)       get $Q27_REPO mmproj-Qwen3.8-27B-BF16.gguf "$Q27/mmproj-Qwen3.8-27B-BF16.gguf";;
+        hy4)                 for f in $HY4_SHARDS; do get $HY4_REPO "$(basename "$f")" "$f"; done;;
+        hy4-vision)          get $HY4_REPO mmproj-Hy4-flash-bf16.gguf "$M/hy4-iq2ah/mmproj-Hy4-flash-bf16.gguf";;
         *) echo "fetch: no item '$1' (${ITEMS[*]})" >&2; exit 2;;
     esac
 }
@@ -159,6 +169,8 @@ fit() {   # why an item does not fit this machine, or nothing
         glm)                 cards=2; ram=100;;   # the layers over both cards, the experts in pinned RAM
         deepseek|qwen)       ram=100;;            # the 80 GiB pinned arena (README, Requirements: 128 GB class)
         qwen27-q8|qwen-q8)   cards=2;;            # 29 GB of weights; Flash-Next Q8_0: 128 GB of experts
+        hy4)                 cards=2; ram=120;;   # 126 GB of weights; the 59 GiB Engram table read from the SSD or RAM
+        hy4-vision)          cards=2; ram=120;;
     esac
     [ "$CARDS" -lt $cards ] && { echo "needs $cards cards of 24 GB"; return; }
     [ "$RAM_GB" -lt $ram ] && { echo "needs ~128 GB of RAM"; return; }

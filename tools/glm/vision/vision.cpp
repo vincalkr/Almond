@@ -26,6 +26,7 @@
 #include "mtmd-helper.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -65,6 +66,8 @@ int main(int argc, char** argv) {
     bool no_fa = false;   // the attention in full precision (flash attention keeps K/V in F16)
     bool warm = true;     // --no-warmup: started on demand into memory set aside for it (serve/server.py)
     bool measure = false;
+    // --hy4-rows (or ALMOND_VISION_HY4_ROWS=1 in the environment): Hy4-flash's row layout in the record's grid
+    bool hy4_rows = std::getenv("ALMOND_VISION_HY4_ROWS") != nullptr;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string {
@@ -78,6 +81,7 @@ int main(int argc, char** argv) {
         else if (a == "--max-tokens") max_tokens = std::atoi(next().c_str());
         else if (a == "--no-flash-attn") no_fa = true;
         else if (a == "--no-warmup") warm = false;
+        else if (a == "--hy4-rows") hy4_rows = true;
         else if (a == "--measure") measure = true;
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
     }
@@ -197,6 +201,7 @@ int main(int argc, char** argv) {
         const std::string prompt = mtmd_default_marker();
         mtmd_input_text txt{prompt.c_str(), prompt.size(), false, true};
         const mtmd_bitmap* bm[1] = {bw.bitmap};
+        const int img_w = (int) mtmd_bitmap_get_nx(bw.bitmap), img_h = (int) mtmd_bitmap_get_ny(bw.bitmap);
         std::string err;
         if (mtmd_tokenize(ctx, chunks, &txt, bm, 1) != 0)
             err = vid ? "the video could not be decoded" : "the image could not be preprocessed";
@@ -222,6 +227,18 @@ int main(int argc, char** argv) {
             const mtmd_decoder_pos last = mtmd_image_tokens_get_decoder_pos(it, 0, (size_t) n - 1);
             nx = grid ? (int) last.x + 1 : n;
             ny = grid ? (int) last.y + 1 : 1;
+            if (!grid && hy4_rows && n > 1) {
+                // --hy4-rows (Hy4-flash, llama.cpp PR #32517: mtmd gives no grid for it): the rows are H lines of W
+                // patches plus a newline token each, n = H * (W + 1); of the factorizations the one whose H / W is
+                // nearest the picture's own height / width is taken, and the record says W + 1 by H
+                double best = 1e30;
+                for (int h = 1; h <= n; ++h) {
+                    if (n % h || n / h < 2) continue;
+                    const int w = n / h - 1;
+                    const double d = std::fabs(std::log((double) h / w) - std::log((double) img_h / img_w));
+                    if (d < best) { best = d; nx = w + 1; ny = h; }
+                }
+            }
             if (nx * ny != n) { err = "the image grid is not rectangular (" + std::to_string(n) + " tokens)"; break; }
             const float* embd = mtmd_get_output_embd(ctx);
             const int32_t hdr[5] = {0x31455653, n, nx, ny, n_embd};

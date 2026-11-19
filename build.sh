@@ -50,4 +50,15 @@ python3 tools/glm/vision/glm5next_patch.py "$VL"
 cmake -S tools/glm/vision -B build-vision/build "${COMMON[@]}" -DLLAMA_DIR="$PWD/$VL" \
     -DALMOND_VISION_HIP=ON -DGGML_HIP_NO_VMM=ON
 cmake --build build-vision/build --target almond-vision -j "$JOBS"
-echo "=== done: build-hip-fused/almond-engine, build-vision/build/bin/almond-vision"
+echo "=== image encoder for Hy4-flash (the same tools/glm/vision against llama.cpp PR #32517's mtmd: its hy_v4_flash projector)"
+# llama.cpp PR #32517 at the commit the engine was checked against (a shallow fetch of the PR's ref, once)
+VH=build-vision-hy4/llama.cpp
+HY4_PR_COMMIT=0a054d0b02454c998e068381d15f3f6615bdd987
+if [ ! -d "$VH" ]; then
+    mkdir -p "$VH" && git -C "$VH" init -q && git -C "$VH" remote add origin https://github.com/ggml-org/llama.cpp &&
+        { git -C "$VH" fetch -q --depth 1 origin "$HY4_PR_COMMIT" || git -C "$VH" fetch -q origin pull/32517/head; } &&
+        git -C "$VH" checkout -q "$HY4_PR_COMMIT"
+fi
+cmake -S tools/glm/vision -B build-vision-hy4 -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR="$PWD/$VH"
+cmake --build build-vision-hy4 --target almond-vision -j "$JOBS"
+echo "=== done: build-hip-fused/almond-engine, build-vision/build/bin/almond-vision, build-vision-hy4/bin/almond-vision"

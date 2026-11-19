@@ -746,3 +746,16 @@ Greedy, thinking off, the server's four prompts, power-tune on (tok/s; the share
 10 GiB more in RAM bought nothing measurable and left 21 GiB of the machine's RAM available instead of 29: 56 stays.
 The IQ3_S on card 0 runs the same prompts at 50-78 tok/s; the Q8_0 is for the closest answers to the original
 weights at about a quarter of the speed.
+
+## Hy4-flash (IQ2-AH, AngelSlim, `--hy4`, 2026-11-18)
+
+Tencent's Hy4-flash (GGUF architecture `hy_v4_flash`: 42 trunk layers, MLA with sinks, 30 sliding-window layers and
+12 sparse layers with a k-pool indexer, LatentMoE with 512 experts and 16 per token, four Engram modules, iHC with 4
+streams) from `AngelSlim/Hy4-flash-GGUF`: routed experts IQ2_XXS / Q4_K, the Engram table FP8 (59 GiB, the second
+shard). `local/fetch.sh hy4`, `./almond serve --model hy4` (`local/hy4-local.json`: cards 0 and 1, 64K context). The
+engine is `src/hy4/hy4_engine.cpp`; how it was built and checked against llama.cpp PR #32517, and every number, in
+docs/hy4/GGUF_NOTES.md. Measured on 2026-11-18: 14.9 tok/s generating with a short prompt (the PR: 10.4 on the same
+machine), 11.8 tok/s after a 15,000-token prompt read at 237 tok/s; perplexity within the PR's own run-to-run spread
+(27.93 against 28.46 on `local/glm-ref/doc.txt`, 512-token chunks). With the configuration's `--mtp --fused-hc
+--dense-q8 --reserve-mib 1400` (2026-11-19): 20.9-21.4 tok/s greedy and 18.5-20.5 at temperature 0.9 on chat prompts. Images through its encoder
+(`local/fetch.sh hy4-vision`, `build-vision-hy4`), conversations on disk (`local/hy4-slots`).

@@ -16,6 +16,11 @@ Anthropic-compatible server, a router that serves every model at one address, an
 - **Qwen3.8-27B** (dense) as the [ISTA-DASLab GSQ-RCO IQ3_S GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF)
   (11.28 GiB, its MTP block in the same file) on ggml graphs (`src/qwen35`), with images on its encoder, optionally
   with Tencent's DSpine drafter inside code (`qwen27-dspine`).
+- **Hy4-flash** as [AngelSlim's IQ2-AH GGUF](https://huggingface.co/AngelSlim/Hy4-flash-GGUF) (two shards, 135 GB:
+  experts IQ2_XXS, the Engram table FP8) on ggml graphs over both cards (`src/hy4`, `./almond serve --model hy4`):
+  about 21 tok/s with its MTP block, the experts that do not fit in VRAM run from RAM and the Engram table is
+  read from the SSD
+  (docs/hy4/GGUF_NOTES.md).
 
 How each model is set up and measured: [docs/MODELS.md](docs/MODELS.md); the one-engine work:
 [docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md).
