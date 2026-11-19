@@ -106,6 +106,7 @@ int parse(int argc, char ** argv, Args & a) {
         else if (!std::strcmp(s, "--dense-f16")) a.eo.dense_f16 = true;
         else if (!std::strcmp(s, "--mtp")) a.eo.mtp = true;
         else if (!std::strcmp(s, "--fused-hc")) a.eo.fused_hc = true;
+        else if (!std::strcmp(s, "--fused-proj")) a.eo.fused_proj = true;
         else if (!std::strcmp(s, "--reserve-mib")) {
             if (++i >= argc) return 2;
             a.eo.reserve_mib = std::atoll(argv[i]);

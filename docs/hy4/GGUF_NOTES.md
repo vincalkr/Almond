@@ -416,6 +416,22 @@ fused gate/up/SwiGLU products do run fused (`mul_mat_vec_q<..., true>` for the Q
 routed ones). What is left at about 3,100 kernels a token is their count; fewer of them means writing fused kernels
 of our own (Tencent cites "megakernels" for its 150 tok/s), not tuning ggml's.
 
+## One product for the attention's input (`--fused-proj`, 2026-11-19)
+
+With `--dense-q8` the four matrices that read a layer's attention input (`attn_q_a`, `attn_kv_a_mqa`, `attn_gate`, and
+`indexer.attn_k` on the sparse layers) are all Q8_0 with 3,072 columns; `--fused-proj` stacks them at load into one
+matrix (`blk.L.attn_in_cat`: the same Q8_0 rows) and the graph takes one product and views of its rows, one input
+quantization and one launch instead of four of each. Measured on 2026-11-19, 64K: greedy without MTP 18.18 / 18.33
+tok/s against 17.39 / 17.23 (the same first tokens); perplexity on the 60 KB text at 2,048-token chunks 41.7157
+against 41.7167; through the serve protocol with MTP, the three chat prompts: 21.40 / 23.00 / 22.31 tok/s greedy
+(against 20.94-21.42) and 21.26 / 21.65 / 21.59 at temperature 0.9 (against 18.49-20.46). On in both
+configurations.
+
+One card or two: with `--gpus 0` alone (the x16 card, the rest in RAM) the routed experts of 10 layers fit in VRAM
+against 29 on both cards, and greedy generation is 14.20 tok/s against 17.51 (200 tokens, 64K, no MTP): a layer whose
+experts are in RAM costs about 0.7 ms when the rest of the step is on the same card, but 32 of them outweigh card 1's
+x2 link. Both cards stay.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the

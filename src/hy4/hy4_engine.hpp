@@ -28,7 +28,8 @@ struct Hy4EngineOptions {
     bool dense_q8 = false;
     bool dense_f16 = false;        ///< the BF16 matrices stored as F16 on the cards (--dense-f16): the same values
     bool mtp = false;
-    bool fused_hc = false;         ///< iHC through the vendored ggml's fused DeepSeek-V4 ops (--fused-hc)
+    bool fused_hc = false;
+    bool fused_proj = false;       ///< with --dense-q8: the attention input's four projections as one product (--fused-proj)         ///< iHC through the vendored ggml's fused DeepSeek-V4 ops (--fused-hc)
     int mtp_n = 1;                 ///< guesses per step (--mtp-n)              ///< load the MTP block (layer 42) and draft one token ahead (--mtp)         ///< the 2-D BF16 matrices quantized to Q8_0 on load (--dense-q8)
     bool verbose = true;
 };

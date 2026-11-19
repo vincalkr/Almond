@@ -12,6 +12,7 @@
 #include "ggml-cuda.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -66,6 +67,10 @@ struct Hy4Engine::Impl {
     std::vector<ggml_tensor *> itok;  // [layer] F32 [2 * idx_dim, r_tok]: the indexer's value | gate, a ring
     std::vector<ggml_tensor *> ipool; // [layer] F32 [idx_dim, n_ctx / kpool]: the pooled keys
     int64_t r_swa = 0, r_tok = 0;
+    // --fused-proj: per layer, the row offsets of attn_q_a / attn_kv_a_mqa / attn_gate / indexer.attn_k (-1 when the
+    // layer has none) inside blk.L.attn_in_cat, the four Q8_0 matrices that read the attention input stacked as one
+    struct ProjCat { int64_t qa = -1, kv = -1, gate = -1, ik = -1; };
+    std::map<int64_t, ProjCat> proj_cat;
     int64_t n_alloc = 0;              // layers with weights and caches: the trunk, plus the MTP block with --mtp
     int64_t draft_off = 0;            // a chained draft: its position past n_past
     std::vector<float> draft_h;       // and the state it starts from (the previous draft's), empty = the trunk's
@@ -255,6 +260,9 @@ struct Hy4Engine::Impl {
         }
         struct Item { const TensorInfo * t; size_t shard; ggml_tensor * g; int d; };
         std::vector<Item> items;
+        static const char * PROJ_PARTS[4] = { "attn_q_a.weight", "attn_kv_a_mqa.weight", "attn_gate.weight",
+                                              "indexer.attn_k.weight" };
+        std::map<int64_t, std::array<std::pair<const TensorInfo *, size_t>, 4>> cat_parts;
         for (size_t s = 0; s < model->size(); ++s)
             for (const auto & t : model->shard(s).tensors()) {
                 const std::string & n = t.name;
@@ -266,6 +274,13 @@ struct Hy4Engine::Impl {
                 else if (l < 0) d = dev[(size_t) n_trunk - 1];
                 else d = n.find("_exps") != std::string::npos ? edev[(size_t) l] : dev[(size_t) l];
                 const auto type = d == NG ? (enum ggml_type) t.type : kept_type(t);
+                if (o.fused_proj && l >= 0 && d < NG && type == GGML_TYPE_Q8_0 && t.shape.size() == 2 &&
+                    (int64_t) t.shape[0] == G.n_embd) {
+                    const std::string b = "blk." + std::to_string(l) + ".";
+                    int k = -1;
+                    for (int j = 0; j < 4; ++j) if (n == b + PROJ_PARTS[j]) k = j;
+                    if (k >= 0) { cat_parts[l][k] = { &t, s }; continue; }
+                }
                 int64_t ne[4] = { 1, 1, 1, 1 };
                 for (size_t i = 0; i < t.shape.size() && i < 4; ++i) ne[i] = (int64_t) t.shape[i];
                 ggml_tensor * g = ggml_new_tensor(wctx[(size_t) d], type, (int) std::max<size_t>(1, t.shape.size()), ne);
@@ -273,6 +288,21 @@ struct Hy4Engine::Impl {
                 w[n] = g;
                 items.push_back({ &t, s, g, d });
             }
+        // --fused-proj: the stacked matrix of each layer whose parts were all kept as Q8_0
+        std::map<int64_t, ggml_tensor *> cat_t;
+        for (auto & [l, parts] : cat_parts) {
+            ProjCat pc;
+            int64_t rows = 0;
+            int64_t * offs[4] = { &pc.qa, &pc.kv, &pc.gate, &pc.ik };
+            for (int j = 0; j < 4; ++j)
+                if (parts[(size_t) j].first) { *offs[j] = rows; rows += (int64_t) parts[(size_t) j].first->shape[1]; }
+            ggml_tensor * g = ggml_new_tensor_2d(wctx[(size_t) dev[(size_t) l]], GGML_TYPE_Q8_0, G.n_embd, rows);
+            const std::string name = "blk." + std::to_string(l) + ".attn_in_cat";
+            ggml_set_name(g, name.c_str());
+            w[name] = g;
+            cat_t[l] = g;
+            proj_cat[l] = pc;
+        }
         wbuf.assign((size_t) NG + 1, nullptr);
         for (int d = 0; d < NG; ++d) {
             wbuf[(size_t) d] = ggml_backend_alloc_ctx_tensors_from_buft(wctx[(size_t) d],
@@ -347,6 +377,29 @@ struct Hy4Engine::Impl {
             // compete with the experts the CPU reads (with the Engram table in RAM they pushed those out to disk)
             const uintptr_t a = (uintptr_t) src & ~(uintptr_t) 4095;
             ::madvise((void *) a, it.t->elements() ? tensor_payload_bytes(*it.t) + ((uintptr_t) src - a) : 0, MADV_PAGEOUT);
+        }
+        for (auto & [l, parts] : cat_parts) {
+            ggml_tensor * g = cat_t[l];
+            const size_t rb = ggml_row_size(GGML_TYPE_Q8_0, G.n_embd);
+            size_t at = 0;
+            for (int j = 0; j < 4; ++j) {
+                const TensorInfo * t = parts[(size_t) j].first;
+                if (!t) continue;
+                const uint8_t * src = model->shard(parts[(size_t) j].second).tensor_data(*t);
+                const int64_t nr = (int64_t) t->shape[1];
+                if (t->type == ty::Q8_0) {
+                    ggml_backend_tensor_set(g, src, at, rb * (size_t) nr);
+                } else {                                   // BF16 -> Q8_0
+                    const uint16_t * h = reinterpret_cast<const uint16_t *>(src);
+                    conv.resize((size_t) (G.n_embd * nr));
+                    for (size_t i = 0; i < conv.size(); ++i) conv[i] = bf16_to_f32(h[i]);
+                    std::vector<uint8_t> q(rb * (size_t) nr);
+                    ggml_quantize_chunk(GGML_TYPE_Q8_0, conv.data(), q.data(), 0, nr, G.n_embd, nullptr);
+                    ggml_backend_tensor_set(g, q.data(), at, q.size());
+                }
+                at += rb * (size_t) nr;
+                up += rb * (size_t) nr;
+            }
         }
         if (o.verbose)
             std::fprintf(stderr, "hy4: %.1f GiB of weights uploaded in %.1f s\n", up / 1073741824.0,
@@ -462,12 +515,12 @@ struct Hy4Engine::Impl {
     /// PR #32517's build_kpool_select: stores this ubatch's indexer rows, pools the groups it completed, and (when
     /// the context is past top-k) returns the sparse layer's mask [n_kv, nt] F16; otherwise nullptr (causal mask).
     ggml_tensor * indexer(ggml_context * c, ggml_cgraph * gf, ggml_tensor * x, ggml_tensor * qr, int64_t il,
-                          float base, const Inputs & in) {
+                          float base, const Inputs & in, ggml_tensor * ik_raw = nullptr) {
         const Shape & sh = in.sh;
         const std::string b = "blk." + std::to_string(il) + ".";
         const int64_t NI = G.idx_dim, NH = G.idx_heads, kp = G.idx_kpool, nt = sh.nt;
         const float eps = (float) G.rms_eps;
-        ggml_tensor * ik = ggml_mul(c, ggml_rms_norm(c, ggml_mul_mat(c, W(b + "indexer.attn_k.weight"), x), eps),
+        ggml_tensor * ik = ggml_mul(c, ggml_rms_norm(c, ik_raw ? ik_raw : ggml_mul_mat(c, W(b + "indexer.attn_k.weight"), x), eps),
                                     W(b + "indexer.k_norm.weight"));
         ggml_tensor * iv = ggml_mul_mat(c, W(b + "indexer_compressor_value.weight"), ik);
         ggml_tensor * ig = ggml_mul_mat(c, W(b + "indexer_compressor_gate.weight"), ik);
@@ -589,7 +642,22 @@ struct Hy4Engine::Impl {
         const float base = swa ? (float) G.rope_base_swa : (float) G.rope_base;
         const int64_t n_kv = swa ? r_swa : in.sh.n_kv;
 
-        ggml_tensor * qr = norm(c, ggml_mul_mat(c, W(b + "attn_q_a.weight"), x), b + "attn_q_a_norm.weight");
+        // --fused-proj: one product for the four projections of x, then views of its rows
+        ggml_tensor * cat = nullptr, * v_qa = nullptr, * v_kv = nullptr, * v_gate = nullptr, * v_ik = nullptr;
+        if (auto it = proj_cat.find(il); it != proj_cat.end()) {
+            cat = ggml_mul_mat(c, W(b + "attn_in_cat"), x);                          // [rows, nt]
+            auto rows = [&](int64_t off, int64_t n) {
+                return ggml_view_2d(c, cat, n, nt, cat->nb[1], (size_t) off * ggml_element_size(cat));
+            };
+            v_qa = rows(it->second.qa, G.q_lora);
+            v_kv = rows(it->second.kv, KR + R);
+            v_gate = rows(it->second.gate, H * VD);
+            if (it->second.ik >= 0) v_ik = rows(it->second.ik, G.idx_dim);
+        }
+        auto contig = [&](ggml_tensor * v) { return ggml_is_contiguous(v) ? v : ggml_cont(c, v); };   // one token: as is
+        if (v_ik) v_ik = contig(v_ik);
+        ggml_tensor * qr = norm(c, v_qa ? contig(v_qa) : ggml_mul_mat(c, W(b + "attn_q_a.weight"), x),
+                                b + "attn_q_a_norm.weight");
         ggml_tensor * q = ggml_reshape_3d(c, ggml_mul_mat(c, W(b + "attn_q_b.weight"), qr), qhead, H, nt);
         ggml_tensor * qn = ggml_view_3d(c, q, nope, H, nt, q->nb[1], q->nb[2], 0);
         ggml_tensor * qp = ggml_view_3d(c, q, R, H, nt, q->nb[1], q->nb[2], (size_t) nope * ggml_element_size(q));
@@ -600,7 +668,7 @@ struct Hy4Engine::Impl {
         qn = ggml_mul_mat(c, wkb, qn);                                              // [KR, nt, H]
         ggml_tensor * Q = ggml_concat(c, qn, qp, 0);                                // [khead, nt, H]
 
-        ggml_tensor * kvc = ggml_mul_mat(c, W(b + "attn_kv_a_mqa.weight"), x);     // [KR + R, nt]
+        ggml_tensor * kvc = v_kv ? v_kv : ggml_mul_mat(c, W(b + "attn_kv_a_mqa.weight"), x);   // [KR + R, nt]
         ggml_tensor * lat = ggml_view_2d(c, kvc, KR, nt, kvc->nb[1], 0);
         ggml_tensor * kp = ggml_view_2d(c, kvc, R, nt, kvc->nb[1], (size_t) KR * ggml_element_size(kvc));
         lat = norm(c, ggml_cont(c, lat), b + "attn_kv_a_norm.weight");
@@ -613,7 +681,7 @@ struct Hy4Engine::Impl {
 
         ggml_tensor * mask = swa ? in.mask_swa : in.mask;
         if (!swa && has_indexer(il)) {
-            ggml_tensor * sel = indexer(c, gf, x, qr, il, base, in);
+            ggml_tensor * sel = indexer(c, gf, x, qr, il, base, in, v_ik);
             if (sel) mask = sel;
         }
         ggml_tensor * attn = ggml_flash_attn_ext(c, Q, K, V, mask, 1.0f / sqrtf((float) qhead), 0.0f, 0.0f);
@@ -623,7 +691,7 @@ struct Hy4Engine::Impl {
         ggml_tensor * wvb = ggml_reshape_3d(c, W(b + "attn_v_b.weight"), KR, VD, H);
         A = ggml_mul_mat(c, wvb, ggml_permute(c, A, 0, 2, 1, 3));                   // [VD, nt, H]
         A = ggml_reshape_2d(c, ggml_cont(c, ggml_permute(c, A, 0, 2, 1, 3)), H * VD, nt);
-        A = ggml_mul(c, A, ggml_sigmoid(c, ggml_mul_mat(c, W(b + "attn_gate.weight"), x)));
+        A = ggml_mul(c, A, ggml_sigmoid(c, v_gate ? contig(v_gate) : ggml_mul_mat(c, W(b + "attn_gate.weight"), x)));
         ggml_tensor * y = ggml_mul_mat(c, W(b + "attn_output.weight"), A);
         return norm(c, y, b + "post_attention_norm.weight");
     }

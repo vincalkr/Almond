@@ -758,5 +758,6 @@ engine is `src/hy4/hy4_engine.cpp`; how it was built and checked against llama.c
 docs/hy4/GGUF_NOTES.md. Measured on 2026-11-18: 14.9 tok/s generating with a short prompt (the PR: 10.4 on the same
 machine), 11.8 tok/s after a 15,000-token prompt read at 237 tok/s; perplexity within the PR's own run-to-run spread
 (27.93 against 28.46 on `local/glm-ref/doc.txt`, 512-token chunks). With the configuration's `--mtp --fused-hc
---dense-q8 --reserve-mib 1400` (2026-11-19): 20.9-21.4 tok/s greedy and 18.5-20.5 at temperature 0.9 on chat prompts. Images through its encoder
+--dense-q8 --reserve-mib 1400 --fused-proj` (2026-11-19): 21.4-23.0 tok/s greedy and 21.3-21.7 at temperature 0.9 on
+chat prompts. Images through its encoder
 (`local/fetch.sh hy4-vision`, `build-vision-hy4`), conversations on disk (`local/hy4-slots`).

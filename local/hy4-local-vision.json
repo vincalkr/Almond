@@ -14,7 +14,8 @@
     "--fused-hc",
     "--dense-q8",
     "--reserve-mib",
-    "1400"
+    "1400",
+    "--fused-proj"
   ],
   "cwd": ".",
   "tokenizer": "models/hy4-iq2ah/tokenizer",
