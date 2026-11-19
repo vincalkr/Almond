@@ -82,6 +82,16 @@ struct Hy4Engine::Impl {
     const char * route_stats = std::getenv("HY4_ROUTE_STATS");
     std::vector<std::pair<int64_t, ggml_tensor *>> route_ids;
     std::vector<std::vector<uint64_t>> route_count;
+    // --dfly: the drafter's weights (dfly.*), the trunk layers its layers read, and per such layer the attention mask
+    // rows of the last 8 positions the trunk ran (column = position % 8), whose picks the drafter's context follows
+    std::unique_ptr<GgufModel> dmodel;
+    std::vector<int64_t> dfly_tl;
+    int64_t dfly_mask_tok = 120009;
+    std::map<int64_t, ggml_tensor *> dmask;
+    int64_t dm_pos[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+    bool dfly_picks = false;
+    std::vector<int64_t> dfly_out;
+    bool dfly_layer(int64_t il) const { return dmask.count(il) != 0; }
     std::vector<float> hhist;         // --mtp: the trunk's final state (output-normed) of every position in the cache
 
     bool is_swa(int64_t il) const { return G.swa_pattern[(size_t) il] != 0 && G.swa > 0; }
@@ -113,6 +123,11 @@ struct Hy4Engine::Impl {
     }
 
     int ng() const { return (int) gpu.size(); }
+    std::vector<GgufModel *> sources() const {
+        std::vector<GgufModel *> v{ model.get() };
+        if (dmodel) v.push_back(dmodel.get());
+        return v;
+    }
 
     ggml_tensor * W(const std::string & n) const {
         auto it = w.find(n);
@@ -176,6 +191,12 @@ struct Hy4Engine::Impl {
                 std::fprintf(stderr, "hy4: card %d: %.1f GiB free\n", o.gpus[(size_t) g], fr / 1073741824.0);
         }
         budget[(size_t) NG - 1] -= (int64_t) head;
+        if (dmodel) {           // --dfly: the drafter's weights and mask rows on the last card, with the layers it reads
+            uint64_t d = (uint64_t) dfly_tl.size() * (uint64_t) n_ctx * 8 * 2;
+            for (size_t s = 0; s < dmodel->size(); ++s)
+                for (const auto & t : dmodel->shard(s).tensors()) d += kept_bytes(t);
+            budget[(size_t) NG - 1] -= (int64_t) d;
+        }
         // dense layers split between the cards in proportion to what each can hold of the whole trunk
         uint64_t dense_all = 0;
         for (int64_t l = 0; l < n_trunk; ++l) dense_all += dense[(size_t) l] + kv_layer;
@@ -261,7 +282,7 @@ struct Hy4Engine::Impl {
             ggml_init_params ip = { 4096 * ggml_tensor_overhead(), nullptr, true };
             c = ggml_init(ip);
         }
-        struct Item { const TensorInfo * t; size_t shard; ggml_tensor * g; int d; };
+        struct Item { const TensorInfo * t; size_t shard; ggml_tensor * g; int d; GgufModel * m; };
         std::vector<Item> items;
         // two groups of matrices that read the same input: the attention's (0) and the MoE's (1); key = 2 * layer + group
         static const char * PROJ_PARTS[2][4] = {
@@ -269,8 +290,9 @@ struct Hy4Engine::Impl {
             { "ffn_routed_down.weight", "ffn_gate_shexp.weight", "ffn_up_shexp.weight", nullptr } };
         static const char * CAT_NAME[2] = { "attn_in_cat", "ffn_in_cat" };
         std::map<int64_t, std::array<std::pair<const TensorInfo *, size_t>, 4>> cat_parts;
-        for (size_t s = 0; s < model->size(); ++s)
-            for (const auto & t : model->shard(s).tensors()) {
+        for (GgufModel * gm : sources())
+        for (size_t s = 0; s < gm->size(); ++s)
+            for (const auto & t : gm->shard(s).tensors()) {
                 const std::string & n = t.name;
                 if (n == "per_layer_token_embd.weight") continue;            // the Engram table: host gathers
                 const int l = layer_of(n);
@@ -286,14 +308,14 @@ struct Hy4Engine::Impl {
                     int k = -1, grp = -1;
                     for (int gi = 0; gi < 2; ++gi)
                         for (int j = 0; j < 4; ++j) if (PROJ_PARTS[gi][j] && n == b + PROJ_PARTS[gi][j]) { k = j; grp = gi; }
-                    if (k >= 0) { cat_parts[2 * (int64_t) l + grp][(size_t) k] = { &t, s }; continue; }
+                    if (k >= 0 && gm == model.get()) { cat_parts[2 * (int64_t) l + grp][(size_t) k] = { &t, s }; continue; }
                 }
                 int64_t ne[4] = { 1, 1, 1, 1 };
                 for (size_t i = 0; i < t.shape.size() && i < 4; ++i) ne[i] = (int64_t) t.shape[i];
                 ggml_tensor * g = ggml_new_tensor(wctx[(size_t) d], type, (int) std::max<size_t>(1, t.shape.size()), ne);
                 ggml_set_name(g, n.c_str());
                 w[n] = g;
-                items.push_back({ &t, s, g, d });
+                items.push_back({ &t, s, g, d, gm });
             }
         // --fused-proj: the stacked matrix of each layer whose parts were all kept as Q8_0
         std::map<int64_t, ggml_tensor *> cat_t;
@@ -329,7 +351,7 @@ struct Hy4Engine::Impl {
         const auto t0 = std::chrono::steady_clock::now();
         std::vector<float> conv;
         for (auto & it : items) {
-            const uint8_t * src = model->shard(it.shard).tensor_data(*it.t);
+            const uint8_t * src = it.m->shard(it.shard).tensor_data(*it.t);
             const size_t bytes = ggml_nbytes(it.g);
             if (it.d == NG) {
                 if (it.g->type != (enum ggml_type) it.t->type) { err = it.t->name + ": CPU tensor needs conversion"; return false; }
@@ -431,7 +453,7 @@ struct Hy4Engine::Impl {
         r_swa = pad_to(o.n_ubatch + G.swa, KV_PAD);      // a ubatch never overwrites a row its own tokens still see
         r_tok = o.n_ubatch + 2 * G.idx_kpool;            // the current group's members, up to kpool-1 back
         for (int d = 0; d < NG; ++d) {
-            ggml_init_params ip = { (size_t) (3 * n_alloc + 1) * ggml_tensor_overhead(), nullptr, true };
+            ggml_init_params ip = { (size_t) (4 * n_alloc + 1) * ggml_tensor_overhead(), nullptr, true };
             ggml_context * c = ggml_init(ip);
             int cnt = 0;
             for (int64_t l = 0; l < n_alloc; ++l)
@@ -443,6 +465,10 @@ struct Hy4Engine::Impl {
                         ipool[(size_t) l] = ggml_new_tensor_2d(c, GGML_TYPE_F32, G.idx_dim, n_ctx / G.idx_kpool);
                         ggml_set_name(itok[(size_t) l], ("itok-" + std::to_string(l)).c_str());
                         ggml_set_name(ipool[(size_t) l], ("ipool-" + std::to_string(l)).c_str());
+                    }
+                    if (std::find(dfly_tl.begin(), dfly_tl.end(), l) != dfly_tl.end()) {
+                        dmask[l] = ggml_new_tensor_2d(c, GGML_TYPE_F16, n_ctx, 8);
+                        ggml_set_name(dmask[l], ("dmask-" + std::to_string(l)).c_str());
                     }
                     ++cnt;
                 }
@@ -495,6 +521,9 @@ struct Hy4Engine::Impl {
         ggml_tensor * pos4 = nullptr, * new_pos4 = nullptr;   // M-RoPE positions (t, h, w, t) when the step needs them   // --mtp: the state before the first token; the states out
         std::vector<ggml_tensor *> eng;      // [module] F32 [dim, cols, nt]
         ggml_tensor * logits = nullptr;
+        ggml_tensor * dm_idx = nullptr;      // --dfly: the mask columns this step's last rows go to
+        ggml_tensor * dtail = nullptr;       // the drafter's step: its mask past the context (or all of it)
+        std::vector<ggml_tensor *> idv;      // and its guesses, [1] I32 each
         Shape sh;
     };
 
@@ -708,6 +737,12 @@ struct Hy4Engine::Impl {
             ggml_tensor * sel = indexer(c, gf, x, qr, il, base, in, v_ik);
             if (sel) mask = sel;
         }
+        if (in.dm_idx && dfly_layer(il)) {     // --dfly: the last rows' masks (the indexer's picks), kept for the drafter
+            const int64_t k = in.dm_idx->ne[0];
+            ggml_tensor * rows = ggml_view_2d(c, mask, n_kv, k, mask->nb[1], (size_t) (nt - k) * mask->nb[1]);
+            ggml_tensor * dst = ggml_view_2d(c, dmask[il], n_kv, 8, dmask[il]->nb[1], 0);
+            ggml_build_forward_expand(gf, ggml_set_rows(c, dst, rows, in.dm_idx));
+        }
         ggml_tensor * attn = ggml_flash_attn_ext(c, Q, K, V, mask, 1.0f / sqrtf((float) qhead), 0.0f, 0.0f);
         ggml_flash_attn_ext_add_sinks(attn, W(b + "attn_sinks.weight"));
         ggml_prec_set_acc(attn, GGML_PREC_F32);
@@ -800,6 +835,85 @@ struct Hy4Engine::Impl {
         return gf;
     }
 
+    /// --dfly: DFly2 (AngelSpec's Hy4 drafter) on the block [token at n_past, mask x n]. Slot 0 takes the target's MTP-style
+    /// fusion of its embedding and the trunk's final state before it; each of the 5 layers is pre-norm gated MLA with a
+    /// learnable sink and a post-projection norm, then a SwiGLU FFN. Layer i reads trunk layer dfly_tl[i]'s cache: the
+    /// context rows the trunk's indexer picked for the last token (its saved mask row) and the block's own rows, which
+    /// it writes at n_past.. (the check that follows writes those rows again). The block attends both ways. Then the
+    /// final norm, and per slot the hidden correction with the previous token's embedding and the trunk's head: the
+    /// guesses one after another (greedy), each feeding the next slot's correction.
+    ggml_cgraph * build_dfly(ggml_context * c, const Shape & sh, Inputs & in) {
+        ggml_cgraph * gf = ggml_new_graph_custom(c, GRAPH_NODES, false);
+        const int64_t nt = sh.nt, D = G.n_embd, first = sh.first;
+        const int64_t KR = G.kv_lora, R = G.d_rope, H = 32, qhead = 256, nope = qhead - R, VD = 256;
+        const float base = (float) G.rope_base;
+        const int64_t n_kv = sh.n_kv;
+        in.sh = sh;
+        in.hprev = input(c, GGML_TYPE_F32, D, 1, "inp_hprev");
+        in.tok = input(c, GGML_TYPE_I32, nt, 1, "inp_tok");
+        in.pos = input(c, GGML_TYPE_I32, nt, 1, "inp_pos");
+        in.kidx = input(c, GGML_TYPE_I64, nt, 1, "inp_kidx");
+        const int64_t col = (first - 1) % 8;
+        const bool picks = dm_pos[col] == first - 1;
+        dfly_picks = picks;
+        in.dtail = input(c, GGML_TYPE_F32, picks ? n_kv - first : n_kv, 1, "inp_dtail");
+        ggml_tensor * emb = ggml_get_rows(c, W("token_embd.weight"), in.tok);           // [D, nt]
+        ggml_tensor * e0 = ggml_view_2d(c, emb, D, 1, emb->nb[1], 0);
+        ggml_tensor * f = ggml_concat(c, norm(c, cont(c, e0), "dfly.fuse.enorm.weight"), norm(c, in.hprev, "dfly.fuse.hnorm.weight"), 0);
+        f = ggml_mul(c, ggml_mul_mat(c, W("dfly.fuse.eh_proj.weight"), f), W("dfly.fuse.gate.weight"));
+        ggml_tensor * h = ggml_add(c, emb, ggml_pad(c, f, 0, nt - 1, 0, 0));
+        for (size_t i = 0; i < dfly_tl.size(); ++i) {
+            const int64_t T = dfly_tl[i];
+            const std::string b = "dfly." + std::to_string(i) + ".";
+            ggml_tensor * x = norm(c, h, b + "attn_norm.weight");
+            ggml_tensor * qr = norm(c, ggml_mul_mat(c, W(b + "attn_q_a.weight"), x), b + "attn_q_a_norm.weight");
+            ggml_tensor * q = ggml_reshape_3d(c, ggml_mul_mat(c, W(b + "attn_q_b.weight"), qr), qhead, H, nt);
+            ggml_tensor * qn = ggml_view_3d(c, q, nope, H, nt, q->nb[1], q->nb[2], 0);
+            ggml_tensor * qp = ggml_view_3d(c, q, R, H, nt, q->nb[1], q->nb[2], (size_t) nope * ggml_element_size(q));
+            qp = ggml_permute(c, rope(c, qp, in.pos, nullptr, base), 0, 2, 1, 3);       // [R, nt, H]
+            qn = ggml_mul_mat(c, ggml_reshape_3d(c, W(b + "attn_k_b.weight"), nope, KR, H), ggml_permute(c, qn, 0, 2, 1, 3));
+            ggml_tensor * Q = ggml_concat(c, qn, qp, 0);                                 // [KR + R, nt, H]
+            ggml_tensor * kvc = ggml_mul_mat(c, W(b + "attn_kv_a_mqa.weight"), x);
+            ggml_tensor * lat = norm(c, cont(c, ggml_view_2d(c, kvc, KR, nt, kvc->nb[1], 0)), b + "attn_kv_a_norm.weight");
+            ggml_tensor * kp = cont(c, ggml_view_2d(c, kvc, R, nt, kvc->nb[1], (size_t) KR * ggml_element_size(kvc)));
+            kp = rope(c, ggml_reshape_3d(c, kp, R, 1, nt), in.pos, nullptr, base);
+            ggml_tensor * cache = ggml_set_rows(c, kv[(size_t) T], ggml_concat(c, lat, ggml_reshape_2d(c, kp, R, nt), 0), in.kidx);
+            ggml_build_forward_expand(gf, cache);
+            ggml_tensor * K = ggml_view_3d(c, cache, KR + R, n_kv, 1, cache->nb[1], cache->nb[1] * n_kv, 0);
+            ggml_tensor * V = ggml_view_3d(c, cache, KR, n_kv, 1, cache->nb[1], cache->nb[1] * n_kv, 0);
+            // the context: the trunk's mask row for first - 1 (0 / -inf per row), then the block (0) and what is past
+            // it (-inf); without a saved row (a restored session) the host's row sees every context position
+            ggml_tensor * mrow = in.dtail;
+            if (picks) mrow = ggml_concat(c, ggml_cast(c, ggml_view_1d(c, dmask[T], first, (size_t) col * dmask[T]->nb[1]), GGML_TYPE_F32), in.dtail, 0);
+            ggml_tensor * m = ggml_cast(c, ggml_repeat_4d(c, ggml_reshape_2d(c, mrow, n_kv, 1), n_kv, nt, 1, 1), GGML_TYPE_F16);
+            ggml_tensor * attn = ggml_flash_attn_ext(c, Q, K, V, m, 1.0f / sqrtf((float) qhead), 0.0f, 0.0f);
+            ggml_flash_attn_ext_add_sinks(attn, W(b + "attn_sinks.weight"));
+            ggml_prec_set_acc(attn, GGML_PREC_F32);
+            ggml_tensor * A = ggml_reshape_3d(c, attn, KR, H, nt);
+            A = ggml_mul_mat(c, ggml_reshape_3d(c, W(b + "attn_v_b.weight"), KR, VD, H), ggml_permute(c, A, 0, 2, 1, 3));
+            A = ggml_reshape_2d(c, cont(c, ggml_permute(c, A, 0, 2, 1, 3)), H * VD, nt);
+            A = ggml_mul(c, A, ggml_sigmoid(c, ggml_mul_mat(c, W(b + "attn_gate.weight"), x)));
+            h = ggml_add(c, h, norm(c, ggml_mul_mat(c, W(b + "attn_output.weight"), A), b + "post_proj_norm.weight"));
+            ggml_tensor * x2 = norm(c, h, b + "ffn_norm.weight");
+            ggml_tensor * g = ggml_mul_mat(c, W(b + "ffn_gate.weight"), x2), * u = ggml_mul_mat(c, W(b + "ffn_up.weight"), x2);
+            h = ggml_add(c, h, ggml_mul_mat(c, W(b + "ffn_down.weight"), ggml_swiglu_split(c, g, u)));
+        }
+        ggml_tensor * hf = norm(c, h, "dfly.final_norm.weight");
+        ggml_tensor * prev = cont(c, e0);
+        for (int64_t j = 1; j < nt; ++j) {
+            ggml_tensor * hj = cont(c, ggml_view_2d(c, hf, D, 1, hf->nb[1], (size_t) j * hf->nb[1]));
+            ggml_tensor * ci = ggml_concat(c, norm(c, hj, "dfly.corr.hidden_norm.weight"), norm(c, prev, "dfly.corr.embed_norm.weight"), 0);
+            ggml_tensor * cg = ggml_mul_mat(c, W("dfly.corr.gate.weight"), ci), * cu = ggml_mul_mat(c, W("dfly.corr.up.weight"), ci);
+            hj = ggml_add(c, hj, ggml_mul_mat(c, W("dfly.corr.down.weight"), ggml_swiglu_split(c, cg, cu)));
+            ggml_tensor * id = ggml_argmax(c, ggml_mul_mat(c, W("output.weight"), hj));   // [1] I32
+            ggml_set_output(id);
+            ggml_build_forward_expand(gf, id);
+            in.idv.push_back(id);
+            if (j + 1 < nt) prev = ggml_get_rows(c, W("token_embd.weight"), id);
+        }
+        return gf;
+    }
+
     ggml_cgraph * build(ggml_context * c, const Shape & sh, Inputs & in, bool all_logits = false) {
         const int64_t D = G.n_embd, HC = G.hc, nt = sh.nt;
         const float eps = (float) G.rms_eps;
@@ -828,6 +942,7 @@ struct Hy4Engine::Impl {
         in.kidx_tok = input(c, GGML_TYPE_I64, nt, 1, "inp_kidx_tok");
         in.mask = input(c, GGML_TYPE_F16, sh.n_kv, nt, "inp_mask");
         in.mask_swa = input(c, GGML_TYPE_F16, r_swa, nt, "inp_mask_swa");
+        if (!dmask.empty()) in.dm_idx = input(c, GGML_TYPE_I64, std::min<int64_t>(nt, 8), 1, "inp_dm_idx");
         if (sh.n_new > 0) {
             in.new_cells = input(c, GGML_TYPE_I32, kp * sh.n_new, 1, "inp_new_cells");
             in.new_rep = input(c, GGML_TYPE_I64, sh.n_new, 1, "inp_new_rep");
@@ -1135,7 +1250,7 @@ struct Hy4Engine::Impl {
     }
 
     bool step(const int64_t * toks, int64_t nt, std::vector<float> & logits, std::string & err, bool all = false,
-              bool draft = false) {
+              bool draft = false, bool dfly = false) {
         const int64_t first = n_past + (draft ? draft_off : 0), last = first + nt - 1, kp = G.idx_kpool;
         Shape sh = shape(first, nt);
         if (!draft && img_rows)
@@ -1145,7 +1260,7 @@ struct Hy4Engine::Impl {
         {
             const int32_t save = next_pos;
             if (draft) next_pos += (int32_t) draft_off;
-            positions(nt, draft || !img_yx ? nullptr : img_yx + 2 * img_at, t3, false);
+            positions(nt, draft || dfly || !img_yx ? nullptr : img_yx + 2 * img_at, t3, false);
             next_pos = save;
         }
         auto pos3 = [&](int64_t q, int k) -> int32_t {         // position plane k of sequence index q
@@ -1161,12 +1276,12 @@ struct Hy4Engine::Impl {
         std::vector<std::vector<float>> rows;
         std::string eng_err;
         std::thread reader([&] {
-            if (!draft && !fill_engram(toks, nt, first, rows, eng_err) && eng_err.empty()) eng_err = "Engram";
+            if (!draft && !dfly && !fill_engram(toks, nt, first, rows, eng_err) && eng_err.empty()) eng_err = "Engram";
         });
         ggml_init_params ip = { meta.size(), meta.data(), true };
         ggml_context * c = ggml_init(ip);
         Inputs in;
-        ggml_cgraph * gf = draft ? build_draft(c, sh, in) : build(c, sh, in, all);
+        ggml_cgraph * gf = dfly ? build_dfly(c, sh, in) : draft ? build_draft(c, sh, in) : build(c, sh, in, all);
         ggml_backend_sched_reset(sched);
         if (!ggml_backend_sched_alloc_graph(sched, gf)) { reader.join(); ggml_free(c); err = "graph allocation failed"; return false; }
 
@@ -1188,6 +1303,17 @@ struct Hy4Engine::Impl {
         set_in(in.kidx, kidx.data(), 0, kidx.size() * 8);
         set_in(in.kidx_swa, kswa.data(), 0, kswa.size() * 8);
         set_in(in.kidx_tok, ktok.data(), 0, ktok.size() * 8);
+        if (in.dm_idx) {        // --dfly: the last rows' mask columns
+            std::vector<int64_t> di((size_t) in.dm_idx->ne[0]);
+            for (size_t i = 0; i < di.size(); ++i) di[i] = (first + nt - (int64_t) di.size() + (int64_t) i) % 8;
+            set_in(in.dm_idx, di.data(), 0, di.size() * 8);
+        }
+        if (in.dtail) {         // the drafter's mask past the context (with the saved picks) or of every row
+            const int64_t n = in.dtail->ne[0], at = dfly_picks ? first : 0;
+            std::vector<float> dt((size_t) n);
+            for (int64_t i = 0; i < n; ++i) dt[(size_t) i] = at + i < first + nt ? 0.0f : -INFINITY;
+            set_in(in.dtail, dt.data(), 0, dt.size() * 4);
+        }
         const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
         {   // full layers: causal over the cache rows; SWA layers: the ring, row r holds the last position = r mod R
             std::vector<ggml_fp16_t> m((size_t) (n_kv * nt)), ms((size_t) (r_swa * nt));
@@ -1277,6 +1403,20 @@ struct Hy4Engine::Impl {
         if (std::getenv("HY4_SPLITS"))
             std::fprintf(stderr, "hy4: %lld tokens: %d nodes, %d splits, %d copies\n", (long long) nt, ggml_graph_n_nodes(gf),
                          ggml_backend_sched_get_n_splits(sched), ggml_backend_sched_get_n_copies(sched));
+        if (dfly) {
+            dfly_out.clear();
+            for (ggml_tensor * t : in.idv) {
+                int32_t v = 0;
+                ggml_backend_tensor_get(t, &v, 0, 4);
+                dfly_out.push_back(v);
+            }
+            ggml_free(c);
+            return true;
+        }
+        if (in.dm_idx) for (int64_t i = 0; i < in.dm_idx->ne[0]; ++i) {
+            const int64_t p = first + nt - in.dm_idx->ne[0] + i;
+            dm_pos[p % 8] = p;
+        }
         logits.resize((size_t) G.n_vocab * (all ? nt : 1));
         ggml_backend_tensor_get(in.logits, logits.data(), 0, logits.size() * 4);
         if (route_stats && !draft) {
@@ -1338,7 +1478,21 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
     P.cpu = ggml_backend_cpu_init();
     const int th = o.threads > 0 ? o.threads : std::max(1u, std::thread::hardware_concurrency() / 2);
     ggml_backend_cpu_set_n_threads(P.cpu, th);
+    if (!o.dfly.empty()) {
+        if (P.n_alloc <= P.n_trunk) { err = "--dfly needs --mtp (the trunk's final states)"; return false; }
+        try { P.dmodel = std::make_unique<GgufModel>(GgufModel::open(o.dfly)); }
+        catch (const std::exception & e) { err = e.what(); return false; }
+        P.dfly_tl = { 25, 29, 33, 37, 41 };
+    }
     if (!P.place(err) || !P.upload(err) || !P.open_engram(err)) return false;
+    if (P.dmodel) {
+        for (int64_t T : P.dfly_tl)
+            if (!P.dmask.count(T) || P.dev[(size_t) T] != P.dev[(size_t) P.n_trunk - 1]) {
+                err = "--dfly: trunk layer " + std::to_string(T) + " is not on the last card";
+                return false;
+            }
+        if (!P.W("dfly.4.attn_q_b.weight") || !P.W("dfly.corr.down.weight")) { err = "--dfly: not a DFly2 GGUF"; return false; }
+    }
     P.warm_cpu_weights();
     P.all = P.gpu;
     P.all.push_back(P.cpu);
@@ -1459,6 +1613,7 @@ bool Hy4Engine::restore(const std::string & path, int64_t & tokens, uint64_t & b
     Impl & P = *p_;
     std::FILE * f = std::fopen(path.c_str(), "rb");
     if (!f) { err = "cannot read " + path; return false; }
+    for (auto & v : P.dm_pos) v = -1;     // the drafter's saved picks are not in the file
     SessHead h, want;
     bool ok = std::fread(&h, sizeof h, 1, f) == 1;
     if (!ok || std::memcmp(h.magic, want.magic, 8) || h.n_embd != P.G.n_embd || h.n_alloc != P.n_alloc ||
@@ -1534,4 +1689,22 @@ int64_t Hy4Engine::n_ctx() const { return p_->n_ctx; }
 const Hy4Geometry & Hy4Engine::geometry() const { return p_->G; }
 const std::vector<int64_t> & Hy4Engine::history() const { return p_->hist; }
 
+}  // namespace almond::hy4
+
+namespace almond::hy4 {
+bool Hy4Engine::has_dfly() const { return p_->dmodel != nullptr; }
+
+bool Hy4Engine::dfly_draft(int64_t token, int n, std::vector<int64_t> & out, std::string & err) {
+    Impl & P = *p_;
+    out.clear();
+    if (!P.dmodel) { err = "no drafter (--dfly)"; return false; }
+    n = (int) std::min<int64_t>(n, P.n_ctx - P.n_past - 1);
+    if (n < 1 || P.n_past < 1) return true;
+    std::vector<int64_t> toks((size_t) n + 1, P.dfly_mask_tok);
+    toks[0] = token;
+    std::vector<float> lg;
+    if (!P.step(toks.data(), n + 1, lg, err, false, false, true)) return false;
+    out = P.dfly_out;
+    return true;
+}
 }  // namespace almond::hy4

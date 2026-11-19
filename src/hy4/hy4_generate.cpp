@@ -27,6 +27,7 @@ namespace {
 int parse_csv(const char * s, std::vector<int64_t> & out);
 
 struct Args {
+    bool mtp_n_set = false;
     std::string model;
     bool info = false, list = false;
     std::vector<int64_t> prompt;
@@ -115,7 +116,14 @@ int parse(int argc, char ** argv, Args & a) {
             if (++i >= argc) return 2;
             a.eo.reserve_mib = std::atoll(argv[i]);
         }
+        else if (!std::strcmp(s, "--dfly")) {
+            if (++i >= argc) return false;
+            a.eo.dfly = argv[i];
+            a.eo.mtp = true;
+            if (!a.mtp_n_set) a.eo.mtp_n = 5;
+        }
         else if (!std::strcmp(s, "--mtp-n")) {
+            a.mtp_n_set = true;
             if (++i >= argc) return 2;
             a.eo.mtp_n = std::max(1, std::atoi(argv[i]));
         }
@@ -155,7 +163,7 @@ int parse(int argc, char ** argv, Args & a) {
         else if (!std::strcmp(s, "--help")) {
             std::printf("usage: almond-engine --hy4 -m <gguf> [--info] [--list-tensors]\n"
                         "       [--prompt-ids 1,2,3 -n 8 [--temp 0.9] [--top-p 1.0] [--seed 1]]\n"
-                        "       [--gpus 0,1] [-c 4096] [-t N] [--expert-layers-gpu N] [--ubatch 512] [--dense-q8] [--engram-place auto|ram|ssd] [--mtp [--mtp-n 1]]\n"
+                        "       [--gpus 0,1] [-c 4096] [-t N] [--expert-layers-gpu N] [--ubatch 512] [--dense-q8] [--engram-place auto|ram|ssd] [--mtp [--mtp-n 1]] [--dfly DFLY.gguf [--mtp-n 5]]\n"
                         "       [--serve [--eos-ids 120025]]   serve/server.py's protocol on stdin/stdout\n"
                         "       [--cpu [--no-kv-cache]]   the CPU reference path\n");
             return 1;
@@ -365,27 +373,32 @@ int hy4_main(int argc, char ** argv) {
             std::vector<int64_t> out{ y };
             int rounds = 0, accepted = 0;
             auto t2 = std::chrono::steady_clock::now();
+            int offered = 0;
             while ((int) out.size() < a.n_predict) {
-                int64_t d = 0;
-                if (!eng.draft(y, d, e)) { std::fprintf(stderr, "hy4: draft: %s\n", e.c_str()); return 1; }
-                const int64_t pair[2] = { y, d };
-                if (!eng.decode_all(pair, 2, logits, e)) { std::fprintf(stderr, "hy4: %s\n", e.c_str()); return 1; }
+                std::vector<int64_t> d;
+                if (!(eng.has_dfly() ? eng.dfly_draft(y, a.eo.mtp_n, d, e) : eng.draft_chain(y, a.eo.mtp_n, d, e))) {
+                    std::fprintf(stderr, "hy4: draft: %s\n", e.c_str()); return 1;
+                }
+                std::vector<int64_t> run{ y };
+                run.insert(run.end(), d.begin(), d.end());
+                if (!eng.decode_all(run.data(), (int64_t) run.size(), logits, e)) { std::fprintf(stderr, "hy4: %s\n", e.c_str()); return 1; }
                 ++rounds;
-                const int64_t c1 = sample(logits.data(), G.n_vocab, temp, top_p, rng);
-                if (c1 == d) {
-                    ++accepted;
-                    out.push_back(d);
-                    y = sample(logits.data() + G.n_vocab, G.n_vocab, temp, top_p, rng);
-                } else {
-                    eng.truncate(eng.n_past() - 1);
-                    y = c1;
+                offered += (int) d.size();
+                size_t i = 0;
+                for (;;) {
+                    const int64_t cnd = sample(logits.data() + i * (size_t) G.n_vocab, G.n_vocab, temp, top_p, rng);
+                    if (i < d.size() && cnd == d[i]) { ++accepted; out.push_back(cnd); ++i; continue; }
+                    eng.truncate(eng.n_past() - (int64_t) (d.size() - i));
+                    y = cnd;
+                    break;
                 }
                 out.push_back(y);
             }
             t_gen = std::chrono::duration<double>(std::chrono::steady_clock::now() - t2).count();
             std::printf("hy4: ids:");
             for (size_t i = 0; i < out.size() && i < 32; ++i) std::printf(" %lld", (long long) out[i]);
-            std::printf("\nhy4: MTP: %d rounds, %d drafts accepted (%.0f%%)\n", rounds, accepted, 100.0 * accepted / std::max(rounds, 1));
+            std::printf("\nhy4: %s: %d rounds, %d of %d drafts accepted (%.2f tokens a round)\n", eng.has_dfly() ? "DFly2" : "MTP", rounds,
+                        accepted, offered, (double) (accepted + rounds) / std::max(rounds, 1));
             std::printf("hy4: prompt %zu tokens %.2f s (%.1f tok/s); %zu generated tokens %.2f s (%.2f tok/s)\n", toks.size(),
                         t_prompt, toks.size() / std::max(t_prompt, 1e-9), out.size() - 1, t_gen,
                         (out.size() - 1) / std::max(t_gen, 1e-9));

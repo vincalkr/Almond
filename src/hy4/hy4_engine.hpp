@@ -30,6 +30,7 @@ struct Hy4EngineOptions {
     bool fused_hc = false;
     bool fused_proj = false;
     std::string down_requant;      ///< ffn_down_exps (Q4_K in the file) requantized for the cards: q3_k, iq3_s, iq3_xxs, q2_k       ///< with --dense-q8: the attention input's four projections as one product (--fused-proj)         ///< iHC through the vendored ggml's fused DeepSeek-V4 ops (--fused-hc)
+    std::string dfly;              ///< Tencent's DFly2 drafter as a GGUF (tools/hy4/dfly_convert.py), needs mtp (--dfly)
     int mtp_n = 1;                 ///< guesses per step (--mtp-n)              ///< load the MTP block (layer 42) and draft one token ahead (--mtp)         ///< the 2-D BF16 matrices quantized to Q8_0 on load (--dense-q8)
     bool verbose = true;
 };
@@ -61,6 +62,10 @@ public:
     /// Up to n guesses in a row, each block step fed the previous one's state and guess.
     bool draft_chain(int64_t token, int n, std::vector<int64_t> & out, std::string & err);
     bool has_mtp() const;
+    /// --dfly: DFly2's greedy block of up to n guesses after `token` (the next one at n_past), drafted in one pass that
+    /// reads the trunk's KV rows and indexer picks of layers 25..41; check them as with draft_chain.
+    bool dfly_draft(int64_t token, int n, std::vector<int64_t> & out, std::string & err);
+    bool has_dfly() const;
 
     /// The conversation in the cache to a file (tokens, the caches' used rows, the MTP states) and back; `bytes` is
     /// the file's size. restore() refuses a file of another model geometry or context layout.

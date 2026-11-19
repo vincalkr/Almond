@@ -322,7 +322,7 @@ int hy4_serve(Hy4Engine & eng, const std::vector<int64_t> & eos, const Hy4Sampli
                 // --mtp: the block's guesses d1..dk after y, all run at once with y; each kept while the token
                 // sampled at its place is that guess (exact for any sampling), the rest cut from the cache
                 std::vector<int64_t> d;
-                if (!eng.draft_chain(y, mtp_n, d, err)) { ok = false; break; }
+                if (!(eng.has_dfly() ? eng.dfly_draft(y, mtp_n, d, err) : eng.draft_chain(y, mtp_n, d, err))) { ok = false; break; }
                 std::vector<int64_t> run{ y };
                 run.insert(run.end(), d.begin(), d.end());
                 if (!eng.decode_all(run.data(), (int64_t) run.size(), lg, err)) { ok = false; break; }

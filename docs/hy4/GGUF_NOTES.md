@@ -474,6 +474,45 @@ This 2-bit model moves about 0.2 in KL from changes that compute the same thing 
 its perplexity on 7,161 tokens moves by several percent; `q3_k` is a little past that, `q2_k` about two and a half
 times. Off by default: faster, measurably further from the file's weights.
 
+## DFly2, Tencent's block drafter (`--dfly`, 2026-11-19)
+
+Hy4-flash ships a drafter of its own, DFly2 (AngelSpec, `model.dfly_layers.*` in `model-00148-of-00148.safetensors` of
+tencent/Hy4-flash, 1.69 GB BF16, in `models/hy4-dfly2`). `tools/hy4/dfly_convert.py` writes it as a GGUF (90 tensors,
+`kv_b_proj` split into per-head key and value halves like the trunk's `attn_k_b` / `attn_v_b`; the confidence head is
+left out, as vLLM leaves it out). `--dfly FILE` (with `--mtp`, which it turns on; `--mtp-n` is then the block's guesses,
+5 by default) loads it on the last card, Q8_0 under `--dense-q8`; the placement still kept 28 expert layers in VRAM.
+
+One drafter step is the block [the next token, then 120009 (mask) for each guess] at n_past: slot 0 gets the MTP-style
+fusion of its embedding with the trunk's output-normed state before it, through the learned gate; five layers of
+pre-norm gated MLA (sigmoid output gate, learnable sink, post-projection norm) and a SwiGLU FFN. Layer i reads trunk
+layer 25, 29, 33, 37, 41's cache: the context rows the trunk's indexer picked for the last token (the attention mask
+rows of the trunk's last 8 positions are kept per layer for this; after RESTORE every row is used) and the block's own
+rows, written at n_past.. (the check that follows writes them again); the block attends both ways. Final norm, then per
+slot the hidden correction with the previous token's embedding and the trunk's head, greedy, each guess feeding the
+next slot. The guesses are checked like the MTP chain (exact for any sampling).
+
+What it costs to check k tokens in one step (64K context, the same configuration, 1024 tokens of context, mean of 12):
+
+| tokens in the step | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ms | 55.0 | 68.6 | 90.8 | 100.4 | 119.0 | 132.0 | 152.4 | 167.1 |
+
+Greedy, 400 tokens, the three chat prompts above (`--prompt-ids`, tokens per round / tok/s):
+
+| | prompt 1 | prompt 2 | prompt 3 |
+| --- | ---: | ---: | ---: |
+| MTP (one guess) | 1.64 / 21.61 | 1.71 / 22.54 | 1.66 / 22.48 |
+| DFly2, 1 guess | 1.58 / 21.32 | 1.67 / 22.69 | 1.45 / 19.64 |
+| DFly2, 2 guesses | 1.89 / 21.12 | 2.08 / 23.29 | 1.63 / 18.24 |
+| DFly2, 3 guesses | 1.93 / 19.76 | 2.22 / 22.65 | 1.57 / 16.35 |
+| DFly2, 5 guesses | 1.98 / 14.19 | 2.31 / 16.44 | 1.56 / 11.45 |
+
+The guesses read well (the first rounds of prompt 1 kept 5 of 5; misses are mostly other words for the same thing,
+"guardian" for "keeper"), and the greedy text was the MTP run's. But against this 2-bit trunk a block keeps about 2
+tokens a round, where a 6-token check costs 2.4 times a 2-token one (the 14 layers whose experts are in RAM read more
+experts per extra token); the break-even with MTP for 5 guesses is about 3.3 tokens a round. So `--dfly` stays off;
+MTP with one guess remains the default.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the
