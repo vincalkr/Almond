@@ -129,6 +129,7 @@ int parse(int argc, char ** argv, Args & a) {
         else if (!std::strcmp(s, "--gather-attn")) a.eo.gather_attn = true;
         else if (!std::strcmp(s, "--fused-indexer")) a.eo.fused_indexer = true;
         else if (!std::strcmp(s, "--kv-q8")) a.eo.kv_q8 = true;
+        else if (!std::strcmp(s, "--pin-experts")) a.eo.pin_experts = true;
         else if (!std::strcmp(s, "--ram-requant")) {
             if (++i >= argc) return 2;
             a.eo.ram_requant = argv[i];

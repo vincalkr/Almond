@@ -60,6 +60,8 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 
 ## Open
 
+- Hy4-flash speed work: state, measurements and what is being tried in `docs/hy4/SPEED_WORK.md` (2026-11-20).
+
 - **Qwen3.8-27B:** images (CPU encoder, 300 image tokens: a large screenshot's small text is not legible, as on
   Flash-Next) and conversations on disk work; measured on a few pictures and one restart, not in long agent sessions. The 4-token verify window costs 1.4 decode tokens (ggml's MMVQ is
   latency-bound on RDNA3; table, decode-once and unroll changes did not help); past ~100K the q8_0 KV's f16

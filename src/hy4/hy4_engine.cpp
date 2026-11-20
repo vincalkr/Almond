@@ -94,6 +94,8 @@ struct Hy4Engine::Impl {
     std::map<int64_t, ggml_tensor *> dmask;
     int64_t dm_pos[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
     bool dfly_picks = false;
+    // HY4_STEP_STATS: where a step's time goes (Engram rows read, the wait for them, the graph's compute)
+    double st_read_us = 0, st_wait_us = 0, st_comp_us = 0;
     std::vector<int64_t> dfly_out;
     bool dfly_layer(int64_t il) const { return dmask.count(il) != 0; }
     // --host-moe: in steps of up to 8 tokens a layer whose routed experts are in RAM hands its expert input to this
@@ -142,6 +144,9 @@ struct Hy4Engine::Impl {
         if (eng_fd >= 0) ::close(eng_fd);
         if (eng_ram) ::munmap(eng_ram - (eng_off & 4095ull), eng_ram_bytes);
         host_moe_stop();
+        if (std::getenv("HY4_STEP_STATS"))
+            std::fprintf(stderr, "hy4: steps: Engram read %.2f s (waited %.2f s), compute %.2f s\n", st_read_us / 1e6,
+                         st_wait_us / 1e6, st_comp_us / 1e6);
         if (sched) ggml_backend_sched_free(sched);
         for (auto b : wbuf) if (b) ggml_backend_buffer_free(b);
         for (auto c : wctx) if (c) ggml_free(c);
@@ -719,12 +724,21 @@ struct Hy4Engine::Impl {
     /// a copy of them is a kernel (a device memcpy) for nothing
     static ggml_tensor * cont(ggml_context * c, ggml_tensor * t) { return ggml_is_contiguous(t) ? t : ggml_cont(c, t); }
 
+    /// The iHC mixes: fn [HC*D, m] (F32, m = 4 or 8) times the normed streams [HC*D, nt]. Past 8 tokens the product
+    /// is taken the other way round, streams x fn, then transposed: ggml runs an output of m rows over many tokens as
+    /// an F32 GEMM with 128x128 tiles (1.2 ms a call, ~85 calls a 1,024-token step), while a right-hand side of at
+    /// most 8 columns goes to its matrix-vector kernel, which reads the streams once (2026-11-20).
+    ggml_tensor * hc_mix(ggml_context * c, ggml_tensor * fn, ggml_tensor * xn, int64_t nt) {
+        if (nt <= 8 || fn->ne[1] > 8) return ggml_mul_mat(c, fn, xn);
+        return ggml_cont(c, ggml_transpose(c, ggml_mul_mat(c, xn, fn)));      // [nt, m] -> [m, nt]
+    }
+
     ggml_tensor * hc_pre(ggml_context * c, ggml_tensor * x, const std::string & p, int64_t nt, ggml_tensor ** post) {
         const int64_t D = G.n_embd, HC = G.hc;
         const float eps = (float) G.rms_eps;
         ggml_tensor * fn = W(p + "_fn.weight"), * sc = W(p + "_scale.weight"), * bs = W(p + "_base.weight");
         ggml_tensor * flat = ggml_reshape_2d(c, x, HC * D, nt);
-        ggml_tensor * mixes = ggml_mul_mat(c, fn, ggml_rms_norm(c, flat, eps));    // [2HC, nt]
+        ggml_tensor * mixes = hc_mix(c, fn, ggml_rms_norm(c, flat, eps), nt);       // [2HC, nt]
         if (o.fused_hc && G.hc_mag == 2.0) {
             // --fused-hc: DeepSeek-V4's fused ops (vendored ggml); Hy4's eps inside the sigmoid is in the base (upload)
             ggml_tensor * g = ggml_dsv41_hc_mixes(c, cont(c, mixes), sc, bs, 0.0f);         // [HC, 2 nt]
@@ -1225,7 +1239,7 @@ struct Hy4Engine::Impl {
         ggml_tensor * xl = no == nt ? x : cont(c, ggml_view_3d(c, x, D, HC, 1, x->nb[1], x->nb[2],
                                                                     (size_t) (nt - 1) * x->nb[2]));
         ggml_tensor * flat = ggml_reshape_2d(c, xl, HC * D, no);
-        ggml_tensor * mixes = ggml_mul_mat(c, W("output_hc_fn.weight"), ggml_rms_norm(c, flat, eps));   // [HC, no]
+        ggml_tensor * mixes = hc_mix(c, W("output_hc_fn.weight"), ggml_rms_norm(c, flat, eps), no);   // [HC, no]
         ggml_tensor * gates = ggml_sigmoid(c, ggml_scale_bias(c, ggml_add(c, ggml_mul(c, mixes, W("output_hc_scale.weight")),
                                                                          W("output_hc_base.weight")), 1.0f, eps));
         ggml_tensor * prod = ggml_mul(c, xl, ggml_reshape_3d(c, gates, 1, HC, no));
@@ -1507,7 +1521,9 @@ struct Hy4Engine::Impl {
         std::vector<std::vector<float>> rows;
         std::string eng_err;
         std::thread reader([&] {
+            const auto tr = std::chrono::steady_clock::now();
             if (!draft && !dfly && !fill_engram(toks, nt, first, rows, eng_err) && eng_err.empty()) eng_err = "Engram";
+            st_read_us += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tr).count();
         });
         ggml_init_params ip = { meta.size(), meta.data(), true };
         ggml_context * c = ggml_init(ip);
@@ -1552,11 +1568,15 @@ struct Hy4Engine::Impl {
         }
         const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
         {   // full layers: causal over the cache rows; SWA layers: the ring, row r holds the last position = r mod R
-            std::vector<ggml_fp16_t> m((size_t) (n_kv * nt)), ms((size_t) (r_swa * nt));
+            // only the masks the graph uses (with --gather-attn a step past top-k has no causal mask): built on the
+            // host for every step, the [n_kv, tokens] one cost O(context x step) and its copy (2026-11-20)
+            auto used = [](ggml_tensor * t) { return t && t->buffer; };
+            const bool want_m = used(in.mask), want_ms = used(in.mask_swa);
+            std::vector<ggml_fp16_t> m(want_m ? (size_t) (n_kv * nt) : 0), ms(want_ms ? (size_t) (r_swa * nt) : 0);
             for (int64_t i = 0; i < nt; ++i) {
                 const int64_t pt = first + i;
-                for (int64_t q = 0; q < n_kv; ++q) m[(size_t) (i * n_kv + q)] = q <= pt ? zero : ninf;
-                for (int64_t r = 0; r < r_swa; ++r) {
+                if (want_m) for (int64_t q = 0; q < n_kv; ++q) m[(size_t) (i * n_kv + q)] = q <= pt ? zero : ninf;
+                if (want_ms) for (int64_t r = 0; r < r_swa; ++r) {
                     const int64_t q = last - ((last - r) % r_swa + r_swa) % r_swa;     // the position in row r
                     ms[(size_t) (i * r_swa + r)] = q >= 0 && q <= pt && pt - q < G.swa ? zero : ninf;
                 }
@@ -1603,7 +1623,8 @@ struct Hy4Engine::Impl {
                     }
                 }
             }
-            std::vector<float> base((size_t) ((n_kv + NS) * nt), -INFINITY), zeros((size_t) (NS * nt), 0.0f);
+            const bool want_base = in.mask_base && in.mask_base->buffer;
+            std::vector<float> base(want_base ? (size_t) ((n_kv + NS) * nt) : 0, -INFINITY), zeros(want_base ? (size_t) (NS * nt) : 0, 0.0f);
             set_in(in.pool_mask, pm.data(), 0, pm.size() * 4);
             set_in(in.pool_idx, pidx.data(), 0, pidx.size() * 4);
             set_in(in.tail, tail.data(), 0, tail.size() * 4);
@@ -1631,12 +1652,18 @@ struct Hy4Engine::Impl {
                 std::copy(hhist.begin() + (first - 1) * G.n_embd, hhist.begin() + first * G.n_embd, hp.begin());
             set_in(in.hprev, hp.data(), 0, hp.size() * 4);
         }
-        reader.join();
+        {
+            const auto tj = std::chrono::steady_clock::now();
+            reader.join();
+            st_wait_us += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tj).count();
+        }
         if (!eng_err.empty()) { ggml_free(c); err = eng_err; return false; }
         for (size_t e = 0; e < in.eng.size() && e < rows.size(); ++e) set_in(in.eng[e], rows[e].data(), 0, rows[e].size() * 4);
 
         if (hm.mem) { hm.active = true; hm.cv.notify_all(); }
+        const auto tc = std::chrono::steady_clock::now();
         const bool computed = ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS;
+        st_comp_us += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tc).count();
         if (hm.mem) hm.active = false;
         if (!computed) { ggml_free(c); err = "graph compute failed"; return false; }
         if (std::getenv("HY4_SPLITS"))
@@ -1740,6 +1767,21 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
         if (!P.W("dfly.4.attn_q_b.weight") || !P.W("dfly.corr.down.weight")) { err = "--dfly: not a DFly2 GGUF"; return false; }
     }
     P.warm_cpu_weights();
+    if (o.pin_experts) {    // --pin-experts: the mapped weights the CPU reads, registered as pinned memory, so the copies a
+        uint64_t pinned = 0;   // prompt step makes of them to a card (ggml's op offload) are DMA at full PCIe speed
+        ::setenv("GGML_CUDA_REGISTER_HOST", "1", 0);
+        std::vector<std::pair<uintptr_t, uintptr_t>> pages;     // page ranges, merged (neighbouring tensors share pages)
+        for (auto & r : P.cpu_ranges)
+            pages.emplace_back((uintptr_t) r.first & ~(uintptr_t) 4095, ((uintptr_t) r.first + r.second + 4095) & ~(uintptr_t) 4095);
+        std::sort(pages.begin(), pages.end());
+        std::vector<std::pair<uintptr_t, uintptr_t>> merged;
+        for (auto & p : pages)
+            if (!merged.empty() && p.first <= merged.back().second) merged.back().second = std::max(merged.back().second, p.second);
+            else merged.push_back(p);
+        for (auto & m : merged)
+            if (ggml_backend_cuda_register_host_buffer((void *) m.first, m.second - m.first)) pinned += m.second - m.first;
+        if (o.verbose) std::fprintf(stderr, "hy4: %.1f GiB of CPU weights pinned\n", pinned / 1073741824.0);
+    }
     if (o.host_moe && !P.host_moe_start(th, err)) return false;
     P.all = P.gpu;
     P.all.push_back(P.cpu);
