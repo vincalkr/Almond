@@ -75,7 +75,9 @@ struct Hy4Engine::Impl {
     std::map<int64_t, ProjCat> proj_cat;
     struct FfnCat { int64_t rd = -1, sg = -1, su = -1; };   // ffn_routed_down, ffn_gate_shexp, ffn_up_shexp in blk.L.ffn_in_cat
     std::map<int64_t, FfnCat> ffn_cat;
-    enum ggml_type down_type = GGML_TYPE_COUNT;   // --down-requant's type, COUNT when off
+    enum ggml_type down_type = GGML_TYPE_COUNT;
+    enum ggml_type ram_type = GGML_TYPE_COUNT;    // --ram-requant's type for the down experts in RAM, COUNT when off
+    std::vector<std::vector<uint8_t>> ram_bufs;   // and their requantized bytes   // --down-requant's type, COUNT when off
     int64_t n_alloc = 0;              // layers with weights and caches: the trunk, plus the MTP block with --mtp
     int64_t draft_off = 0;            // a chained draft: its position past n_past
     std::vector<float> draft_h;       // and the state it starts from (the previous draft's), empty = the trunk's
@@ -345,7 +347,9 @@ struct Hy4Engine::Impl {
                 if (n == "token_embd.weight") d = NG;
                 else if (l < 0) d = dev[(size_t) n_trunk - 1];
                 else d = n.find("_exps") != std::string::npos ? edev[(size_t) l] : dev[(size_t) l];
-                const auto type = d == NG ? (enum ggml_type) t.type : kept_type(t);
+                auto type = d == NG ? (enum ggml_type) t.type : kept_type(t);
+                if (d == NG && ram_type != GGML_TYPE_COUNT && n.find("ffn_down_exps") != std::string::npos && t.type == ty::Q4_K)
+                    type = ram_type;      // --ram-requant: the down experts kept in RAM, requantized (fewer bytes a token)
                 if (o.fused_proj && l >= 0 && d < NG && type == GGML_TYPE_Q8_0 && t.shape.size() == 2 &&
                     (int64_t) t.shape[0] == G.n_embd) {
                     const std::string b = "blk." + std::to_string(l) + ".";
@@ -397,6 +401,33 @@ struct Hy4Engine::Impl {
         for (auto & it : items) {
             const uint8_t * src = it.m->shard(it.shard).tensor_data(*it.t);
             const size_t bytes = ggml_nbytes(it.g);
+            if (it.d == NG && it.g->type != (enum ggml_type) it.t->type && it.t->type == ty::Q4_K) {   // --ram-requant
+                const int64_t ne0 = it.g->ne[0], nrows = ggml_nrows(it.g);
+                const auto * tr = ggml_get_type_traits(GGML_TYPE_Q4_K);
+                const size_t srb = ggml_row_size(GGML_TYPE_Q4_K, ne0), drb = ggml_row_size(it.g->type, ne0);
+                ram_bufs.emplace_back(bytes + 64);
+                uint8_t * dst = (uint8_t *) (((uintptr_t) ram_bufs.back().data() + 63) & ~(uintptr_t) 63);
+                const int nth = (int) std::max(1u, std::thread::hardware_concurrency());
+                std::vector<std::thread> th;
+                for (int k = 0; k < nth; ++k)
+                    th.emplace_back([&, k] {
+                        const int64_t r0 = nrows * k / nth, r1 = nrows * (k + 1) / nth;
+                        std::vector<float> f((size_t) (ne0 * 64));
+                        for (int64_t r = r0; r < r1; r += 64) {
+                            const int64_t n = std::min<int64_t>(64, r1 - r);
+                            tr->to_float(src + (size_t) r * srb, f.data(), n * ne0);
+                            ggml_quantize_chunk(it.g->type, f.data(), dst + (size_t) r * drb, 0, n, ne0, nullptr);
+                        }
+                    });
+                for (auto & t : th) t.join();
+                const uintptr_t a = (uintptr_t) src & ~(uintptr_t) 4095;
+                ::madvise((void *) a, tensor_payload_bytes(*it.t) + ((uintptr_t) src - a), MADV_PAGEOUT);
+                ggml_backend_buffer_t b = ggml_backend_cpu_buffer_from_ptr(dst, bytes);
+                ggml_backend_buffer_set_usage(b, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+                ggml_backend_tensor_alloc(b, it.g, dst);
+                wbuf.push_back(b);
+                continue;
+            }
             if (it.d == NG) {
                 if (it.g->type != (enum ggml_type) it.t->type) { err = it.t->name + ": CPU tensor needs conversion"; return false; }
                 ggml_backend_buffer_t b = ggml_backend_cpu_buffer_from_ptr(const_cast<uint8_t *>(src), bytes);
@@ -1675,6 +1706,12 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
         P.down_type = d == "q3_k" ? GGML_TYPE_Q3_K : d == "q2_k" ? GGML_TYPE_Q2_K : d == "iq3_xxs" ? GGML_TYPE_IQ3_XXS
                     : d == "iq3_s" ? GGML_TYPE_IQ3_S : d == "q4_k" ? GGML_TYPE_COUNT : GGML_TYPE_COUNT;
         if (P.down_type == GGML_TYPE_COUNT && d != "q4_k") { err = "--down-requant takes q3_k, iq3_s, iq3_xxs or q2_k"; return false; }
+    }
+    if (!o.ram_requant.empty()) {
+        const std::string & d = o.ram_requant;
+        P.ram_type = d == "q3_k" ? GGML_TYPE_Q3_K : d == "q2_k" ? GGML_TYPE_Q2_K : d == "iq3_xxs" ? GGML_TYPE_IQ3_XXS
+                   : d == "iq3_s" ? GGML_TYPE_IQ3_S : d == "iq2_xxs" ? GGML_TYPE_IQ2_XXS : GGML_TYPE_COUNT;
+        if (P.ram_type == GGML_TYPE_COUNT) { err = "--ram-requant takes q3_k, iq3_s, iq3_xxs, q2_k or iq2_xxs"; return false; }
     }
     P.n_ctx = pad_to(std::max<int64_t>(o.n_ctx, KV_PAD), KV_PAD);
     for (int g : o.gpus) {

@@ -599,6 +599,20 @@ top-k, a get_rows of the rows in use give the attention its F16. At 256K one mor
 A smaller `--reserve-mib` does not help: 1,100 and 900 leave ~1 GB a card free and the same 29 layers (an expert
 layer is ~1.3 GB), 700 puts 31 in VRAM and the compute buffers no longer fit.
 
+`--ram-requant TYPE` (opt-in, off): `ffn_down_exps` of the layers whose experts stay in RAM (Q4_K in the file)
+requantized at load, the cards' layers untouched. 2026-11-20, the configuration's flags at 256K: quality on a
+4,096-token window against the same run without it (which repeats exactly: KL 0.00000), speed on a short prompt with
+MTP, 400 tokens, two alternate runs:
+
+| down experts in RAM | KL | top-1 | perplexity | tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Q4_K (the file) | 0 | 100% | 12.70 | 22.99 / 22.44 |
+| Q3_K | 0.012 | 95.8% | 12.79 | 24.11 / 24.06 |
+| IQ3_XXS | 0.021 | 94.7% | 12.84 | 23.47 / 23.12 |
+| Q2_K | 0.035 | 92.7% | 13.00 | 23.66 / 23.72 |
+
+Q3_K is the best of them: +5-7%, at a cost below the KL ~0.1 that a change of kernels gives.
+
 Tried and left out: gathering the sliding layers' window rows in short steps (22.2 / 22.3 tok/s with, 23.0 / 22.5
 without); the per-head `attn_k_b` / `attn_v_b` as F16 for the prompt's GEMMs (267.6 -> 267.0 tok/s).
 `--host-moe` (opt-in): the experts in RAM computed by a host thread the graph waits on through mapped memory
