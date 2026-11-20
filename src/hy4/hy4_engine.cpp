@@ -35,7 +35,7 @@ namespace almond::hy4 {
 namespace {
 
 constexpr int64_t KV_PAD = 256;      // the HIP flash attention wants n_kv in multiples of 256
-constexpr size_t GRAPH_NODES = 24576;
+constexpr size_t GRAPH_NODES = 49152;      // a 4,096-token prompt step needs more nodes than 24K (ggml_new_object assert)
 
 int64_t pad_to(int64_t v, int64_t p) { return (v + p - 1) / p * p; }
 

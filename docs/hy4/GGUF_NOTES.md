@@ -709,6 +709,10 @@ runs `--ubatch 2048 --expert-layers-gpu 26 --prefetch-experts`. Same 16K prompt 
 configuration before these two changes (426.8 tok/s prompt) that is +24% prompt for about -2% decode; the three fewer
 expert layers in VRAM make it an alternative rather than the default.
 
+A 4,096-token step does not fit: its compute buffers need 3,480 MiB on card 1 (1,733 MiB at 2,048), so the reserve
+halves the step to 2,048. Building the larger graph also ran out of the 24K-node graph context (`ggml_new_object`
+assert); `GRAPH_NODES` is now 49K, so `--ubatch 4096` falls back cleanly rather than aborting. No speed gain.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the

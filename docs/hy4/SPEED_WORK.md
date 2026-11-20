@@ -58,6 +58,9 @@ short prompt ~24 tok/s; 16K prompt read at ~480 tok/s, then ~19-22 tok/s; 66K pr
   the two prompt gains add up. Same 16K prompt, 100 generated tokens: prompt 480.3 -> 528.9 tok/s, decode 21.67 ->
   20.62; `HY4_STEP_STATS` compute 35.29 s, all 336 copies staged. Against the configuration before this round (426.8
   tok/s) it is +24% prompt for ~ -2% decode. It moves 3 expert layers to RAM, so it is an alternative, not the default.
+- `--ubatch 4096` does not fit: the 4,096-step masks need 3,480 MiB on card 1 (against 1,733 at 2,048) and the reserve
+  halves it back to 2,048. Building the 4,096 graph also exhausted the old 24K-node `GRAPH_NODES` context (a ggml
+  assert), now 49K so the larger `--ubatch` falls back cleanly instead of crashing. Not faster.
 
 ## Next for the prompt
 
