@@ -122,6 +122,15 @@ struct Hy4Engine::Impl {
     std::vector<float> hhist;         // --mtp: the trunk's final state (output-normed) of every position in the cache
 
     bool is_swa(int64_t il) const { return G.swa_pattern[(size_t) il] != 0 && G.swa > 0; }
+    // HY4_COPY_DEBUG: ggml's op-offload copies of the experts in RAM, as seen through the scheduler's copy callback.
+    static bool copy_diag(ggml_backend_t, const ggml_tensor * src, ggml_tensor * dst, ggml_cgraph *, void * ud) {
+        auto * p = (Impl *) ud;
+        if (p->copy_log < 64)
+            std::fprintf(stderr, "hy4: copy %-52s %7.1f MiB -> %p\n", src->name, ggml_nbytes(src) / 1048576.0, dst->data);
+        ++p->copy_log;
+        return false;   // let ggml do the copy
+    }
+    int copy_log = 0;
     // indexer.attn_q_b, not indexer.attn_k: --fused-proj stacks attn_k into blk.L.attn_in_cat, and checking it left the
     // sparse layers without their indexer (full attention past 2,048 positions) from e4d4d56 to 2026-11-20
     bool has_indexer(int64_t il) const { return W("blk." + std::to_string(il) + ".indexer.attn_q_b.weight") != nullptr; }
@@ -1853,6 +1862,8 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
         P.o.n_ubatch /= 2;
         if (o.verbose) std::fprintf(stderr, "hy4: prompt steps of %lld tokens (the compute buffers of a longer one do not fit)\n", (long long) P.o.n_ubatch);
     }
+    if (std::getenv("HY4_COPY_DEBUG"))
+        ggml_backend_sched_set_copy_callback(P.sched, Impl::copy_diag, &P);
     if (o.verbose) {
         std::fprintf(stderr, "hy4: compute buffers:");
         for (auto * b : P.all)

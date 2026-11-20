@@ -46,11 +46,18 @@ short prompt ~24 tok/s; 16K prompt read at ~390 tok/s, then ~18-19 tok/s; 66K pr
   scored rows) gives KL 0.00000 and 100% top-1 agreement; the greedy ids of the random 256K prompt are not reproducible
   even in two runs of the unchanged baseline, so they say nothing. Use `--ubatch 2048 --expert-layers-gpu 26` to try
   it. Left off.
+- `HY4_COPY_DEBUG=1`: prints ggml's op-offload copies of the RAM experts (13 layers x gate/up 297 + down 648 MiB;
+  gate/up reuse one 297 MiB device region, down one 648 MiB, ~945 MiB total). Tried staging one layer's weights in a
+  private buffer on a separate stream, with the scheduler's copy callback: 4K KL 0.00217 / 98.17% top-1 (noise band),
+  but 16K prompt 419.6 -> 411.5 tok/s — slower. `hipMemcpyAsync` from the pageable mmap'd weights does not overlap
+  with compute, and the extra device copy plus syncs cost more than any overlap. Left out; see GGUF_NOTES.
 
 ## Next for the prompt
 
 1. Overlap the offload copies with compute (copy layer L+1's RAM experts while layer L computes, as Basalt does):
-   up to ~10 s of 41 s at 16K, ~+30%. Needs a prefetch inside or around ggml's scheduler.
+   up to ~10 s of 41 s at 16K, ~+30%. Tried with a staging buffer and the scheduler's copy callback (measured above):
+   no gain — the source is pageable mmap memory, so the async copy does not overlap. Real overlap would need the experts
+   in pinned host memory (copied there at load, ~15.8 GiB), a different memory model.
 2. Longer prompt steps: the fallback bug is fixed and 2,048 steps are measured above (+14% prompt for -4% decode and
    3 fewer expert layers in VRAM, PPL checked). The remaining reason it is not the default is that tradeoff, not the
    reserve. A way to fit the 1.7 GiB card-1 buffer without giving up expert layers would keep both gains.

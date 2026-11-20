@@ -673,6 +673,24 @@ the configuration keeps 1,024 steps and 29 expert layers; `--ubatch 2048 --exper
 Note that this flag pair OOMs on card 1 at 4K (the placement puts 31 layers there, only 0.35 GiB free after the 2,048
 buffers); it is for the 256K configuration it was measured on.
 
+## Overlapping the offload copies: tried, no gain (2026-11-20)
+
+`HY4_COPY_DEBUG=1` prints the op-offload copies of the experts in RAM that ggml makes at every prompt step: per layer,
+`ffn_gate_exps` and `ffn_up_exps` (297 MiB each) and `ffn_down_exps` (648 MiB), 13 layers. Gate and up are copied into
+the SAME device region, down into another: those ~945 MiB of destinations are reused by all 13 layers, one split at a
+time, just before that split's compute.
+
+Tried staging one layer at a time in private device buffers (320 + 660 MiB) on a separate HIP stream, the scheduler's
+copy callback turning each copy into a short device->device copy from staging. It needs one fewer expert layer in VRAM:
+at 29 the staging allocation leaves card 0 0.14 GiB free and the next cuBLAS workspace (67 MiB) OOMs. With 28 layers,
+correctness held (4K PPL against the same config: KL 0.00217, top-1 98.17%, inside the ~0.003 band of equivalent
+kernel changes), but speed did not improve: 16K prompt, 1,024 steps, 400 generated tokens, 419.6 tok/s without and
+411.5 with the prefetch (all 630 copies staged, 0 fallbacks); `HY4_STEP_STATS` compute 43.07 -> 44.13 s. With
+`--pin-experts`, 419.3 -> 421.5 tok/s (noise). `hipMemcpyAsync` from the pageable mmap'd weights does not overlap with
+the graph's compute; the device->device hop and the synchronizations cost more than any overlap saves. Making the
+source pinned (`hipHostMalloc` and copy the 15.8 GiB of experts at load, beside the 59 GiB Engram table already in RAM)
+is a different memory model and was not tried. Left out; the diagnostic is kept behind `HY4_COPY_DEBUG`.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the
