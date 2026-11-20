@@ -20,6 +20,7 @@
 #include <cstring>
 #include <map>
 #include <thread>
+#include <tuple>
 #include <condition_variable>
 #include <mutex>
 
@@ -326,6 +327,46 @@ struct Hy4Engine::Impl {
     }
 
     // ---- weights --------------------------------------------------------------------------------------------------
+    /// A weight whose bytes now live elsewhere (in VRAM, or requantized): its pages leave the mapping (MADV_DONTNEED)
+    /// and the page cache (POSIX_FADV_DONTNEED). MADV_PAGEOUT alone left them resident: the process kept 108 GB of
+    /// RSS at 256K, and with the Engram table in RAM the experts the CPU reads were paged out (2026-11-20).
+    std::map<std::string, int> rel_fd;
+    uint64_t rel_bytes = 0, rel_fail = 0;
+    /// A weight copied to VRAM from the mapping through a heap buffer: given the mapping itself, ROCm locks the source
+    /// pages for the copy and keeps them (the process held ~40 GB of file pages that MADV_DONTNEED could not drop,
+    /// 2026-11-20), so they cannot be released afterwards
+    std::vector<uint8_t> stage;
+    void set_staged(ggml_tensor * t, const uint8_t * src, size_t off, size_t n) {
+        const size_t CH = (size_t) 64 << 20;
+        if (stage.size() < std::min(n, CH)) stage.resize(std::min(n, CH));
+        for (size_t d = 0; d < n; d += CH) {
+            const size_t k = std::min(CH, n - d);
+            std::memcpy(stage.data(), src + d, k);
+            ggml_backend_tensor_set(t, stage.data(), off + d, k);
+        }
+    }
+
+    std::vector<std::tuple<GgufModel *, size_t, const TensorInfo *>> released;
+    void release_pages(GgufModel & m, size_t shard, const TensorInfo & t) {
+        released.emplace_back(&m, shard, &t);
+        const uint64_t len = tensor_payload_bytes(t) ? tensor_payload_bytes(t) : t.elements();
+        if (!len) return;
+        const GgufFile & f = m.shard(shard);
+        const uint8_t * src = f.tensor_data(t);
+        const uintptr_t a = ((uintptr_t) src + 4095) & ~(uintptr_t) 4095;          // whole pages only: a neighbour
+        const uintptr_t e = ((uintptr_t) src + len) & ~(uintptr_t) 4095;           // may share the edge pages
+        if (e > a) {
+            if (::madvise((void *) a, e - a, MADV_DONTNEED) == 0) rel_bytes += e - a; else ++rel_fail;
+        }
+        auto it = rel_fd.find(f.path());
+        if (it == rel_fd.end()) it = rel_fd.emplace(f.path(), ::open(f.path().c_str(), O_RDONLY)).first;
+        if (it->second >= 0) {
+            const uint64_t off = f.data_start() + t.offset;
+            const uint64_t o0 = (off + 4095) & ~4095ull, o1 = (off + len) & ~4095ull;
+            if (o1 > o0) ::posix_fadvise(it->second, (off_t) o0, (off_t) (o1 - o0), POSIX_FADV_DONTNEED);
+        }
+    }
+
     bool upload(std::string & err) {
         const int NG = ng();
         wctx.assign((size_t) NG + 1, nullptr);
@@ -425,8 +466,7 @@ struct Hy4Engine::Impl {
                         }
                     });
                 for (auto & t : th) t.join();
-                const uintptr_t a = (uintptr_t) src & ~(uintptr_t) 4095;
-                ::madvise((void *) a, tensor_payload_bytes(*it.t) + ((uintptr_t) src - a), MADV_PAGEOUT);
+                release_pages(*it.m, it.shard, *it.t);
                 ggml_backend_buffer_t b = ggml_backend_cpu_buffer_from_ptr(dst, bytes);
                 ggml_backend_buffer_set_usage(b, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
                 ggml_backend_tensor_alloc(b, it.g, dst);
@@ -492,13 +532,12 @@ struct Hy4Engine::Impl {
                 for (auto & t : th) t.join();
                 ggml_backend_tensor_set(it.g, q.data(), 0, bytes);
             } else {
-                ggml_backend_tensor_set(it.g, src, 0, bytes);
+                set_staged(it.g, src, 0, bytes);
             }
             up += bytes;
             // the file's copy of a weight now in VRAM is not needed in RAM: give its pages back, so they do not
             // compete with the experts the CPU reads (with the Engram table in RAM they pushed those out to disk)
-            const uintptr_t a = (uintptr_t) src & ~(uintptr_t) 4095;
-            ::madvise((void *) a, it.t->elements() ? tensor_payload_bytes(*it.t) + ((uintptr_t) src - a) : 0, MADV_PAGEOUT);
+            release_pages(*it.m, it.shard, *it.t);
         }
         for (auto & [key, parts] : cat_parts) {
             ggml_tensor * g = cat_t[key];
@@ -510,7 +549,7 @@ struct Hy4Engine::Impl {
                 const uint8_t * src = model->shard(parts[(size_t) j].second).tensor_data(*t);
                 const int64_t nr = (int64_t) t->shape[1];
                 if (t->type == ty::Q8_0) {
-                    ggml_backend_tensor_set(g, src, at, rb * (size_t) nr);
+                    set_staged(g, src, at, rb * (size_t) nr);
                 } else {                                   // BF16 -> Q8_0
                     const uint16_t * h = reinterpret_cast<const uint16_t *>(src);
                     conv.resize((size_t) (G.n_embd * nr));
@@ -521,8 +560,12 @@ struct Hy4Engine::Impl {
                 }
                 at += rb * (size_t) nr;
                 up += rb * (size_t) nr;
+                release_pages(*model, parts[(size_t) j].second, *t);
             }
         }
+        if (o.verbose)
+            std::fprintf(stderr, "hy4: %.1f GiB of the file's pages released (%llu failed)\n", rel_bytes / 1073741824.0,
+                         (unsigned long long) rel_fail);
         if (o.verbose)
             std::fprintf(stderr, "hy4: %.1f GiB of weights uploaded in %.1f s\n", up / 1073741824.0,
                          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
@@ -1370,12 +1413,13 @@ struct Hy4Engine::Impl {
                     if (e && edev[(size_t) l] == ng()) cpu_exps += tensor_payload_bytes(t);
                     else gpu_w += tensor_payload_bytes(t);
                 }
-            // The file pages of the weights copied to VRAM stayed resident (about 45 GiB on 2026-11-18, MADV_PAGEOUT
-            // did not free them), and with the table in RAM next to them the experts read from RAM were paged in from
-            // the disk at every token (a 128-token run did not finish in 15 minutes on 122 GiB). So the table goes to
-            // RAM only when it fits beside those pages too.
+            // Until 2026-11-20 the file pages of the weights copied to VRAM stayed resident (ROCm locked them for the
+            // copies), and with the table in RAM the experts read from RAM were paged out and in at every token; the
+            // rule then counted those pages too. The upload now goes through a heap buffer and releases them, so the
+            // table goes to RAM when it fits beside the experts the CPU reads (256K, 16K prompt: 393.6 -> 417.8 tok/s).
             const uint64_t avail = mem_available();
-            ram = avail > bytes + cpu_exps + gpu_w + (12ull << 30);
+            (void) gpu_w;
+            ram = avail > bytes + cpu_exps + (12ull << 30);
             if (o.verbose)
                 std::fprintf(stderr, "hy4: --engram-place auto: %.1f GiB available, table %.1f GiB + experts in RAM %.1f GiB "
                              "+ weights in VRAM %.1f GiB -> %s\n", avail / 1073741824.0, bytes / 1073741824.0,

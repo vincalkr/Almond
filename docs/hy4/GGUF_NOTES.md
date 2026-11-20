@@ -622,6 +622,26 @@ threads do not help, 2 MB pages for the experts did not either).
 
 The ggml changes are kept as `tools/v41/ggml/hy4-long-context.patch`.
 
+## Where a long prompt's time goes (2026-11-20)
+
+16K tokens at 256K in 1,024-token steps, ~41 s (`HY4_STEP_STATS=1`, rocprofv3 kernel and copy traces): ~25 s of
+kernels on the two cards; ~10 s of copies: ggml's op offload (`GGML_OP_OFFLOAD_MIN_BATCH`, 32) copies the routed
+experts of the 13 layers kept in RAM (~17 GB) to card 0 at every step, at full bus speed (a hipMemcpy test gives
+28.4 GB/s to card 0, 3.3 GB/s to card 1 on its x2 link, pinned or pageable alike); 2.4 s waiting for the Engram rows
+read from the SSD.
+
+- The iHC mixes (`hc_*_fn`, F32 [12288, 8]) ran in prompt steps as F32 GEMMs with 128x128 tiles (1.2 ms a call, ~85
+  a step); taken as streams x fn and transposed they go to the matrix-vector kernel: 383 -> 389 tok/s, KL 0.087.
+- Building the step's masks on the host only when the graph uses them, and `--pin-experts` (the CPU's mapped weights
+  registered with `hipHostRegister`): no measurable change (392-395 tok/s).
+- The Engram table in RAM (`--engram-place ram`) at 256K first paged the machine as on 2026-11-18. The cause: the
+  weights were copied to VRAM straight from the mapping, ROCm locks the source pages of such copies and keeps them,
+  and the process held 62 GiB of shard 1 (RSS 108 GB with the table) that neither `MADV_PAGEOUT` nor
+  `MADV_DONTNEED` could drop. Now a weight goes through a 64 MB heap buffer and its pages are dropped from the
+  mapping and the page cache: RSS after loading 65.9 -> 25.2 GB (the CPU's experts), upload 28.5 -> 15.5 s; the
+  table in RAM then pages no more than on the SSD, prompt 393.6 -> 417.8 tok/s, decode within noise.
+  `--engram-place auto` chooses RAM again when the table and the CPU's experts fit with 12 GiB to spare.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the

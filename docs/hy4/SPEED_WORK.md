@@ -42,9 +42,23 @@ short prompt ~24 tok/s; 16K prompt read at ~390 tok/s, then ~18-19 tok/s; 66K pr
 2. Longer prompt steps (2,048 tokens): half the copies, ~+12%; the compute buffers do not fit at 256K today, and the
    halving retry after a failed reserve never recovers (even 64 tokens fail afterwards: likely a buffer left
    allocated by the failed attempt).
-3. The Engram table in RAM: <= 6% of the prompt. `--engram-place auto` keeps it on the SSD at 256K because it also
-   counts the file pages of the weights copied to VRAM (~70 GiB), which stayed resident on 2026-11-18; test
-   `--engram-place ram` while watching for the paging seen then.
+3. The Engram table in RAM: <= 6% of the prompt (16K prompt: 2.4 s of 41 s waiting for the rows read from the
+   SSD). `--engram-place auto` keeps it on the SSD at 256K because it also counts the file pages of the weights
+   copied to VRAM (~70 GiB). Tried on 2026-11-20 with `--engram-place ram`: the machine paged (~2,800-3,300 major
+   faults a second, kswapd busy, no progress in 10 minutes), as on 2026-11-18. What was found:
+   - the engine's RSS was 108 GB: the file pages of the weights already uploaded to VRAM stayed mapped, although
+     `MADV_PAGEOUT` was called on them after the upload;
+   - `--pin-experts` does not lock anything on ROCm (`hipHostRegister` leaves `VmLck` / `VmPin` at 0) and `mlock`
+     is limited to 8 MB here (`ulimit -l`), so the experts the CPU reads cannot be protected that way.
+   The cause: the weights were copied to VRAM straight from the mapping, and ROCm locks the source pages of such a
+   copy and keeps them locked, so neither `MADV_PAGEOUT` nor `MADV_DONTNEED` could drop them (43.5 GiB "released",
+   the RSS unchanged, 62 GiB of shard 1 mapped). Fixed in the working tree: `set_staged()` copies a weight through
+   a 64 MB heap buffer, and `release_pages()` drops its pages from the mapping (`MADV_DONTNEED`, whole pages) and
+   the page cache (`posix_fadvise`). RSS after loading (table on the SSD): 65.9 -> 25.2 GB, about the experts the
+   CPU reads; the upload got faster too (28.5 -> 15.5 s). Then at 256K, 16K prompt: the table in RAM (read in 4.8 s)
+   pages no more than on the SSD (17,637 / 17,886 major faults, the loading's), prompt 393.6 -> 417.8 tok/s (the 2.47
+   s of waiting for rows gone), decode 20.72 / 19.49 tok/s (noise). `--engram-place auto` no longer counts the VRAM
+   weights' pages: RAM when the table and the CPU's experts fit with 12 GiB to spare (committed).
 
 ## Next candidates (estimates, not measured)
 
