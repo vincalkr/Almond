@@ -128,6 +128,7 @@ int parse(int argc, char ** argv, Args & a) {
         else if (!std::strcmp(s, "--host-moe")) a.eo.host_moe = true;
         else if (!std::strcmp(s, "--gather-attn")) a.eo.gather_attn = true;
         else if (!std::strcmp(s, "--fused-indexer")) a.eo.fused_indexer = true;
+        else if (!std::strcmp(s, "--kv-q8")) a.eo.kv_q8 = true;
         else if (!std::strcmp(s, "--dfly")) {
             if (++i >= argc) return false;
             a.eo.dfly = argv[i];

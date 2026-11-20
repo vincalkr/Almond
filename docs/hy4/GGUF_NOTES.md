@@ -593,6 +593,12 @@ A short prompt at 256K: 23.8 tok/s (28 expert layers in VRAM), at 64K 24.2 (30).
 The 66K decode at 1,024-token steps was noise: 16K prompt, two alternate runs, 512 / 1,024-token steps: prompt
 286.9 / 384.8 and 285.9 / 381.8 tok/s, decode 19.24 / 18.29 and 18.43 / 18.42 tok/s.
 
+`--kv-q8` (configurations): the full layers' KV rows as Q8_0 (the sliding rings stay F16); the gather and, below
+top-k, a get_rows of the rows in use give the attention its F16. At 256K one more expert layer in VRAM (28 -> 29),
+23.55 / 23.94 -> 24.21 / 24.44 tok/s (short prompt, alternate runs); against the reference KL 0.107, top-1 90.4%.
+A smaller `--reserve-mib` does not help: 1,100 and 900 leave ~1 GB a card free and the same 29 layers (an expert
+layer is ~1.3 GB), 700 puts 31 in VRAM and the compute buffers no longer fit.
+
 Tried and left out: gathering the sliding layers' window rows in short steps (22.2 / 22.3 tok/s with, 23.0 / 22.5
 without); the per-head `attn_k_b` / `attn_v_b` as F16 for the prompt's GEMMs (267.6 -> 267.0 tok/s).
 `--host-moe` (opt-in): the experts in RAM computed by a host thread the graph waits on through mapped memory

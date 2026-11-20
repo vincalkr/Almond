@@ -18,6 +18,7 @@
     "--fused-proj",
     "--fused-indexer",
     "--gather-attn",
+    "--kv-q8",
     "--ubatch",
     "1024"
   ],

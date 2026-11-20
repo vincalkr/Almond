@@ -30,6 +30,7 @@ struct Hy4EngineOptions {
     bool fused_hc = false;
     bool fused_proj = false;
     std::string down_requant;      ///< ffn_down_exps (Q4_K in the file) requantized for the cards: q3_k, iq3_s, iq3_xxs, q2_k       ///< with --dense-q8: the attention input's four projections as one product (--fused-proj)         ///< iHC through the vendored ggml's fused DeepSeek-V4 ops (--fused-hc)
+    bool kv_q8 = false;            ///< the full layers' KV rows as Q8_0 (--kv-q8)
     bool fused_indexer = false;    ///< the indexer's scores through ggml_lightning_indexer (--fused-indexer)
     bool gather_attn = false;      ///< sparse layers attend over the indexer's picked rows only (--gather-attn)
     bool host_moe = false;         ///< the experts in RAM computed by a host thread the graph waits on (--host-moe)

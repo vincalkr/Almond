@@ -216,7 +216,8 @@ struct Hy4Engine::Impl {
         // KV left 20 expert layers in VRAM at 256K instead of what fits)
         const uint64_t r_swa_rows = (uint64_t) pad_to(o.n_ubatch + G.swa, KV_PAD);
         auto kv_of = [&](int64_t l) -> uint64_t {
-            uint64_t b = (uint64_t) (G.kv_lora + G.d_rope) * 2 * (is_swa(l) ? r_swa_rows : (uint64_t) n_ctx);
+            uint64_t b = is_swa(l) ? (uint64_t) (G.kv_lora + G.d_rope) * 2 * r_swa_rows
+                                   : (uint64_t) ggml_row_size(o.kv_q8 ? GGML_TYPE_Q8_0 : GGML_TYPE_F16, G.kv_lora + G.d_rope) * (uint64_t) n_ctx;
             if (model_has_indexer(l))
                 b += (uint64_t) G.idx_dim * 4 * ((uint64_t) n_ctx / G.idx_kpool) +
                      (uint64_t) 2 * G.idx_dim * 4 * (uint64_t) (o.n_ubatch + 2 * G.idx_kpool);
@@ -501,7 +502,9 @@ struct Hy4Engine::Impl {
             int cnt = 0;
             for (int64_t l = 0; l < n_alloc; ++l)
                 if (dev[(size_t) l] == d) {
-                    kv[(size_t) l] = ggml_new_tensor_2d(c, GGML_TYPE_F16, G.kv_lora + G.d_rope, is_swa(l) ? r_swa : n_ctx);
+                    // --kv-q8: a full layer's rows as Q8_0 (576 = 18 blocks); the sliding rings stay F16
+                    kv[(size_t) l] = ggml_new_tensor_2d(c, o.kv_q8 && !is_swa(l) ? GGML_TYPE_Q8_0 : GGML_TYPE_F16,
+                                                        G.kv_lora + G.d_rope, is_swa(l) ? r_swa : n_ctx);
                     ggml_set_name(kv[(size_t) l], ("kv-" + std::to_string(l)).c_str());
                     if (has_indexer(l)) {
                         itok[(size_t) l] = ggml_new_tensor_2d(c, GGML_TYPE_F32, 2 * G.idx_dim, r_tok);
@@ -565,6 +568,7 @@ struct Hy4Engine::Impl {
         std::vector<ggml_tensor *> eng;      // [module] F32 [dim, cols, nt]
         ggml_tensor * logits = nullptr;
         ggml_tensor * dm_idx = nullptr;      // --dfly: the mask columns this step's last rows go to
+        ggml_tensor * kv_all = nullptr;      // --kv-q8: 0..n_kv-1, the rows a mask-path step dequantizes
         ggml_tensor * dtail = nullptr;       // the drafter's step: its mask past the context (or all of it)
         std::vector<ggml_tensor *> idv;      // and its guesses, [1] I32 each
         Shape sh;
@@ -792,8 +796,15 @@ struct Hy4Engine::Impl {
         ggml_tensor * Knew = ggml_concat(c, lat, ggml_reshape_2d(c, kp, R, nt), 0);    // [khead, nt]
         ggml_tensor * cache = ggml_set_rows(c, kv[(size_t) il], Knew, swa ? in.kidx_swa : in.kidx);
         ggml_build_forward_expand(gf, cache);
-        ggml_tensor * K = ggml_view_3d(c, cache, khead, n_kv, 1, cache->nb[1], cache->nb[1] * n_kv, 0);
-        ggml_tensor * V = ggml_view_3d(c, cache, KR, n_kv, 1, cache->nb[1], cache->nb[1] * n_kv, 0);
+        ggml_tensor * K = nullptr, * V = nullptr;
+        if (cache->type == GGML_TYPE_Q8_0) {      // --kv-q8, the mask path: the rows 0..n_kv as F16 for the attention
+            ggml_tensor * rows = ggml_get_rows_type(c, cache, in.kv_all, GGML_TYPE_F16);
+            K = ggml_reshape_3d(c, rows, khead, n_kv, 1);
+            V = ggml_view_3d(c, rows, KR, n_kv, 1, rows->nb[1], rows->nb[1] * n_kv, 0);
+        } else {
+            K = ggml_view_3d(c, cache, khead, n_kv, 1, cache->nb[1], cache->nb[1] * n_kv, 0);
+            V = ggml_view_3d(c, cache, KR, n_kv, 1, cache->nb[1], cache->nb[1] * n_kv, 0);
+        }
 
         ggml_tensor * mask = swa ? in.mask_swa : in.mask;
         if (!swa && has_indexer(il)) {
@@ -1129,6 +1140,7 @@ struct Hy4Engine::Impl {
         in.kidx_swa = input(c, GGML_TYPE_I64, nt, 1, "inp_kidx_swa");
         in.kidx_tok = input(c, GGML_TYPE_I64, nt, 1, "inp_kidx_tok");
         in.mask = input(c, GGML_TYPE_F16, sh.n_kv, nt, "inp_mask");
+        if (o.kv_q8) in.kv_all = input(c, GGML_TYPE_I32, sh.n_kv, 1, "inp_kv_all");
         in.mask_swa = input(c, GGML_TYPE_F16, r_swa, nt, "inp_mask_swa");
         if (!dmask.empty()) in.dm_idx = input(c, GGML_TYPE_I64, std::min<int64_t>(nt, 8), 1, "inp_dm_idx");
         if (sh.n_new > 0) {
@@ -1491,6 +1503,11 @@ struct Hy4Engine::Impl {
         set_in(in.kidx, kidx.data(), 0, kidx.size() * 8);
         set_in(in.kidx_swa, kswa.data(), 0, kswa.size() * 8);
         set_in(in.kidx_tok, ktok.data(), 0, ktok.size() * 8);
+        if (in.kv_all) {
+            std::vector<int32_t> ka((size_t) n_kv);
+            for (int64_t i = 0; i < n_kv; ++i) ka[(size_t) i] = (int32_t) i;
+            set_in(in.kv_all, ka.data(), 0, ka.size() * 4);
+        }
         if (in.dm_idx) {        // --dfly: the last rows' mask columns
             std::vector<int64_t> di((size_t) in.dm_idx->ne[0]);
             for (size_t i = 0; i < di.size(); ++i) di[i] = (first + nt - (int64_t) di.size() + (int64_t) i) % 8;
@@ -1669,6 +1686,7 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
     P.cpu = ggml_backend_cpu_init();
     const int th = o.threads > 0 ? o.threads : std::max(1u, std::thread::hardware_concurrency() / 2);
     ggml_backend_cpu_set_n_threads(P.cpu, th);
+    if (!o.dfly.empty() && o.kv_q8) { err = "--dfly reads the cache as F16: not with --kv-q8"; return false; }
     if (!o.dfly.empty()) {
         if (P.n_alloc <= P.n_trunk) { err = "--dfly needs --mtp (the trunk's final states)"; return false; }
         try { P.dmodel = std::make_unique<GgufModel>(GgufModel::open(o.dfly)); }
@@ -1764,7 +1782,7 @@ void Hy4Engine::truncate(int64_t n) {
 namespace {
 
 struct SessHead {
-    char magic[8] = { 'H', 'Y', '4', 'S', 'E', 'S', 'S', '2' };   // 2: the rotation positions follow the tokens
+    char magic[8] = { 'H', 'Y', '4', 'S', 'E', 'S', 'S', '2' };   // 2: the rotation positions follow the tokens; Q: --kv-q8
     int64_t n_past = 0, n_embd = 0, n_alloc = 0, r_swa = 0, r_tok = 0, kpool = 0, n_hh = 0;
 };
 
@@ -1773,6 +1791,7 @@ struct SessHead {
 bool Hy4Engine::save(const std::string & path, int64_t & tokens, uint64_t & bytes, std::string & err) {
     Impl & P = *p_;
     SessHead h;
+    if (P.o.kv_q8) h.magic[7] = 'Q';
     h.n_past = P.n_past; h.n_embd = P.G.n_embd; h.n_alloc = P.n_alloc; h.r_swa = P.r_swa; h.r_tok = P.r_tok;
     h.kpool = P.G.idx_kpool; h.n_hh = (int64_t) std::min(P.hhist.size(), (size_t) (P.n_past * P.G.n_embd));
     const std::string tmp = path + ".tmp";
@@ -1812,6 +1831,7 @@ bool Hy4Engine::restore(const std::string & path, int64_t & tokens, uint64_t & b
     if (!f) { err = "cannot read " + path; return false; }
     for (auto & v : P.dm_pos) v = -1;     // the drafter's saved picks are not in the file
     SessHead h, want;
+    if (P.o.kv_q8) want.magic[7] = 'Q';
     bool ok = std::fread(&h, sizeof h, 1, f) == 1;
     if (!ok || std::memcmp(h.magic, want.magic, 8) || h.n_embd != P.G.n_embd || h.n_alloc != P.n_alloc ||
         h.r_swa != P.r_swa || h.r_tok != P.r_tok || h.kpool != P.G.idx_kpool || h.n_past < 0 || h.n_past > P.n_ctx ||
