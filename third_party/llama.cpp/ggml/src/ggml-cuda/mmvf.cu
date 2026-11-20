@@ -421,9 +421,9 @@ static void mul_mat_vec_f_switch_fusion(
 // attn_k_b, 192 columns, and attn_v_b, 512) ran one block of 96-256 threads per row, most of them idle or waiting in
 // the block reduction. Here one wave of 32 lanes takes a row and a block 8 rows; each lane reads 8 BF16 (16 bytes) at a
 // time and the wave reduces with shuffles. For up to 8 columns of y, no ids, no fusion.
-template <int ncols_dst>
+template <typename T, int ncols_dst>
 static __global__ void mul_mat_vec_bf16_rows(
-        const nv_bfloat16 * __restrict__ x, const float * __restrict__ y, float * __restrict__ dst,
+        const T * __restrict__ x, const float * __restrict__ y, float * __restrict__ dst,
         const int ncols, const int nrows, const int stride_row, const int stride_col_y, const int stride_col_dst,
         const uint3 channel_ratio, const int64_t stride_channel_x, const int64_t stride_channel_y, const int64_t stride_channel_dst,
         const uint3 sample_ratio, const int64_t stride_sample_x, const int64_t stride_sample_y, const int64_t stride_sample_dst) {
@@ -445,8 +445,14 @@ static __global__ void mul_mat_vec_bf16_rows(
         float xf[8];
 #pragma unroll
         for (int k = 0; k < 4; ++k) {
-            xf[2*k + 0] = __uint_as_float(w[k] << 16);
-            xf[2*k + 1] = __uint_as_float(w[k] & 0xFFFF0000u);
+            if constexpr (std::is_same_v<T, half>) {
+                const half2 h = *(const half2 *) &w[k];
+                xf[2*k + 0] = __low2float(h);
+                xf[2*k + 1] = __high2float(h);
+            } else {
+                xf[2*k + 0] = __uint_as_float(w[k] << 16);
+                xf[2*k + 1] = __uint_as_float(w[k] & 0xFFFF0000u);
+            }
         }
 #pragma unroll
         for (int j = 0; j < ncols_dst; ++j) {
@@ -514,13 +520,13 @@ void launch_mul_mat_vec_f_cuda(
 
     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
     static const bool almond_rows = [] { const char * e = getenv("ALMOND_MMVF_ROWS"); return e && e[0] == '1'; }();
-    if constexpr (std::is_same_v<T, nv_bfloat16> && !is_multi_token_id) {
+    if constexpr ((std::is_same_v<T, nv_bfloat16> || std::is_same_v<T, half>) && !is_multi_token_id) {
         if (almond_rows && !ids && !has_fusion && ncols <= 2048 && ncols % 8 == 0 && stride_row % 8 == 0 &&
                 stride_col_y % 4 == 0 && stride_channel_x % 8 == 0 && stride_sample_x % 8 == 0 &&
                 stride_channel_y % 4 == 0 && stride_sample_y % 4 == 0 &&
                 (uintptr_t) x % 16 == 0 && (uintptr_t) y % 16 == 0 && warp_size == 32) {
             const dim3 nb((nrows + 7)/8, nchannels_dst, nsamples_or_ntokens);
-            mul_mat_vec_bf16_rows<ncols_dst><<<nb, 256, 0, stream>>>(x, y, dst, ncols, nrows, stride_row, stride_col_y,
+            mul_mat_vec_bf16_rows<T, ncols_dst><<<nb, 256, 0, stream>>>(x, y, dst, ncols, nrows, stride_row, stride_col_y,
                 stride_col_dst, channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst, sample_ratio_fd,
                 stride_sample_x, stride_sample_y, stride_sample_dst);
             return;

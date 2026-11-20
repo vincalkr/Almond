@@ -549,6 +549,59 @@ the stacked attention input 83 -> 67 us, the output head 496 -> 431 us; about 2.
 
 The configurations use MTP, so it stays off there.
 
+## The sparse layers' indexer, and 256K (2026-11-20)
+
+**A bug from e4d4d56 to here.** `--fused-proj` stacks `indexer.attn_k` into `blk.L.attn_in_cat`, and the engine
+decided whether a layer has an indexer by looking that tensor up: with `--fused-proj` (on in the configurations) the
+12 sparse layers ran without their indexer, full attention over every position instead of the 2,048 the indexer
+picks, and their indexer caches were not even made. Below 2,048 positions it is the same; past them the model ran in
+a way it was not trained for, and every token read the whole cache. `has_indexer()` now looks up
+`indexer.attn_q_b`, which is never stacked. (Same 4,096-token window, 8-token steps: perplexity of positions
+2,048-4,095 12.62 with the bug, 12.87 with the indexer.)
+
+**Placement.** It charged every layer a full layer's KV rows; the 30 sliding layers keep a ring and only the
+indexer layers have indexer caches. Counted per layer: 256K, 20 -> 28 expert layers in VRAM (8.7 GB had been left
+free on card 1); 64K, 28 -> 30.
+
+With the indexer on, the mask path got slower (the sparse mask rebuilt over every cache row each step, the indexer
+scores as an [n_pool, tokens, 16 heads] tensor: 5 GB of compute buffer at 256K, 512-token steps). New, opt-in:
+
+- `--fused-indexer`: the scores through the vendored ggml's `ggml_lightning_indexer` (sum over heads of
+  w * relu(q . k) plus the mask in one kernel; extended to 16 heads, the tile and vector kernels, F32/F16/BF16 keys)
+  and the picks with `ggml_top_k` instead of a full argsort. Against the unfused indexer, 4,096 tokens: KL 0.082,
+  top-1 91.4%, perplexity 13.39 / 13.31 (the kernel takes q and k as F16).
+- `--gather-attn`: a sparse layer attends over the picked rows only: they are gathered from the cache
+  (`ggml_get_rows_type`, F16 straight out) and each token is its own batch of 2,048 rows, in groups of 32 tokens in a
+  prompt step; the cost no longer grows with the context. Against the reference: KL 0.100, top-1 90.7%.
+- The prompt step halves itself when its compute buffers do not fit.
+
+`--ubatch 1024` (configurations): ggml copies the weights of the experts kept in RAM to a card for every prompt step
+of 32 tokens or more (`GGML_OP_OFFLOAD_MIN_BATCH`), ~17 GB a step here, so longer steps pay it less often; 2,048 does
+not fit at 256K.
+
+Measured on 2026-11-20 (two cards, `-c 262144`, the configuration's other flags, greedy with MTP, one run each; a VM
+was using the CPU):
+
+| | 16K prompt, tok/s | then decode, tok/s | 66K prompt, tok/s | then decode, tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| before (indexer off by the bug, 512-token steps) | 178.7 | 14.49 | 204.1 | 15.43 |
+| indexer on, mask path (256-token steps, the 512 do not fit) | | | 141.1 | 11.24 |
+| + `--fused-indexer --gather-attn` (512-token steps) | 286.2 | 19.35 | 265.3 | 18.67 |
+| + `--ubatch 1024` | 383.6 | 18.51 | 376.5 | 16.01 |
+
+A short prompt at 256K: 23.8 tok/s (28 expert layers in VRAM), at 64K 24.2 (30).
+The 66K decode at 1,024-token steps was noise: 16K prompt, two alternate runs, 512 / 1,024-token steps: prompt
+286.9 / 384.8 and 285.9 / 381.8 tok/s, decode 19.24 / 18.29 and 18.43 / 18.42 tok/s.
+
+Tried and left out: gathering the sliding layers' window rows in short steps (22.2 / 22.3 tok/s with, 23.0 / 22.5
+without); the per-head `attn_k_b` / `attn_v_b` as F16 for the prompt's GEMMs (267.6 -> 267.0 tok/s).
+`--host-moe` (opt-in): the experts in RAM computed by a host thread the graph waits on through mapped memory
+(`ggml_host_moe`, the GLM engine's doorbell), in place of the scheduler's split: the same text, +1% with MTP (the
+CPU's expert products take 0.93 ms a layer, 40.7 MB of experts at ~44 GB/s against a measured 65 GB/s peak; more
+threads do not help, 2 MB pages for the experts did not either).
+
+The ggml changes are kept as `tools/v41/ggml/hy4-long-context.patch`.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the

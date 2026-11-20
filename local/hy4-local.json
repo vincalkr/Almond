@@ -7,7 +7,7 @@
     "--gpus",
     "0,1",
     "-c",
-    "65536",
+    "262144",
     "--engram-place",
     "auto",
     "--mtp",
@@ -15,7 +15,11 @@
     "--dense-q8",
     "--reserve-mib",
     "1400",
-    "--fused-proj"
+    "--fused-proj",
+    "--fused-indexer",
+    "--gather-attn",
+    "--ubatch",
+    "1024"
   ],
   "cwd": ".",
   "tokenizer": "models/hy4-iq2ah/tokenizer",

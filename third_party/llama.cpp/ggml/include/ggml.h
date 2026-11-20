@@ -587,6 +587,7 @@ extern "C" {
         GGML_OP_DSV4_HC_POST,
         GGML_OP_DSV41_FAKE_QUANT,
         GGML_OP_DSV41_HC_MIXES,
+        GGML_OP_HOST_MOE,
 
         GGML_OP_UNARY,
 
@@ -1730,6 +1731,13 @@ extern "C" {
             struct ggml_tensor  * a,  // data
             struct ggml_tensor  * b); // row indices
 
+    // Almond: as ggml_get_rows, the result in `type` (F32, F16 or BF16 on CUDA/HIP)
+    GGML_API struct ggml_tensor * ggml_get_rows_type(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            enum ggml_type        type);
+
     GGML_API struct ggml_tensor * ggml_get_rows_back(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,  // gradients of ggml_get_rows result
@@ -2744,6 +2752,26 @@ extern "C" {
     //   mixes: F32 [2*hc, n_tokens] contiguous   scale: F32 [2]   base: F32 [2*hc]   result: F32 [hc, 2*n_tokens]
     //   result[h, t]        = sigmoid(mixes[h,      t]*scale[0] + base[h])      * 1 + eps   (the pre mix)
     //   result[h, nt + t]   = sigmoid(mixes[hc + h, t]*scale[1] + base[hc + h]) * 2 + 0     (the post mix)
+    // Almond: routed experts computed by the host during a GPU graph. The op publishes x [n, nt], ids [k, nt] (I32)
+    // and w [k, nt] to mapped pinned memory, rings bell->seq, waits until the host writes that value to bell->flag,
+    // and copies bell->out [n, nt] into the result. All pointers are the device's view of mapped pinned memory.
+    struct ggml_host_moe_bell {
+        float    * x;
+        int32_t  * ids;
+        float    * w;
+        float    * out;
+        int32_t  * meta;   // [tag, nt]
+        uint32_t * seq;
+        uint32_t * flag;
+    };
+    GGML_API struct ggml_tensor * ggml_host_moe(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * ids,
+            struct ggml_tensor  * w,
+            const struct ggml_host_moe_bell * bell,
+            int32_t               tag);
+
     GGML_API struct ggml_tensor * ggml_dsv41_hc_mixes(
             struct ggml_context * ctx,
             struct ggml_tensor  * mixes,

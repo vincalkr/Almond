@@ -75,7 +75,16 @@ int parse(int argc, char ** argv, Args & a) {
         else if (!std::strcmp(s, "--list-tensors")) a.list = true;
         else if (!std::strcmp(s, "--prompt-ids")) {
             if (++i >= argc) return 2;
-            if (parse_csv(argv[i], a.prompt)) return 2;
+            std::string txt = argv[i];
+            if (!txt.empty() && txt[0] == '@') {      // @FILE: the ids from a file (a long prompt passes no argv limit)
+                std::FILE * f = std::fopen(txt.c_str() + 1, "rb");
+                if (!f) return 2;
+                txt.clear();
+                char buf[65536];
+                for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) txt.append(buf, n);
+                std::fclose(f);
+            }
+            if (parse_csv(txt.c_str(), a.prompt)) return 2;
         } else if (!std::strcmp(s, "-n")) {
             if (++i >= argc) return 2;
             a.n_predict = std::atoi(argv[i]);
@@ -116,6 +125,9 @@ int parse(int argc, char ** argv, Args & a) {
             if (++i >= argc) return 2;
             a.eo.reserve_mib = std::atoll(argv[i]);
         }
+        else if (!std::strcmp(s, "--host-moe")) a.eo.host_moe = true;
+        else if (!std::strcmp(s, "--gather-attn")) a.eo.gather_attn = true;
+        else if (!std::strcmp(s, "--fused-indexer")) a.eo.fused_indexer = true;
         else if (!std::strcmp(s, "--dfly")) {
             if (++i >= argc) return false;
             a.eo.dfly = argv[i];
@@ -162,7 +174,7 @@ int parse(int argc, char ** argv, Args & a) {
         }
         else if (!std::strcmp(s, "--help")) {
             std::printf("usage: almond-engine --hy4 -m <gguf> [--info] [--list-tensors]\n"
-                        "       [--prompt-ids 1,2,3 -n 8 [--temp 0.9] [--top-p 1.0] [--seed 1]]\n"
+                        "       [--prompt-ids 1,2,3|@FILE -n 8 [--temp 0.9] [--top-p 1.0] [--seed 1]]\n"
                         "       [--gpus 0,1] [-c 4096] [-t N] [--expert-layers-gpu N] [--ubatch 512] [--dense-q8] [--engram-place auto|ram|ssd] [--mtp [--mtp-n 1]] [--dfly DFLY.gguf [--mtp-n 5]]\n"
                         "       [--serve [--eos-ids 120025]]   serve/server.py's protocol on stdin/stdout\n"
                         "       [--cpu [--no-kv-cache]]   the CPU reference path\n");
@@ -276,6 +288,34 @@ int hy4_main(int argc, char ** argv) {
         double kl = 0; int64_t agree = 0, nref = 0;
         auto t0 = std::chrono::steady_clock::now();
         std::vector<float> lg;
+        if (const char * be = std::getenv("HY4_PPL_BINS")) {
+            // HY4_PPL_BINS=N: one window of -c tokens run 512 at a time, every row scored, the perplexity per N
+            // positions (a check that long contexts read right)
+            const int64_t bin = std::max<int64_t>(1, std::atoll(be)), n = std::min<int64_t>(n_ctx, (int64_t) ids.size());
+            eng.truncate(0);
+            double bnll = 0; int64_t bcnt = 0;
+            for (int64_t at = 0; at < n - 1; at += 512) {
+                const int64_t m = std::min<int64_t>(512, n - 1 - at);
+                if (!eng.decode_all(ids.data() + at, m, lg, e)) { std::fprintf(stderr, "hy4: %s\n", e.c_str()); return 1; }
+                for (int64_t k = 0; k < m; ++k) {
+                    const int64_t i = at + k;
+                    const float * r = lg.data() + (size_t) (k * V);
+                    float mx = r[0];
+                    for (int64_t q = 1; q < V; ++q) mx = std::max(mx, r[q]);
+                    double se = 0;
+                    for (int64_t q = 0; q < V; ++q) se += std::exp((double) (r[q] - mx));
+                    bnll += std::log(se) + mx - r[ids[(size_t) (i + 1)]];
+                    ++bcnt;
+                    if ((i + 1) % bin == 0 || i + 1 == n - 1) {
+                        std::printf("hy4: positions %lld-%lld: ppl %.3f\n", (long long) (i + 1 - bcnt), (long long) (i + 1),
+                                    std::exp(bnll / bcnt));
+                        std::fflush(stdout);
+                        bnll = 0; bcnt = 0;
+                    }
+                }
+            }
+            return 0;
+        }
         for (int64_t s0 = 0; s0 + n_ctx <= (int64_t) ids.size(); s0 += n_ctx) {
             eng.truncate(0);
             if (!eng.decode_all(ids.data() + s0, n_ctx, lg, e)) { std::fprintf(stderr, "hy4: %s\n", e.c_str()); return 1; }

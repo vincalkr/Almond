@@ -20,6 +20,8 @@
 #include <cstring>
 #include <map>
 #include <thread>
+#include <condition_variable>
+#include <mutex>
 
 #include <atomic>
 #include <fcntl.h>
@@ -92,10 +94,32 @@ struct Hy4Engine::Impl {
     bool dfly_picks = false;
     std::vector<int64_t> dfly_out;
     bool dfly_layer(int64_t il) const { return dmask.count(il) != 0; }
+    // --host-moe: in steps of up to 8 tokens a layer whose routed experts are in RAM hands its expert input to this
+    // host thread through mapped pinned memory and waits on a mapped flag inside the GPU graph (ggml_host_moe), in
+    // place of the scheduler's GPU -> CPU -> GPU split and its synchronizations
+    struct HostMoe {
+        uint8_t * mem = nullptr;
+        ggml_host_moe_bell bell{};
+        std::thread th;
+        std::atomic<bool> stop{false}, active{false};
+        std::mutex mu;
+        std::condition_variable cv;
+        ggml_threadpool * pool = nullptr;
+        int n_threads = 1;
+        uint64_t calls = 0;
+        double us = 0;
+        struct G { ggml_context * c = nullptr; ggml_cgraph * gf = nullptr; std::vector<uint8_t> work; ggml_cplan plan{}; };
+        std::map<std::pair<int, int>, G> graphs;
+    } hm;
+    bool host_moe_layer(int64_t il, int64_t nt) const {
+        return o.host_moe && hm.mem && nt <= 8 && il < n_trunk && il >= G.n_dense && edev[(size_t) il] == ng();
+    }
     std::vector<float> hhist;         // --mtp: the trunk's final state (output-normed) of every position in the cache
 
     bool is_swa(int64_t il) const { return G.swa_pattern[(size_t) il] != 0 && G.swa > 0; }
-    bool has_indexer(int64_t il) const { return W("blk." + std::to_string(il) + ".indexer.attn_k.weight") != nullptr; }
+    // indexer.attn_q_b, not indexer.attn_k: --fused-proj stacks attn_k into blk.L.attn_in_cat, and checking it left the
+    // sparse layers without their indexer (full attention past 2,048 positions) from e4d4d56 to 2026-11-20
+    bool has_indexer(int64_t il) const { return W("blk." + std::to_string(il) + ".indexer.attn_q_b.weight") != nullptr; }
     int64_t n_top_max() const { return G.idx_topk / G.idx_kpool - G.idx_tail; }
     std::vector<std::pair<const uint8_t *, size_t>> cpu_ranges;   // the mapped weights the CPU reads
 
@@ -115,6 +139,7 @@ struct Hy4Engine::Impl {
         }
         if (eng_fd >= 0) ::close(eng_fd);
         if (eng_ram) ::munmap(eng_ram - (eng_off & 4095ull), eng_ram_bytes);
+        host_moe_stop();
         if (sched) ggml_backend_sched_free(sched);
         for (auto b : wbuf) if (b) ggml_backend_buffer_free(b);
         for (auto c : wctx) if (c) ggml_free(c);
@@ -166,6 +191,13 @@ struct Hy4Engine::Impl {
         return std::atoi(n.c_str() + 4);
     }
 
+    bool model_has_indexer(int64_t l) const {
+        const std::string n = "blk." + std::to_string(l) + ".indexer.attn_k.weight";
+        for (size_t s = 0; s < model->size(); ++s)
+            for (const auto & t : model->shard(s).tensors()) if (t.name == n) return true;
+        return false;
+    }
+
     bool place(std::string & err) {
         const int NG = ng();
         // bytes per layer from the file
@@ -179,9 +211,20 @@ struct Hy4Engine::Impl {
                     if (t.name.find("_exps") != std::string::npos) exps[(size_t) l] += b; else dense[(size_t) l] += b;
                 } else if (t.name.rfind("output", 0) == 0) head += b;
             }
-        // the biggest a layer's caches get: a full layer's KV and indexer caches (the SWA layers keep a ring)
-        const uint64_t kv_layer = (uint64_t) (G.kv_lora + G.d_rope) * 2 * (uint64_t) n_ctx +
-                                  (uint64_t) G.idx_dim * 4 * ((uint64_t) n_ctx / 4 + 2 * (uint64_t) (o.n_ubatch + 8));
+        // each layer's caches: a full layer keeps n_ctx KV rows, a sliding one a ring of r_swa rows; an indexer layer
+        // also its pooled keys and its ring of token rows (measured 2026-11-19: charging every layer a full layer's
+        // KV left 20 expert layers in VRAM at 256K instead of what fits)
+        const uint64_t r_swa_rows = (uint64_t) pad_to(o.n_ubatch + G.swa, KV_PAD);
+        auto kv_of = [&](int64_t l) -> uint64_t {
+            uint64_t b = (uint64_t) (G.kv_lora + G.d_rope) * 2 * (is_swa(l) ? r_swa_rows : (uint64_t) n_ctx);
+            if (model_has_indexer(l))
+                b += (uint64_t) G.idx_dim * 4 * ((uint64_t) n_ctx / G.idx_kpool) +
+                     (uint64_t) 2 * G.idx_dim * 4 * (uint64_t) (o.n_ubatch + 2 * G.idx_kpool);
+            return b;
+        };
+        std::vector<uint64_t> kvb((size_t) n_trunk);
+        for (int64_t l = 0; l < n_trunk; ++l) kvb[(size_t) l] = kv_of(l);
+        const uint64_t kv_layer = kvb[0];
         std::vector<int64_t> budget((size_t) NG);
         for (int g = 0; g < NG; ++g) {
             size_t fr = 0, tot = 0;
@@ -199,7 +242,7 @@ struct Hy4Engine::Impl {
         }
         // dense layers split between the cards in proportion to what each can hold of the whole trunk
         uint64_t dense_all = 0;
-        for (int64_t l = 0; l < n_trunk; ++l) dense_all += dense[(size_t) l] + kv_layer;
+        for (int64_t l = 0; l < n_trunk; ++l) dense_all += dense[(size_t) l] + kvb[(size_t) l];
         dev.assign((size_t) n_alloc, NG - 1);
         edev.assign((size_t) n_alloc, NG);
         if (n_alloc > n_trunk) {         // the MTP block's dense weights and caches on the last card, its experts in RAM
@@ -228,7 +271,7 @@ struct Hy4Engine::Impl {
                 for (int64_t k = 0; k < n_trunk; ++k) {
                     const int g = NG == 1 || k < a ? 0 : 1;
                     dv[(size_t) k] = g;
-                    b[(size_t) g] -= (int64_t) (dense[(size_t) k] + kv_layer);
+                    b[(size_t) g] -= (int64_t) (dense[(size_t) k] + kvb[(size_t) k]);
                 }
                 for (int g = 0; g < NG; ++g) ok = ok && b[(size_t) g] >= 0;
                 if (!ok) continue;
@@ -564,7 +607,8 @@ struct Hy4Engine::Impl {
     /// PR #32517's build_kpool_select: stores this ubatch's indexer rows, pools the groups it completed, and (when
     /// the context is past top-k) returns the sparse layer's mask [n_kv, nt] F16; otherwise nullptr (causal mask).
     ggml_tensor * indexer(ggml_context * c, ggml_cgraph * gf, ggml_tensor * x, ggml_tensor * qr, int64_t il,
-                          float base, const Inputs & in, ggml_tensor * ik_raw = nullptr) {
+                          float base, const Inputs & in, ggml_tensor * ik_raw = nullptr,
+                          ggml_tensor ** gather_idx = nullptr, ggml_tensor ** gather_live = nullptr) {
         const Shape & sh = in.sh;
         const std::string b = "blk." + std::to_string(il) + ".";
         const int64_t NI = G.idx_dim, NH = G.idx_heads, kp = G.idx_kpool, nt = sh.nt;
@@ -596,20 +640,39 @@ struct Hy4Engine::Impl {
         iq = idx_rope(c, iq, in.pos, in.pos4, base);
         ggml_tensor * pooled = ggml_view_3d(c, poolc, NI, sh.n_pool, 1, poolc->nb[1], poolc->nb[1] * sh.n_pool, 0);
         ggml_tensor * wts = ggml_scale(c, ggml_mul_mat(c, W(b + "indexer.proj.weight"), x), 1.0f / sqrtf((float) (NI * NH)));
-        ggml_tensor * qp = ggml_permute(c, iq, 0, 2, 1, 3);                          // [NI, nt, NH]
-        ggml_tensor * kq = ggml_mul_mat(c, pooled, qp);                               // [n_pool, nt, NH]
-        kq = ggml_relu(c, cont(c, ggml_permute(c, kq, 2, 1, 0, 3)));             // [NH, nt, n_pool]
-        kq = ggml_mul(c, kq, ggml_reshape_3d(c, wts, NH, nt, 1));
-        ggml_tensor * score = ggml_sum_rows(c, kq);                                   // [1, nt, n_pool]
-        score = ggml_reshape_2d(c, cont(c, ggml_permute(c, score, 2, 1, 0, 3)), sh.n_pool, nt);
-        score = ggml_add(c, score, in.pool_mask);
-        ggml_tensor * top = ggml_argsort_top_k(c, score, (int) sh.n_top);            // [n_top, nt], best first
+        ggml_tensor * score;
+        if (o.fused_indexer) {
+            // --fused-indexer: the vendored ggml's lightning indexer (sum over heads of w * relu(q . k), plus the mask) in
+            // one kernel, without the [n_pool, nt, NH] scores in memory (5 GB of compute buffer at 256K, 512 tokens)
+            ggml_tensor * k4 = ggml_view_4d(c, poolc, NI, 1, sh.n_pool, 1, poolc->nb[1], poolc->nb[1], poolc->nb[1] * sh.n_pool, 0);
+            score = ggml_lightning_indexer(c, ggml_reshape_4d(c, cont(c, iq), NI, NH, nt, 1), k4,
+                                           ggml_reshape_4d(c, cont(c, wts), NH, nt, 1, 1),
+                                           ggml_cast(c, in.pool_mask, GGML_TYPE_F16));
+            score = ggml_reshape_2d(c, score, sh.n_pool, nt);
+        } else {
+            ggml_tensor * qp = ggml_permute(c, iq, 0, 2, 1, 3);                          // [NI, nt, NH]
+            ggml_tensor * kq = ggml_mul_mat(c, pooled, qp);                               // [n_pool, nt, NH]
+            kq = ggml_relu(c, cont(c, ggml_permute(c, kq, 2, 1, 0, 3)));             // [NH, nt, n_pool]
+            kq = ggml_mul(c, kq, ggml_reshape_3d(c, wts, NH, nt, 1));
+            score = ggml_sum_rows(c, kq);                                                 // [1, nt, n_pool]
+            score = ggml_reshape_2d(c, cont(c, ggml_permute(c, score, 2, 1, 0, 3)), sh.n_pool, nt);
+            score = ggml_add(c, score, in.pool_mask);
+        }
+        // --fused-indexer also picks the top groups with ggml_top_k (no full sort of every pool; the order of the picks
+        // does not matter to the mask or the gather)
+        ggml_tensor * top = o.fused_indexer ? ggml_top_k(c, score, (int) sh.n_top)
+                                            : ggml_argsort_top_k(c, score, (int) sh.n_top);   // [n_top, nt]
         ggml_tensor * sel = ggml_get_rows(c, in.pool_idx, ggml_reshape_1d(c, cont(c, top), sh.n_top * nt));
         sel = ggml_reshape_2d(c, sel, kp * sh.n_top, nt);
         if (G.idx_tail) sel = ggml_concat(c, sel, in.tail, 0);                        // [n_sel, nt]
         // a slot that is not real (a pool the token cannot see yet, a tail cell before the start) writes its own dump
         // row past n_kv: idx = dump + live * (idx - dump)
         ggml_tensor * f = ggml_cast(c, sel, GGML_TYPE_F32);
+        if (gather_idx) {       // the gather path: the picked rows themselves (row 0 for a dead slot) and which are live
+            *gather_idx = ggml_cast(c, ggml_mul(c, f, in.live), GGML_TYPE_I32);   // [n_sel, nt]
+            *gather_live = in.live;
+            return nullptr;
+        }
         f = ggml_add(c, ggml_mul(c, ggml_sub(c, f, in.dump), in.live), in.dump);
         ggml_tensor * idx = ggml_cast(c, f, GGML_TYPE_I32);
         ggml_tensor * m = ggml_set_rows(c, ggml_dup(c, in.mask_base), in.zeros, ggml_reshape_3d(c, idx, sh.n_sel, nt, 1));
@@ -734,7 +797,35 @@ struct Hy4Engine::Impl {
 
         ggml_tensor * mask = swa ? in.mask_swa : in.mask;
         if (!swa && has_indexer(il)) {
-            ggml_tensor * sel = indexer(c, gf, x, qr, il, base, in, v_ik);
+            // --gather-attn, a step of up to 8 tokens past top-k: attention over the picked rows only, each token its
+            // own batch of n_sel rows, instead of every cache row under a mask (its cost then does not grow with the
+            // context)
+            const bool gather = o.gather_attn && in.sh.index && dmask.empty();
+            ggml_tensor * gidx = nullptr, * glive = nullptr;
+            ggml_tensor * sel = indexer(c, gf, x, qr, il, base, in, v_ik, gather ? &gidx : nullptr, gather ? &glive : nullptr);
+            if (gather) {
+                // a prompt step goes in groups of 32 tokens, so the gathered rows (n_sel x 576 F16 a token) stay ~75 MB
+                const int64_t NS = in.sh.n_sel, CH = 32;
+                ggml_tensor * Qall = cont(c, ggml_permute(c, Q, 0, 2, 1, 3));                       // [khead, H, nt]
+                ggml_tensor * mall = ggml_scale_bias(c, glive, 1e30f, -1e30f);                     // 0 live, -1e30 dead
+                ggml_tensor * out = nullptr;
+                for (int64_t t0 = 0; t0 < nt; t0 += CH) {
+                    const int64_t n = std::min(CH, nt - t0);
+                    ggml_tensor * gi = ggml_view_2d(c, gidx, NS, n, gidx->nb[1], (size_t) t0 * gidx->nb[1]);
+                    ggml_tensor * rows = ggml_get_rows_type(c, cache, ggml_reshape_1d(c, cont(c, gi), NS * n), GGML_TYPE_F16);
+                    ggml_tensor * Kg = ggml_reshape_4d(c, rows, khead, NS, 1, n);
+                    ggml_tensor * Vg = ggml_view_4d(c, rows, KR, NS, 1, n, rows->nb[1], rows->nb[1] * NS, rows->nb[1] * NS, 0);
+                    ggml_tensor * Qg = ggml_view_4d(c, Qall, khead, 1, H, n, Qall->nb[1], Qall->nb[1], Qall->nb[2], (size_t) t0 * Qall->nb[2]);
+                    ggml_tensor * mg = ggml_view_2d(c, mall, NS, n, mall->nb[1], (size_t) t0 * mall->nb[1]);
+                    mg = ggml_cast(c, ggml_reshape_4d(c, cont(c, mg), NS, 1, 1, n), GGML_TYPE_F16);
+                    ggml_tensor * attn = ggml_flash_attn_ext(c, Qg, Kg, Vg, mg, 1.0f / sqrtf((float) qhead), 0.0f, 0.0f);
+                    ggml_flash_attn_ext_add_sinks(attn, W(b + "attn_sinks.weight"));
+                    ggml_prec_set_acc(attn, GGML_PREC_F32);
+                    attn = ggml_reshape_3d(c, attn, KR, H, n);
+                    out = out ? ggml_concat(c, out, attn, 2) : attn;
+                }
+                return attn_out(c, out, x, b, v_gate, H, VD, KR, nt);
+            }
             if (sel) mask = sel;
         }
         if (in.dm_idx && dfly_layer(il)) {     // --dfly: the last rows' masks (the indexer's picks), kept for the drafter
@@ -746,13 +837,110 @@ struct Hy4Engine::Impl {
         ggml_tensor * attn = ggml_flash_attn_ext(c, Q, K, V, mask, 1.0f / sqrtf((float) qhead), 0.0f, 0.0f);
         ggml_flash_attn_ext_add_sinks(attn, W(b + "attn_sinks.weight"));
         ggml_prec_set_acc(attn, GGML_PREC_F32);
+        return attn_out(c, attn, x, b, v_gate, H, VD, KR, nt);
+    }
+
+    /// The attention's output [KR, H, nt] (any 4-D layout with those elements in that order) -> v_b, gate, output, norm
+    ggml_tensor * attn_out(ggml_context * c, ggml_tensor * attn, ggml_tensor * x, const std::string & b, ggml_tensor * v_gate,
+                           int64_t H, int64_t VD, int64_t KR, int64_t nt) {
         ggml_tensor * A = ggml_reshape_3d(c, attn, KR, H, nt);
         ggml_tensor * wvb = ggml_reshape_3d(c, W(b + "attn_v_b.weight"), KR, VD, H);
         A = ggml_mul_mat(c, wvb, ggml_permute(c, A, 0, 2, 1, 3));                   // [VD, nt, H]
         A = ggml_reshape_2d(c, cont(c, ggml_permute(c, A, 0, 2, 1, 3)), H * VD, nt);
-        A = ggml_mul(c, A, ggml_sigmoid(c, v_gate ? contig(v_gate) : ggml_mul_mat(c, W(b + "attn_gate.weight"), x)));
+        if (v_gate && !ggml_is_contiguous(v_gate)) v_gate = ggml_cont(c, v_gate);
+        A = ggml_mul(c, A, ggml_sigmoid(c, v_gate ? v_gate : ggml_mul_mat(c, W(b + "attn_gate.weight"), x)));
         ggml_tensor * y = ggml_mul_mat(c, W(b + "attn_output.weight"), A);
         return norm(c, y, b + "post_attention_norm.weight");
+    }
+
+    /// The routed experts: x [LAT, 1, nt], ids [USED, nt], wts [1, USED, nt] -> [1, LAT, nt]
+    ggml_tensor * experts(ggml_context * c, ggml_tensor * routed, ggml_tensor * ids, ggml_tensor * wts, const std::string & b) const {
+        ggml_tensor * g = ggml_mul_mat_id(c, W(b + "ffn_gate_exps.weight"), routed, ids);
+        ggml_tensor * u = ggml_mul_mat_id(c, W(b + "ffn_up_exps.weight"), routed, ids);
+        ggml_tensor * d = ggml_mul_mat_id(c, W(b + "ffn_down_exps.weight"), ggml_swiglu_split(c, g, u), ids);
+        d = ggml_mul(c, d, wts);                                                    // [LAT, USED, nt]
+        return ggml_sum_rows(c, cont(c, ggml_permute(c, d, 1, 0, 2, 3)));
+    }
+
+    // ---- --host-moe: the host side -------------------------------------------------------------------------------
+    bool host_moe_start(int n_threads, std::string & err) {
+        const int64_t LAT = G.d_latent, K = G.n_used, NT = 8;
+        auto al = [](size_t v) { return (v + 255) & ~(size_t) 255; };
+        const size_t ox = 0, oi = ox + al(LAT * NT * 4), ow = oi + al(K * NT * 4), oo = ow + al(K * NT * 4),
+                     om = oo + al(LAT * NT * 4), os = om + 256, of = os + 256, total = of + 256;
+        hm.mem = (uint8_t *) ggml_backend_cuda_alloc_mapped(total);
+        if (!hm.mem) { err = "--host-moe: cannot allocate mapped pinned memory"; return false; }
+        hm.bell = { (float *) (hm.mem + ox), (int32_t *) (hm.mem + oi), (float *) (hm.mem + ow), (float *) (hm.mem + oo),
+                    (int32_t *) (hm.mem + om), (uint32_t *) (hm.mem + os), (uint32_t *) (hm.mem + of) };
+        hm.n_threads = n_threads;
+        ggml_threadpool_params tp = ggml_threadpool_params_default(n_threads);
+        hm.pool = ggml_threadpool_new(&tp);
+        hm.th = std::thread([this] { host_moe_loop(); });
+        return true;
+    }
+
+    void host_moe_stop() {
+        if (!hm.mem) return;
+        if (std::getenv("HY4_HM_STATS") && hm.calls)
+            std::fprintf(stderr, "hy4: host-moe: %llu calls, %.1f us of expert compute each\n", (unsigned long long) hm.calls, hm.us / hm.calls);
+        hm.stop = true;
+        { std::lock_guard<std::mutex> l(hm.mu); }
+        hm.cv.notify_all();
+        if (hm.th.joinable()) hm.th.join();
+        for (auto & [k, g] : hm.graphs) ggml_free(g.c);
+        if (hm.pool) ggml_threadpool_free(hm.pool);
+        ggml_backend_cuda_free_mapped(hm.mem);
+        hm.mem = nullptr;
+    }
+
+    HostMoe::G & host_moe_graph(int layer, int nt) {
+        auto it = hm.graphs.find({ layer, nt });
+        if (it != hm.graphs.end()) return it->second;
+        const int64_t LAT = G.d_latent, K = G.n_used, FF = G.d_expert;
+        const size_t mem = ggml_graph_overhead() + 64 * ggml_tensor_overhead() +
+                           (size_t) nt * (size_t) K * (size_t) (4 * FF + 4 * LAT) * 4 * 2 + (1 << 20);
+        HostMoe::G g;
+        ggml_init_params ip = { mem, nullptr, false };
+        g.c = ggml_init(ip);
+        ggml_tensor * x = ggml_new_tensor_3d(g.c, GGML_TYPE_F32, LAT, 1, nt);
+        ggml_tensor * ids = ggml_new_tensor_2d(g.c, GGML_TYPE_I32, K, nt);
+        ggml_tensor * w = ggml_new_tensor_3d(g.c, GGML_TYPE_F32, 1, K, nt);
+        ggml_tensor * out = ggml_new_tensor_2d(g.c, GGML_TYPE_F32, LAT, nt);
+        x->data = hm.bell.x; ids->data = hm.bell.ids; w->data = hm.bell.w; out->data = hm.bell.out;
+        const std::string b = "blk." + std::to_string(layer) + ".";
+        ggml_tensor * s = experts(g.c, x, ids, w, b);
+        ggml_tensor * y = ggml_cpy(g.c, ggml_reshape_2d(g.c, s, LAT, nt), out);
+        g.gf = ggml_new_graph(g.c);
+        ggml_build_forward_expand(g.gf, y);
+        g.plan = ggml_graph_plan(g.gf, hm.n_threads, hm.pool);
+        g.work.resize(g.plan.work_size + 64);
+        g.plan.work_data = g.work.data();
+        return hm.graphs.emplace(std::make_pair(layer, nt), std::move(g)).first->second;
+    }
+
+    void host_moe_loop() {
+        volatile uint32_t * seq = hm.bell.seq;
+        volatile uint32_t * flag = hm.bell.flag;
+        volatile int32_t * meta = hm.bell.meta;
+        uint32_t served = *seq;
+        while (!hm.stop) {
+            if (!hm.active) {
+                std::unique_lock<std::mutex> l(hm.mu);
+                hm.cv.wait_for(l, std::chrono::milliseconds(50), [&] { return hm.active.load() || hm.stop.load(); });
+                continue;
+            }
+            const uint32_t s = *seq;
+            if (s == served) { __builtin_ia32_pause(); continue; }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            HostMoe::G & g = host_moe_graph(meta[0], meta[1]);
+            const auto t0 = std::chrono::steady_clock::now();
+            ggml_graph_compute(g.gf, &g.plan);
+            hm.calls++;
+            hm.us += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            *flag = s;
+            served = s;
+        }
     }
 
     ggml_tensor * ffn(ggml_context * c, ggml_cgraph * gf, ggml_tensor * x, int64_t il, int64_t nt) {
@@ -789,12 +977,12 @@ struct Hy4Engine::Impl {
             f_su = rows(it->second.su, G.d_expert);
         }
         ggml_tensor * routed = f_rd ? f_rd : ggml_mul_mat(c, W(b + "ffn_routed_down.weight"), x);  // [LAT, nt]
+        ggml_tensor * summed = nullptr;
+        if (host_moe_layer(il, nt)) {
+            summed = ggml_host_moe(c, cont(c, routed), cont(c, ids), cont(c, ggml_reshape_2d(c, wts, USED, nt)), &hm.bell, (int32_t) il);
+        }
         routed = ggml_reshape_3d(c, routed, LAT, 1, nt);
-        ggml_tensor * g = ggml_mul_mat_id(c, W(b + "ffn_gate_exps.weight"), routed, ids);
-        ggml_tensor * u = ggml_mul_mat_id(c, W(b + "ffn_up_exps.weight"), routed, ids);
-        ggml_tensor * d = ggml_mul_mat_id(c, W(b + "ffn_down_exps.weight"), ggml_swiglu_split(c, g, u), ids);
-        d = ggml_mul(c, d, wts);                                                    // [LAT, USED, nt]
-        ggml_tensor * summed = ggml_sum_rows(c, cont(c, ggml_permute(c, d, 1, 0, 2, 3)));   // [1, LAT, nt]
+        if (!summed) summed = experts(c, routed, ids, wts, b);                       // [1, LAT, nt]
         ggml_tensor * moe = ggml_mul_mat(c, W(b + "ffn_routed_up.weight"), ggml_reshape_2d(c, summed, LAT, nt));
         ggml_tensor * sg = f_sg ? f_sg : ggml_mul_mat(c, W(b + "ffn_gate_shexp.weight"), x);
         ggml_tensor * su = f_su ? f_su : ggml_mul_mat(c, W(b + "ffn_up_shexp.weight"), x);
@@ -1399,7 +1587,10 @@ struct Hy4Engine::Impl {
         if (!eng_err.empty()) { ggml_free(c); err = eng_err; return false; }
         for (size_t e = 0; e < in.eng.size() && e < rows.size(); ++e) set_in(in.eng[e], rows[e].data(), 0, rows[e].size() * 4);
 
-        if (ggml_backend_sched_graph_compute(sched, gf) != GGML_STATUS_SUCCESS) { ggml_free(c); err = "graph compute failed"; return false; }
+        if (hm.mem) { hm.active = true; hm.cv.notify_all(); }
+        const bool computed = ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS;
+        if (hm.mem) hm.active = false;
+        if (!computed) { ggml_free(c); err = "graph compute failed"; return false; }
         if (std::getenv("HY4_SPLITS"))
             std::fprintf(stderr, "hy4: %lld tokens: %d nodes, %d splits, %d copies\n", (long long) nt, ggml_graph_n_nodes(gf),
                          ggml_backend_sched_get_n_splits(sched), ggml_backend_sched_get_n_copies(sched));
@@ -1494,20 +1685,26 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
         if (!P.W("dfly.4.attn_q_b.weight") || !P.W("dfly.corr.down.weight")) { err = "--dfly: not a DFly2 GGUF"; return false; }
     }
     P.warm_cpu_weights();
+    if (o.host_moe && !P.host_moe_start(th, err)) return false;
     P.all = P.gpu;
     P.all.push_back(P.cpu);
     P.sched = ggml_backend_sched_new(P.all.data(), nullptr, (int) P.all.size(), GRAPH_NODES, false, true);
     P.meta.resize(ggml_tensor_overhead() * GRAPH_NODES + ggml_graph_overhead_custom(GRAPH_NODES, false));
     // reserve the compute buffers with the largest graph
-    {
+    // a prompt step's buffers grow with the context (the sparse layers' masks): when the largest does not fit, the
+    // prompt goes in steps half as long, down to 64 tokens (256K: 256-token steps, ~1 GB a card; measured 2026-11-20)
+    for (;;) {
         ggml_init_params ip = { P.meta.size(), P.meta.data(), true };
         ggml_context * c = ggml_init(ip);
         Impl::Inputs in;
-        const int64_t nt = std::min<int64_t>(o.n_ubatch, P.n_ctx);
+        const int64_t nt = std::min<int64_t>(P.o.n_ubatch, P.n_ctx);
         ggml_cgraph * gf = P.build(c, P.shape(P.n_ctx - nt, nt), in);
         const bool ok = ggml_backend_sched_reserve(P.sched, gf);
         ggml_free(c);
-        if (!ok) { err = "cannot reserve the compute buffers"; return false; }
+        if (ok) break;
+        if (P.o.n_ubatch <= 64) { err = "cannot reserve the compute buffers"; return false; }
+        P.o.n_ubatch /= 2;
+        if (o.verbose) std::fprintf(stderr, "hy4: prompt steps of %lld tokens (the compute buffers of a longer one do not fit)\n", (long long) P.o.n_ubatch);
     }
     if (o.verbose) {
         std::fprintf(stderr, "hy4: compute buffers:");

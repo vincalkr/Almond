@@ -30,6 +30,9 @@ struct Hy4EngineOptions {
     bool fused_hc = false;
     bool fused_proj = false;
     std::string down_requant;      ///< ffn_down_exps (Q4_K in the file) requantized for the cards: q3_k, iq3_s, iq3_xxs, q2_k       ///< with --dense-q8: the attention input's four projections as one product (--fused-proj)         ///< iHC through the vendored ggml's fused DeepSeek-V4 ops (--fused-hc)
+    bool fused_indexer = false;    ///< the indexer's scores through ggml_lightning_indexer (--fused-indexer)
+    bool gather_attn = false;      ///< sparse layers attend over the indexer's picked rows only (--gather-attn)
+    bool host_moe = false;         ///< the experts in RAM computed by a host thread the graph waits on (--host-moe)
     std::string dfly;              ///< Tencent's DFly2 drafter as a GGUF (tools/hy4/dfly_convert.py), needs mtp (--dfly)
     int mtp_n = 1;                 ///< guesses per step (--mtp-n)              ///< load the MTP block (layer 42) and draft one token ahead (--mtp)         ///< the 2-D BF16 matrices quantized to Q8_0 on load (--dense-q8)
     bool verbose = true;
