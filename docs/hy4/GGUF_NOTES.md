@@ -713,6 +713,15 @@ A 4,096-token step does not fit: its compute buffers need 3,480 MiB on card 1 (1
 halves the step to 2,048. Building the larger graph also ran out of the 24K-node graph context (`ggml_new_object`
 assert); `GRAPH_NODES` is now 49K, so `--ubatch 4096` falls back cleanly rather than aborting. No speed gain.
 
+## The wide-head flash attention on RDNA3: tried, crashes (2026-11-20)
+
+The sliding layers' attention runs `flash_attn_tile<576,512>` (~5.6 s of a 16K prompt). ggml also has an MMA F16 flash
+attention with compiled 576/512 instances and RDNA config cases (`fattn-mma-f16.cuh`), but on RDNA3
+`ggml_cuda_get_best_fattn_kernel` takes that path only for `Q->ne[0] <= 256`: MFMA is CDNA-only and the AMD WMMA branch
+is capped at 256. An opt-in env var was added to widen the gate to 576/512 and the kernel was rebuilt. Two runs with a
+1,024-token prompt both aborted at the first graph compute with `pthread_create() failed` from rocclr (the build
+without the env var was fine). Reverted; the crash cause is not diagnosed. The attention stays on the tile kernel.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the

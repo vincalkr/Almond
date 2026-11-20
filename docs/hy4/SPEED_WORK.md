@@ -90,8 +90,11 @@ short prompt ~24 tok/s; 16K prompt read at ~480 tok/s, then ~19-22 tok/s; 66K pr
 
 ## Next candidates (estimates, not measured)
 
-- Prompt: the sliding layers' attention (`flash_attn_tile<576,512>`, ~5.6 s of a 16K prompt): a WMMA kernel for
-  576/512 heads, maybe -50% of it, +10-15% prompt. The IQ2_XXS expert GEMMs (`mul_mat_q<16>`) are next in size.
+- Prompt: the sliding layers' attention (`flash_attn_tile<576,512>`, ~5.6 s of a 16K prompt) was tried and reverted.
+  On RDNA3 `ggml_cuda_get_best_fattn_kernel` only takes the MMA F16 path for `Q->ne[0] <= 256` (MFMA is CDNA-only);
+  the 576/512 MMA instances and RDNA config cases are compiled, but widening the gate behind an env var crashed
+  reproducibly at the first graph compute (ROCm `pthread_create() failed`). Needs a proper kernel fix. The IQ2_XXS
+  expert GEMMs (`mul_mat_q<16>`) are next in size.
 - Decode: fewer kernels per layer (fusing norms, iHC, routing), maybe -5..-8 ms a round, +12-20%.
 - With a quality cost (measured, off): `--ram-requant q3_k` +5-7% at KL 0.012.
 - Not worth it (measured): hot-expert cache in the ~2 GB left (top 60 experts of a RAM layer cover 14.7% of its
