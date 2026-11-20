@@ -642,6 +642,37 @@ read from the SSD.
   table in RAM then pages no more than on the SSD, prompt 393.6 -> 417.8 tok/s, decode within noise.
   `--engram-place auto` chooses RAM again when the table and the CPU's experts fit with 12 GiB to spare.
 
+## The prompt-step reserve, and 2,048-token steps (2026-11-20)
+
+`--ubatch` sizes the compute buffers for the largest graph, a step at the end of the 262K context: `Impl::init` builds
+that graph and calls `ggml_backend_sched_reserve`, halving the step when it does not fit. A failed reserve left its
+buffers allocated: `ggml_gallocr_reserve_n_impl` frees a buffer and then fails its realloc, and the other backends keep
+the sizes of the failed, larger graph. The smaller retry then had less VRAM than the first and failed too. Measured at
+256K with `--ubatch 2048` (the configuration's other flags), the attempts asked for 1,732 MiB on card 1, 2,576 MiB on
+card 0, **6,782 MiB** on card 0 (the leftover), 2,080 MiB, and ended at 128-token steps with 1,114 / 8 MiB buffers.
+`Impl::init` now makes a fresh scheduler for each attempt and frees it on failure; 2048 falls back to 1024 in one step,
+with 953 / 867 MiB buffers and 1.08 / 0.98 GiB free on the two cards.
+
+A 2,048-token step needs 1,775 MiB on card 0 and 1,733 MiB on card 1 (against 953 / 867 at 1,024). With 29 routed-expert
+layers in VRAM card 1 has only ~1.85 GiB free before the buffers, and the reserve fails; at 26 layers it has ~2.7 GiB
+and 2,048 steps run the whole prompt (27 layers still fails). The cost is the three expert layers moved to RAM, plus a
+layer cut that puts more of the trunk on the x2 card (16/27 -> 14/29 layers per card). Measured on 2026-11-20 with the
+configuration's other flags, a 16,384-token prompt of fixed pseudo-random ids, 400 generated tokens, greedy, one run
+each:
+
+| VRAM experts / step | prompt (16K) | decode (400) | `HY4_STEP_STATS` compute |
+| --- | ---: | ---: | ---: |
+| 29 / 1,024 | 426.8 tok/s (38.38 s) | 20.96 tok/s | 56.42 s |
+| 26 / 2,048 | 486.8 tok/s (33.66 s) | 20.03 tok/s | 52.53 s |
+
+So +14% on the prompt for -4% in decode. Quality: a 4K PPL check of the same ids, 26 against 29 expert layers at the
+same 1,024 steps (4,094 scored rows), gives KL 0.00000 and 100% top-1 agreement, so moving three expert layers to RAM
+does not change the output distribution here. The greedy ids of the random 16K prompt at 256K are not reproducible
+even across two runs of the unchanged baseline (first id 59718 against 81), so they are not a quality signal. Left off:
+the configuration keeps 1,024 steps and 29 expert layers; `--ubatch 2048 --expert-layers-gpu 26` runs the faster one.
+Note that this flag pair OOMs on card 1 at 4K (the placement puts 31 layers there, only 0.35 GiB free after the 2,048
+buffers); it is for the 256K configuration it was measured on.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the

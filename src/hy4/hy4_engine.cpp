@@ -1829,20 +1829,26 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
     if (o.host_moe && !P.host_moe_start(th, err)) return false;
     P.all = P.gpu;
     P.all.push_back(P.cpu);
-    P.sched = ggml_backend_sched_new(P.all.data(), nullptr, (int) P.all.size(), GRAPH_NODES, false, true);
     P.meta.resize(ggml_tensor_overhead() * GRAPH_NODES + ggml_graph_overhead_custom(GRAPH_NODES, false));
     // reserve the compute buffers with the largest graph
     // a prompt step's buffers grow with the context (the sparse layers' masks): when the largest does not fit, the
     // prompt goes in steps half as long, down to 64 tokens (256K: 256-token steps, ~1 GB a card; measured 2026-11-20)
+    // a failed ggml_backend_sched_reserve leaves its buffers allocated: ggml_gallocr_reserve_n_impl frees a buffer and
+    // then fails its realloc, and the buffers of the other backends keep the sizes of the failed, larger graph. That
+    // starves every smaller retry (2026-11-20: --ubatch 2048 fell all the way to 128 instead of back to 1024). Start
+    // each attempt with a fresh scheduler so an attempt that fits from a clean state is not lost.
     for (;;) {
         ggml_init_params ip = { P.meta.size(), P.meta.data(), true };
         ggml_context * c = ggml_init(ip);
         Impl::Inputs in;
         const int64_t nt = std::min<int64_t>(P.o.n_ubatch, P.n_ctx);
         ggml_cgraph * gf = P.build(c, P.shape(P.n_ctx - nt, nt), in);
+        P.sched = ggml_backend_sched_new(P.all.data(), nullptr, (int) P.all.size(), GRAPH_NODES, false, true);
         const bool ok = ggml_backend_sched_reserve(P.sched, gf);
         ggml_free(c);
         if (ok) break;
+        ggml_backend_sched_free(P.sched);
+        P.sched = nullptr;
         if (P.o.n_ubatch <= 64) { err = "cannot reserve the compute buffers"; return false; }
         P.o.n_ubatch /= 2;
         if (o.verbose) std::fprintf(stderr, "hy4: prompt steps of %lld tokens (the compute buffers of a longer one do not fit)\n", (long long) P.o.n_ubatch);

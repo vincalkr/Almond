@@ -34,14 +34,26 @@ short prompt ~24 tok/s; 16K prompt read at ~390 tok/s, then ~18-19 tok/s; 66K pr
 - `--pin-experts` (opt-in): the CPU's mapped weights registered as pinned memory: the offload copies become fewer
   and longer but take the same 10 s (395.5 vs 395.4 tok/s).
 - `HY4_STEP_STATS=1`: prints the Engram read / wait and graph compute times at exit.
+- The prompt-step reserve fallback was broken: a failed `ggml_backend_sched_reserve` left its VRAM buffers allocated
+  (`ggml_gallocr_reserve_n_impl` frees a buffer and then fails its realloc, and the other backends keep the failed,
+  larger graph's sizes), so every smaller retry had less VRAM and failed too. At 256K `--ubatch 2048` cascaded
+  2048 -> 1024 -> 512 -> 256 -> 128 and ended at 128-token steps (1,114 MiB buffers). Each attempt now gets a fresh
+  scheduler, freed on failure; 2048 falls back to 1024 in one step (953 / 867 MiB buffers, 1.08 / 0.98 GiB free).
+- 2,048-token steps measured: they need 1,775 / 1,733 MiB of compute buffers on the two cards, which fit at 256K only
+  with **26 routed-expert layers in VRAM instead of 29** (27 still falls back). Same 16K prompt, 400 generated tokens,
+  greedy, one run each: prompt 426.8 -> 486.8 tok/s (+14%), decode 20.96 -> 20.03 tok/s (-4.4%), `HY4_STEP_STATS`
+  compute 56.42 -> 52.53 s. Quality: a 4K PPL check of 26 against 29 expert layers at the same 1,024 steps (4,094
+  scored rows) gives KL 0.00000 and 100% top-1 agreement; the greedy ids of the random 256K prompt are not reproducible
+  even in two runs of the unchanged baseline, so they say nothing. Use `--ubatch 2048 --expert-layers-gpu 26` to try
+  it. Left off.
 
 ## Next for the prompt
 
 1. Overlap the offload copies with compute (copy layer L+1's RAM experts while layer L computes, as Basalt does):
    up to ~10 s of 41 s at 16K, ~+30%. Needs a prefetch inside or around ggml's scheduler.
-2. Longer prompt steps (2,048 tokens): half the copies, ~+12%; the compute buffers do not fit at 256K today, and the
-   halving retry after a failed reserve never recovers (even 64 tokens fail afterwards: likely a buffer left
-   allocated by the failed attempt).
+2. Longer prompt steps: the fallback bug is fixed and 2,048 steps are measured above (+14% prompt for -4% decode and
+   3 fewer expert layers in VRAM, PPL checked). The remaining reason it is not the default is that tradeoff, not the
+   reserve. A way to fit the 1.7 GiB card-1 buffer without giving up expert layers would keep both gains.
 3. The Engram table in RAM: <= 6% of the prompt (16K prompt: 2.4 s of 41 s waiting for the rows read from the
    SSD). `--engram-place auto` keeps it on the SSD at 256K because it also counts the file pages of the weights
    copied to VRAM (~70 GiB). Tried on 2026-11-20 with `--engram-place ram`: the machine paged (~2,800-3,300 major
