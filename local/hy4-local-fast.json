@@ -1,0 +1,46 @@
+{
+  "exe": "build-hip-fused/almond-engine",
+  "args": [
+    "--hy4",
+    "-m",
+    "models/hy4-iq2ah/Hy4-flash-IQ2_AH-00001-of-00002.gguf",
+    "--gpus",
+    "0,1",
+    "-c",
+    "262144",
+    "--engram-place",
+    "auto",
+    "--mtp",
+    "--fused-hc",
+    "--dense-q8",
+    "--reserve-mib",
+    "1400",
+    "--fused-proj",
+    "--fused-indexer",
+    "--gather-attn",
+    "--kv-q8",
+    "--ubatch",
+    "2048",
+    "--expert-layers-gpu",
+    "26",
+    "--prefetch-experts"
+  ],
+  "cwd": ".",
+  "tokenizer": "models/hy4-iq2ah/tokenizer",
+  "model_name": "hy4-flash-fast",
+  "log": "local/serve-hy4-fast-engine.log",
+  "port": 8150,
+  "backend": "hip",
+  "gpu": "0,1",
+  "sampling": {
+    "temperature": 0.9,
+    "top_p": 1.0
+  },
+  "loop_guard": true,
+  "fit_max_tokens": true,
+  "conversation_dir": "local/hy4-slots",
+  "conversation_dir_gib": 16,
+  "env": {
+    "ALMOND_MMVF_ROWS": "1"
+  }
+}

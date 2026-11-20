@@ -703,6 +703,12 @@ same weights. The flag is on in both configurations. It needs about 1 GiB free o
 at 256K with 29 VRAM expert layers there is ~1.1 GiB and all 585 copies are staged (0 fallbacks); at 64K with 31 layers
 there is only 0.38 GiB, and `prefetch_init` turns the prefetch off instead of letting the graph compute run out of memory.
 
+The gain adds to the 2,048-token steps of the previous section: `local/hy4-local-fast.json` (router id `hy4-flash-fast`)
+runs `--ubatch 2048 --expert-layers-gpu 26 --prefetch-experts`. Same 16K prompt and 100 generated tokens: prompt
+480.3 -> 528.9 tok/s, decode 21.67 -> 20.62, all 336 copies staged, `HY4_STEP_STATS` compute 35.29 s. Against the
+configuration before these two changes (426.8 tok/s prompt) that is +24% prompt for about -2% decode; the three fewer
+expert layers in VRAM make it an alternative rather than the default.
+
 ## What is not here
 
 Video: Almond's server takes no video input for any model, so the template's video markers are not reached. The CPU path's numbers above are from before the

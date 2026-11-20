@@ -54,6 +54,10 @@ short prompt ~24 tok/s; 16K prompt read at ~480 tok/s, then ~19-22 tok/s; 66K pr
   alternate pairs: 431.3 / 431.3 -> 479.3 / 480.7 tok/s (+11%), `HY4_STEP_STATS` compute 42.0-42.3 -> 38.1-38.2 s;
   4K PPL KL 0.00000 / 100% top-1. Needs ~1 GiB free on card 0 after the compute buffers: at 64K with 31 experts only
   0.38 GiB is free, and the flag turns itself off rather than OOM. See GGUF_NOTES.
+- `--ubatch 2048 --expert-layers-gpu 26 --prefetch-experts` (`local/hy4-local-fast.json`, router id `hy4-flash-fast`):
+  the two prompt gains add up. Same 16K prompt, 100 generated tokens: prompt 480.3 -> 528.9 tok/s, decode 21.67 ->
+  20.62; `HY4_STEP_STATS` compute 35.29 s, all 336 copies staged. Against the configuration before this round (426.8
+  tok/s) it is +24% prompt for ~ -2% decode. It moves 3 expert layers to RAM, so it is an alternative, not the default.
 
 ## Next for the prompt
 
