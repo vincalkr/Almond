@@ -718,9 +718,14 @@ assert); `GRAPH_NODES` is now 49K, so `--ubatch 4096` falls back cleanly rather 
 The sliding layers' attention runs `flash_attn_tile<576,512>` (~5.6 s of a 16K prompt). ggml also has an MMA F16 flash
 attention with compiled 576/512 instances and RDNA config cases (`fattn-mma-f16.cuh`), but on RDNA3
 `ggml_cuda_get_best_fattn_kernel` takes that path only for `Q->ne[0] <= 256`: MFMA is CDNA-only and the AMD WMMA branch
-is capped at 256. An opt-in env var was added to widen the gate to 576/512 and the kernel was rebuilt. Two runs with a
-1,024-token prompt both aborted at the first graph compute with `pthread_create() failed` from rocclr (the build
-without the env var was fine). Reverted; the crash cause is not diagnosed. The attention stays on the tile kernel.
+is capped at 256. An opt-in env var was added to widen the gate to 576/512 and the kernel was rebuilt. An `AMD_LOG_LEVEL=3` trace of a
+1,024-token prompt shows the launch of `flash_attn_ext_f16<576, 512, 2, 16, false, true, false>` with grid 1,024,
+block 128 and 37,376 bytes of dynamic shared memory after a successful `hipFuncSetAttribute`, then rocclr creating a
+~12 MB hostcall buffer and aborting on `pthread_create() failed` inside `libamdhip64`. Disabling HIP graphs
+(`GGML_CUDA_DISABLE_GRAPHS`) or reducing the CPU threads does not help, and a rocgdb backtrace shows only the runtime's
+internal abort frames. The crash is in ROCm 7.14's runtime, not in a ggml-side check (the kernel has no device-side
+assert or printf). Forcing the small ncols=8 instance (9 KiB of shared memory instead of 37 KiB) did not help either, so it is not the
+LDS limit. Reverted; the attention stays on the tile kernel. A fix needs a ROCm-level investigation.
 
 ## What is not here
 
