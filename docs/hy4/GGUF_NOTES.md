@@ -673,23 +673,35 @@ the configuration keeps 1,024 steps and 29 expert layers; `--ubatch 2048 --exper
 Note that this flag pair OOMs on card 1 at 4K (the placement puts 31 layers there, only 0.35 GiB free after the 2,048
 buffers); it is for the 256K configuration it was measured on.
 
-## Overlapping the offload copies: tried, no gain (2026-11-20)
+## Overlapping the offload copies (`--prefetch-experts`, 2026-11-20)
 
 `HY4_COPY_DEBUG=1` prints the op-offload copies of the experts in RAM that ggml makes at every prompt step: per layer,
 `ffn_gate_exps` and `ffn_up_exps` (297 MiB each) and `ffn_down_exps` (648 MiB), 13 layers. Gate and up are copied into
 the SAME device region, down into another: those ~945 MiB of destinations are reused by all 13 layers, one split at a
 time, just before that split's compute.
 
-Tried staging one layer at a time in private device buffers (320 + 660 MiB) on a separate HIP stream, the scheduler's
-copy callback turning each copy into a short device->device copy from staging. It needs one fewer expert layer in VRAM:
-at 29 the staging allocation leaves card 0 0.14 GiB free and the next cuBLAS workspace (67 MiB) OOMs. With 28 layers,
-correctness held (4K PPL against the same config: KL 0.00217, top-1 98.17%, inside the ~0.003 band of equivalent
-kernel changes), but speed did not improve: 16K prompt, 1,024 steps, 400 generated tokens, 419.6 tok/s without and
-411.5 with the prefetch (all 630 copies staged, 0 fallbacks); `HY4_STEP_STATS` compute 43.07 -> 44.13 s. With
-`--pin-experts`, 419.3 -> 421.5 tok/s (noise). `hipMemcpyAsync` from the pageable mmap'd weights does not overlap with
-the graph's compute; the device->device hop and the synchronizations cost more than any overlap saves. Making the
-source pinned (`hipHostMalloc` and copy the 15.8 GiB of experts at load, beside the 59 GiB Engram table already in RAM)
-is a different memory model and was not tried. Left out; the diagnostic is kept behind `HY4_COPY_DEBUG`.
+`--prefetch-experts` stages one copy at a time in a 660 MiB device buffer on a private HIP stream; the scheduler's copy
+callback (`ggml_backend_sched_set_copy_callback`) turns each host->device copy into a short device->device copy from
+staging, and issues the next copy on the stream while the current split computes. The first attempt gained nothing
+because `hipMemcpyAsync` from the pageable mmap'd weights blocks: a micro-benchmark of a 1.2 GiB copy gave the call
+returning in 45 ms from plain mmap against 17 us after `hipHostRegister` on the same mapping (copy itself 44 ms on card
+0, 380 ms on card 1's x2 link). The flag now registers the mapped expert pages (`hipHostRegister`, as `--pin-experts`
+does) and only then prefetches. A single staging buffer suffices because gate, up and down are copied in sequence;
+two buffers (to stage two layers) would need ~1.3 GiB more VRAM and do not fit at 256K.
+
+Measured on 2026-11-20, 256K, the configuration's flags, greedy, a 16,384-token prompt of fixed pseudo-random ids and
+100 generated tokens, alternating runs:
+
+| | prompt 16K | `HY4_STEP_STATS` compute |
+| --- | ---: | ---: |
+| baseline (`--pin-experts`) | 431.3 / 431.3 tok/s (37.99 s) | 42.00 / 42.33 s |
+| `--prefetch-experts` | 479.3 / 480.7 tok/s (34.08-34.18 s) | 38.12 / 38.20 s |
+
+So +11% on the prompt; decode is inside the noise (22.27 / 20.64 against 21.90 / 21.82 tok/s). A 4K PPL check of
+the same ids against the same config gives KL 0.00000 and 100% top-1 over 4,094 rows: the staging delivers exactly the
+same weights. The flag is on in both configurations. It needs about 1 GiB free on card 0 after the compute buffers:
+at 256K with 29 VRAM expert layers there is ~1.1 GiB and all 585 copies are staged (0 fallbacks); at 64K with 31 layers
+there is only 0.38 GiB, and `prefetch_init` turns the prefetch off instead of letting the graph compute run out of memory.
 
 ## What is not here
 

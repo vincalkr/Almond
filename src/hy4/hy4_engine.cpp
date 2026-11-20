@@ -10,6 +10,7 @@
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 #include "ggml-cuda.h"
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <array>
@@ -131,6 +132,93 @@ struct Hy4Engine::Impl {
         return false;   // let ggml do the copy
     }
     int copy_log = 0;
+
+    // HY4_PREFETCH=1: overlap the op-offload copies of the experts in RAM with the graph's compute. ggml copies each
+    // layer's experts to card 0 synchronously, one split at a time, just before that split's compute; the 13 RAM layers
+    // reuse the same two device regions (297 MiB gate/up, 648 MiB down). We stage one layer at a time in own device
+    // buffers on a private stream: while layer L computes, layer L+1's weights are copied there, and the copy callback
+    // turns each host->device copy into a short device->device copy. Needs the mapped expert pages registered with
+    // hipHostRegister: otherwise hipMemcpyAsync from them blocks (measured: 45 ms returned vs 17 us when registered).
+    struct Prefetch {
+        bool on = false;
+        hipStream_t stream = nullptr;
+        hipEvent_t ev = nullptr;
+        void * stg = nullptr;                            // one 660 MiB staging buffer on card 0, reused per copy
+        struct Pair { std::string name; void * src; size_t size; int kind; };   // kind 0 gate/up, 1 down
+        std::vector<Pair> pairs;
+        size_t idx = 0;
+        bool recording = true;
+        int pending = -1;                                // pair whose H2D prefetch is in flight
+        long copies = 0, fallbacks = 0;
+        ~Prefetch() {
+            if (stg) hipFree(stg);
+            if (ev) hipEventDestroy(ev);
+            if (stream) hipStreamDestroy(stream);
+        }
+    } prefetch;
+
+    void prefetch_init() {
+        auto & pf = prefetch;
+        size_t fr = 0, tot = 0;
+        ggml_backend_cuda_get_device_memory(o.gpus[0], &fr, &tot);
+        // 660 MiB of staging plus room for cuBLAS workspaces: at 256K with 29 experts ~1.1 GiB is free, at 64K with
+        // 31 experts only ~0.38 GiB and the graph compute runs out of memory. Skip the prefetch there instead of crashing.
+        if (fr < 1u << 30) {
+            if (o.verbose) std::fprintf(stderr, "hy4: prefetch off, only %.2f GiB free on card 0\n", fr / 1073741824.0);
+            return;
+        }
+        hipSetDevice(o.gpus[0]);
+        if (hipStreamCreateWithFlags(&pf.stream, hipStreamNonBlocking) != hipSuccess ||
+            hipEventCreateWithFlags(&pf.ev, hipEventDisableTiming) != hipSuccess) { prefetch_off(); return; }
+        if (hipMalloc(&pf.stg, 660u << 20) != hipSuccess) { prefetch_off(); return; }
+        pf.on = true;
+        ggml_backend_sched_set_copy_callback(sched, copy_prefetch, this);
+    }
+    void prefetch_off() {
+        auto & pf = prefetch;
+        pf.on = false;
+        if (pf.stg) { hipFree(pf.stg); pf.stg = nullptr; }
+        if (pf.ev) { hipEventDestroy(pf.ev); pf.ev = nullptr; }
+        if (pf.stream) { hipStreamDestroy(pf.stream); pf.stream = nullptr; }
+    }
+    void prefetch_first(int64_t nt) {
+        auto & pf = prefetch;
+        if (!pf.on || nt < 32 || pf.pairs.empty()) return;
+        pf.idx = 0;
+        if (pf.recording) pf.recording = false;
+        auto & nxt = pf.pairs[0];
+        hipMemcpyAsync(pf.stg, nxt.src, nxt.size, hipMemcpyHostToDevice, pf.stream);
+        hipEventRecord(pf.ev, pf.stream);
+        pf.pending = 0;
+    }
+    static bool copy_prefetch(ggml_backend_t, const ggml_tensor * src, ggml_tensor * dst, ggml_cgraph *, void * ud) {
+        auto * p = (Impl *) ud;
+        auto & pf = p->prefetch;
+        const std::string name = src->name;
+        const size_t size = ggml_nbytes(src);
+        const int kind = name.find("down") != std::string::npos ? 1 : 0;
+        if (pf.recording) {
+            pf.pairs.push_back({ name, (void *) src->data, size, kind });
+            return false;
+        }
+        if (pf.idx >= pf.pairs.size() || pf.pairs[pf.idx].name != name || pf.pairs[pf.idx].size != size) {
+            ++pf.fallbacks;
+            pf.pairs.clear(); pf.idx = 0; pf.recording = true; pf.pending = -1;
+            return false;
+        }
+        if (pf.pending == (int) pf.idx) hipEventSynchronize(pf.ev);
+        hipMemcpyAsync(dst->data, pf.stg, size, hipMemcpyDeviceToDevice, pf.stream);
+        hipStreamSynchronize(pf.stream);
+        pf.idx++;
+        if (pf.idx < pf.pairs.size()) {
+            auto & nxt = pf.pairs[pf.idx];
+            hipMemcpyAsync(pf.stg, nxt.src, nxt.size, hipMemcpyHostToDevice, pf.stream);
+            hipEventRecord(pf.ev, pf.stream);
+            pf.pending = (int) pf.idx;
+        } else pf.pending = -1;
+        ++pf.copies;
+        return true;
+    }
     // indexer.attn_q_b, not indexer.attn_k: --fused-proj stacks attn_k into blk.L.attn_in_cat, and checking it left the
     // sparse layers without their indexer (full attention past 2,048 positions) from e4d4d56 to 2026-11-20
     bool has_indexer(int64_t il) const { return W("blk." + std::to_string(il) + ".indexer.attn_q_b.weight") != nullptr; }
@@ -151,6 +239,8 @@ struct Hy4Engine::Impl {
                 std::fclose(f);
             }
         }
+        if (prefetch.on)
+            std::fprintf(stderr, "hy4: prefetch: %ld copies staged, %ld fallbacks\n", prefetch.copies, prefetch.fallbacks);
         if (eng_fd >= 0) ::close(eng_fd);
         if (eng_ram) ::munmap(eng_ram - (eng_off & 4095ull), eng_ram_bytes);
         host_moe_stop();
@@ -1714,6 +1804,7 @@ struct Hy4Engine::Impl {
         for (size_t e = 0; e < in.eng.size() && e < rows.size(); ++e) set_in(in.eng[e], rows[e].data(), 0, rows[e].size() * 4);
 
         if (hm.mem) { hm.active = true; hm.cv.notify_all(); }
+        prefetch_first(nt);
         const auto tc = std::chrono::steady_clock::now();
         const bool computed = ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS;
         st_comp_us += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tc).count();
@@ -1820,8 +1911,8 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
         if (!P.W("dfly.4.attn_q_b.weight") || !P.W("dfly.corr.down.weight")) { err = "--dfly: not a DFly2 GGUF"; return false; }
     }
     P.warm_cpu_weights();
-    if (o.pin_experts) {    // --pin-experts: the mapped weights the CPU reads, registered as pinned memory, so the copies a
-        uint64_t pinned = 0;   // prompt step makes of them to a card (ggml's op offload) are DMA at full PCIe speed
+    if (o.pin_experts || o.prefetch_experts || std::getenv("HY4_PREFETCH")) {  // register the mapped weights the CPU reads: the copies a
+        uint64_t pinned = 0;   // prompt step makes of them to a card are then DMA (and hipMemcpyAsync is truly async)
         ::setenv("GGML_CUDA_REGISTER_HOST", "1", 0);
         std::vector<std::pair<uintptr_t, uintptr_t>> pages;     // page ranges, merged (neighbouring tensors share pages)
         for (auto & r : P.cpu_ranges)
@@ -1864,6 +1955,7 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
     }
     if (std::getenv("HY4_COPY_DEBUG"))
         ggml_backend_sched_set_copy_callback(P.sched, Impl::copy_diag, &P);
+    if (o.prefetch_experts || std::getenv("HY4_PREFETCH")) P.prefetch_init();
     if (o.verbose) {
         std::fprintf(stderr, "hy4: compute buffers:");
         for (auto * b : P.all)

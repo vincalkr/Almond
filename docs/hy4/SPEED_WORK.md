@@ -7,11 +7,11 @@ another session or with another model. Measured numbers and the reasoning behind
 ## The configuration (`local/hy4-local.json`, `-vision`)
 
 `--hy4 ... --gpus 0,1 -c 262144 --engram-place auto --mtp --fused-hc --dense-q8 --reserve-mib 1400 --fused-proj
---fused-indexer --gather-attn --kv-q8 --ubatch 1024`, env `ALMOND_MMVF_ROWS=1`. Last commits: 7e5817a (indexer fix,
-gather attention, 256K), 261e5fa (`--kv-q8`), 5a34724 (`--ram-requant`, off).
+--fused-indexer --gather-attn --kv-q8 --ubatch 1024 --prefetch-experts`, env `ALMOND_MMVF_ROWS=1`. Last commits:
+7e5817a (indexer fix, gather attention, 256K), 261e5fa (`--kv-q8`), 5a34724 (`--ram-requant`, off).
 
 Speed now (256K, two RX 7900 XTX, card 1 on PCIe x2, 9900X with DDR5 at ~65 GB/s, greedy, MTP):
-short prompt ~24 tok/s; 16K prompt read at ~390 tok/s, then ~18-19 tok/s; 66K prompt ~377 tok/s, then ~16-19.
+short prompt ~24 tok/s; 16K prompt read at ~480 tok/s, then ~19-22 tok/s; 66K prompt ~377 tok/s, then ~16-19.
 29 of 42 layers keep their routed experts in VRAM at 256K; 13 run on the CPU.
 
 ## Where the time goes
@@ -46,18 +46,20 @@ short prompt ~24 tok/s; 16K prompt read at ~390 tok/s, then ~18-19 tok/s; 66K pr
   scored rows) gives KL 0.00000 and 100% top-1 agreement; the greedy ids of the random 256K prompt are not reproducible
   even in two runs of the unchanged baseline, so they say nothing. Use `--ubatch 2048 --expert-layers-gpu 26` to try
   it. Left off.
-- `HY4_COPY_DEBUG=1`: prints ggml's op-offload copies of the RAM experts (13 layers x gate/up 297 + down 648 MiB;
-  gate/up reuse one 297 MiB device region, down one 648 MiB, ~945 MiB total). Tried staging one layer's weights in a
-  private buffer on a separate stream, with the scheduler's copy callback: 4K KL 0.00217 / 98.17% top-1 (noise band),
-  but 16K prompt 419.6 -> 411.5 tok/s — slower. `hipMemcpyAsync` from the pageable mmap'd weights does not overlap
-  with compute, and the extra device copy plus syncs cost more than any overlap. Left out; see GGUF_NOTES.
+- `--prefetch-experts` (on in the configurations): overlap the op-offload copies with the graph's compute. `HY4_COPY_DEBUG=1`
+  showed ggml copies 13 layers x gate/up 297 + down 648 MiB into two reused device regions just before each split. A
+  660 MiB staging buffer on a private stream plus the scheduler's copy callback stages the next layer while this one
+  computes. The key is that the mmap'd expert pages must be `hipHostRegister`ed (the flag does it): a micro-benchmark
+  gives `hipMemcpyAsync` returning in 45 ms from plain mmap against 17 us when registered. 16K prompt, 256K, two
+  alternate pairs: 431.3 / 431.3 -> 479.3 / 480.7 tok/s (+11%), `HY4_STEP_STATS` compute 42.0-42.3 -> 38.1-38.2 s;
+  4K PPL KL 0.00000 / 100% top-1. Needs ~1 GiB free on card 0 after the compute buffers: at 64K with 31 experts only
+  0.38 GiB is free, and the flag turns itself off rather than OOM. See GGUF_NOTES.
 
 ## Next for the prompt
 
-1. Overlap the offload copies with compute (copy layer L+1's RAM experts while layer L computes, as Basalt does):
-   up to ~10 s of 41 s at 16K, ~+30%. Tried with a staging buffer and the scheduler's copy callback (measured above):
-   no gain — the source is pageable mmap memory, so the async copy does not overlap. Real overlap would need the experts
-   in pinned host memory (copied there at load, ~15.8 GiB), a different memory model.
+1. Overlap the offload copies with compute: done with `--prefetch-experts` above (+11% prompt, no quality cost). What
+   is left is the ~4 s of copies still exposed (a 660 MiB staging holds one layer; two layers would need ~1.3 GiB more
+   VRAM), and the 64K case where the flag is off because card 0 is short of memory.
 2. Longer prompt steps: the fallback bug is fixed and 2,048 steps are measured above (+14% prompt for -4% decode and
    3 fewer expert layers in VRAM, PPL checked). The remaining reason it is not the default is that tradeoff, not the
    reserve. A way to fit the 1.7 GiB card-1 buffer without giving up expert layers would keep both gains.

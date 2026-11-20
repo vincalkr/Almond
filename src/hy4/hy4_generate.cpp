@@ -130,6 +130,7 @@ int parse(int argc, char ** argv, Args & a) {
         else if (!std::strcmp(s, "--fused-indexer")) a.eo.fused_indexer = true;
         else if (!std::strcmp(s, "--kv-q8")) a.eo.kv_q8 = true;
         else if (!std::strcmp(s, "--pin-experts")) a.eo.pin_experts = true;
+        else if (!std::strcmp(s, "--prefetch-experts")) a.eo.prefetch_experts = true;
         else if (!std::strcmp(s, "--ram-requant")) {
             if (++i >= argc) return 2;
             a.eo.ram_requant = argv[i];
@@ -181,7 +182,7 @@ int parse(int argc, char ** argv, Args & a) {
         else if (!std::strcmp(s, "--help")) {
             std::printf("usage: almond-engine --hy4 -m <gguf> [--info] [--list-tensors]\n"
                         "       [--prompt-ids 1,2,3|@FILE -n 8 [--temp 0.9] [--top-p 1.0] [--seed 1]]\n"
-                        "       [--gpus 0,1] [-c 4096] [-t N] [--expert-layers-gpu N] [--ubatch 512] [--dense-q8] [--engram-place auto|ram|ssd] [--mtp [--mtp-n 1]] [--dfly DFLY.gguf [--mtp-n 5]]\n"
+                        "       [--gpus 0,1] [-c 4096] [-t N] [--expert-layers-gpu N] [--ubatch 512] [--dense-q8] [--engram-place auto|ram|ssd] [--mtp [--mtp-n 1]] [--dfly DFLY.gguf [--mtp-n 5]] [--pin-experts] [--prefetch-experts]\n"
                         "       [--serve [--eos-ids 120025]]   serve/server.py's protocol on stdin/stdout\n"
                         "       [--cpu [--no-kv-cache]]   the CPU reference path\n");
             return 1;

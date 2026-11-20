@@ -20,7 +20,8 @@
     "--gather-attn",
     "--kv-q8",
     "--ubatch",
-    "1024"
+    "1024",
+    "--prefetch-experts"
   ],
   "cwd": ".",
   "tokenizer": "models/hy4-iq2ah/tokenizer",
