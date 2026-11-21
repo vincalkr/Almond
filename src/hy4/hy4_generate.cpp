@@ -389,10 +389,11 @@ int hy4_main(int argc, char ** argv) {
     std::vector<int64_t> toks = a.prompt;
     std::printf("hy4: generate %d tokens, temp %.2f top_p %.2f\n", a.n_predict, temp, top_p);
     const int64_t ng = G.ple_ngram - 1;
+    // only the --cpu reference forward has no k-pool indexer; the engine path selects through it (Hy4Engine)
     const int64_t max_ctx = hy4_max_exact_ctx(G);
-    if ((int64_t) toks.size() + a.n_predict > max_ctx)
-        std::fprintf(stderr, "hy4: warning: past %lld tokens the sparse layers need the k-pool indexer, which is not "
-                     "implemented; attention there is full, not the model's\n", (long long) max_ctx);
+    if (a.cpu && (int64_t) toks.size() + a.n_predict > max_ctx)
+        std::fprintf(stderr, "hy4: warning: --cpu past %lld tokens the sparse layers attend to every key: the k-pool "
+                     "indexer runs in the engine path only, so this attention is not the model's\n", (long long) max_ctx);
     // Rows [from, to) of the sequence: their positions and their Engram histories (raw ids, newest first, -1 before
     // the start).
     auto run = [&](int64_t from, int64_t to, Hy4KvCache * cache, std::vector<float> & logits) {

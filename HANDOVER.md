@@ -70,8 +70,10 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
   cost two expert layers (27 of 42 instead of 29) and 7% of the prompt (434.3 against 469 tok/s) for 1 GiB of slack.
   A 2.99 GiB block seen on the cards after a death was the hung process, not a driver leak: `VM memory stats ... is
   non-zero when fini` when it finally exited. Measurements: docs/hy4/GGUF_NOTES.md, "The seven deaths of 2026-11-21".
-  Left open: make the graph stable instead (`n_pool` / `n_top` / `n_sel` bucketed like `n_kv`); how far a *single*
-  generation (not a prompt) goes, and the 64K case where the prefetch turns itself off, not measured.
+  Making the graph stable instead (bucketing the indexer's pool) was tried the same evening and **measured worthless**:
+  the graph counters do not move and the speed neither, with the graphs off entirely the run is as fast - the churn is
+  `data` pointers, not shapes. Left open: how far a *single* generation (not a prompt) goes, and the 64K case where the
+  prefetch turns itself off, not measured.
 
 ## Open
 

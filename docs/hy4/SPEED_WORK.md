@@ -110,8 +110,19 @@ pairs: prompt 445.3 / 469.3 -> 469.4 / 469.2 tok/s, decode 23.28 / 22.77 -> 23.3
 22.85 -> 23.03). So the prompt is unchanged and the decode +2-4%: the capture was worth less than the compute it
 skipped, and 4,000-token runs now finish. On in the three hy4 configurations.
 
-The way to get the rest back is to make the graph stable - bucket `n_pool` / `n_top` / `n_sel` the way `n_kv` is
-bucketed to 256, so the nodes and their buffers keep still and one capture is reused: not tried.
+The way to get the rest back looked like making the graph stable - bucket `n_pool` / `n_top` / `n_sel` the way `n_kv` is
+bucketed to 256, so the nodes keep still and one capture is reused. Tried the same evening (`local/hy4-graph-stability-
+check.sh`; the change itself, `HY4_POOL_PAD`, is parked in `local/hy4-pool-pad-wip.patch` and not in the tree): it
+changes **nothing**. The graph counters are the same to the unit (`12,288 computes: 480 launched, 80 captured, 11,728
+direct, 16 keys`, the same 30 graphs switched off by the ceilings) and the speed is the same - prompt 467.0 against
+477.3 / 477.0 tok/s, decode 25.99 against 24.98 / 25.64, the differences the usual VM noise. Switching the graphs off
+altogether (`GGML_CUDA_DISABLE_GRAPHS=1`, so all 12,288 computes run node by node) gives prompt 477.6 and decode
+25.20: the same speed again, and on the prompt the graph path costs ~2% rather than paying for itself.
+
+Why: the diff said it already - what moves between two computes is the nodes' `data` **pointers** (1,548 of 1,874), not
+their shapes, and a key switched off by the ceiling stays switched off. Bucketing the shapes cannot stop pointer churn.
+So the graph is not where the decode time is, and there is nothing to win making it stable; the time is the experts of
+the 13 RAM layers reading ~1.0 GB a round at the RAM's bandwidth, and the host work around them.
 
 ## Next candidates (estimates, not measured)
 
@@ -140,5 +151,9 @@ bucketed to 256, so the nodes and their buffers keep still and one capture is re
 - Quality: `--ppl FILE -c 4096` with `--ppl-save` once and `--ppl-ref` after (KL and top-1 against it); a change of
   kernels alone moves KL by ~0.1 on this 2-bit model. `HY4_PPL_BINS=N` prints perplexity per N positions.
 - Long contexts: `--prompt-ids @FILE` reads the ids from a file (a 66K prompt does not fit in argv).
+- A **pseudo-random** id prompt is a bad decode harness: on `/tmp/hy4-p16k.ids` (16,384 random ids, regenerated
+  2026-11-21) the model settles on repeating one token and the MTP draft hits 749 of 751 - 2.00 tokens a round, decode
+  25.99 tok/s where real text gives 23.4-24.5. Use it for the prompt and for memory/room measurements, never for
+  acceptance or decode.
 - Do not kill the engine with `pkill -f` patterns (they matched the agent's own shell); stop background loops
   with their task, not only the engine, or the loop starts the next run.
