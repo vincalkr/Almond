@@ -14,7 +14,7 @@
     "--fused-hc",
     "--dense-q8",
     "--reserve-mib",
-    "2400",
+    "1400",
     "--fused-proj",
     "--fused-indexer",
     "--gather-attn",
