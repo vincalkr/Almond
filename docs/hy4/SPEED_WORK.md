@@ -141,7 +141,48 @@ the 13 RAM layers reading ~1.0 GB a round at the RAM's bandwidth, and the host w
 - Not worth it (measured): hot-expert cache in the ~2 GB left (top 60 experts of a RAM layer cover 14.7% of its
   picks); a smaller `--reserve-mib` (an expert layer is ~1.3 GB); DFly2 (`--dfly`, ~2 tokens a round, never faster
   than MTP); `--down-requant`; wave64; one card; a fused `rms_norm + weight` kernel (nodes 4,961 -> 4,704, no speed
-  change, KL 0.035: the small launches are not the decode cost).
+  change, KL 0.035: the small launches are not the decode cost); a **stable graph** (tried the same evening, worth
+  nothing: the graph churn is pointers, and the graphs switched off cost nothing).
+
+### What Strata's Hy4 engine does, read 2026-11-21 (MIT source, not measured here)
+
+Strata 0.2.18 (2026-11-21) runs Hy4-Flash natively with its own engine, `strata-hy4`, and the source is public:
+`engine/src/hy4flash/run/` is a hand-written HIP forward of the 42 layers (`hy4_graph.hip.h`, 155 kB) with its own
+kernels, indexer, Engram reader and speculator. It is a different pack (SQ-64/96/128, its own `S_K` expert codes, hot
+experts on the card) and its quoted speeds are for RTX PRO 6000 / 5090 / RX 9070 XT / Strix Halo / M5 Max - no RX 7900
+XTX number, so not comparable with our 23.4-24.5 tok/s. Three mechanisms in it are where we have a wall:
+
+- **The KV grows instead of being reserved.** `Runner`: "starts at `kv_alloc_pos` positions (16,384 by default on
+  discrete cards) in VRAM, grows in 16K increments in VRAM up to `kv_dev_limit` (or max_ctx), and spills cleanly to
+  pinned host memory if VRAM runs out". We reserve the whole 3.59 GiB of `--kv-q8` for 262,144 rows at load, every
+  session, whatever the session reads: that room is 2,7 GiB of experts we never get back at 16K (`place()` charges
+  it before choosing, and the room says so). A KV that starts at 16K rows, grows by 16K and spills the coldest rows
+  to pinned host is the same shape of win as one more expert layer, ~+2% decode, and it removes the "no room at long
+  context" class for good.
+- **CPU experts as jobs, with the file reads hidden behind the compute of earlier waves** (`hy4_cpu_experts.h`): a
+  pinned-thread pool, one arena for the resident expert bodies (huge-page advised, mlock), activations quantized once
+  to `Q8_1_G64`, and for the cold experts a wave schedule - "wave 0 = resident experts + cold cache hits, then the
+  missed cold experts, read by reader threads with large preads (O_DIRECT by default) ... issued when the job started
+  and overlap the earlier waves' compute" - with a 256 MB LRU slot cache. Their stats carry exactly the number we
+  would need: `phase_s[5]` (plan / quantize z / gate-up / down / combine) and `cold_wait_s`, "seconds the pool waited
+  for reads (**not hidden** behind the compute of earlier waves)". Our 13 RAM layers are the same problem with no
+  overlap at all: 21 ms of a 73 ms round sits in front of the GPU.
+- **Speculation is a tree with the attention and the indexer told about it.** `TreeSpec`: "up to 8 nodes rooted at
+  anchor node 0, topological order `parent[i] < i`" with an ancestor table, handed to the MLA (`to_mla_pos()`) and to
+  the indexer (`to_idx_tree()`); `Tree-8 CUDA Graph capture and replay across all 38 recomputed rows, bitwise-exact
+  with ungraphed execution` (release notes). Alongside the MTP draft there is a **suffix drafter**
+  (`spec/suffix_drafter.cpp`, ~120 lines: a hash of the last three tokens -> the WAYS most recent positions, extend
+  the longest match, propose what followed) and a policy (`spec/draft_policy.cpp`) that *measures* the round time per
+  window size and context bucket and drafts only where acceptance against that measured cost pays, with priors by
+  match length (0.75 / 0.88 / 0.93 / 0.96) and forced probes so a cheap window is never priced out forever. We have
+  neither the tree nor the free drafter, and our window size is a static flag.
+
+What does **not** transfer: their `S_K`/AVX-512 VNNI expert kernels (our CPU experts already run AVX-512 and read at
+48,4 GB/s against the ~65 GB/s the RAM gives, so the bus is the limit, not the kernel); their rank tables (the
+`.strata` file stores each layer's 512 experts hot-to-cold and `make_mask_rank_range` puts "the coldest 400 of every
+layer in RAM, the hottest 112 on the GPU" - with LatentMoE's routing nearly uniform over 512 experts, our measured
+top-60-of-a-layer covering 14.7% of the picks says per-expert ranks buy little where whole layers are bought instead);
+and their Tree-8 at 38 rows, which costs ~2,4x our 2-row check on this box (the row cost table above).
 
 ## How to measure
 
