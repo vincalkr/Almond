@@ -65,10 +65,13 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
   `GGML_CUDA_GRAPH_CAPTURE_MAX=128` for the process (vendored ggml, `tools/v41/ggml/graph-recapture-guard.patch`).
   Measured: the captures stop at 82 and the free room stops moving (`card 0 1628 / card 1 1834 MiB` from step 512 to
   1408, where it used to fall 100 -> 0 in 448); decode 24.54 tok/s (was 22.8-23.3 without the ceilings);
-  `--reserve-mib 2400` (was 1400) costs the prompt 469 -> 434 tok/s as extra insurance. A 2.99 GiB block seen on the
-  cards after a death was the hung process, not a driver leak: `VM memory stats ... is non-zero when fini` when it
-  finally exited. Measurements: docs/hy4/GGUF_NOTES.md, "The seven deaths of 2026-11-21". Left open: make the graph
-  stable instead (`n_pool` / `n_top` / `n_sel` bucketed like `n_kv`); a session past 140K tokens not measured.
+  `--reserve-mib 2400` was tried for it and put back to 1400: with the ceilings a resumed session read prompts up to
+  **171,646 tokens** - past the 140K where it had died - without one `ROCm pool[0] ... flushing` line, and 2400 would
+  cost two expert layers (27 of 42 instead of 29) and 7% of the prompt (434.3 against 469 tok/s) for 1 GiB of slack.
+  A 2.99 GiB block seen on the cards after a death was the hung process, not a driver leak: `VM memory stats ... is
+  non-zero when fini` when it finally exited. Measurements: docs/hy4/GGUF_NOTES.md, "The seven deaths of 2026-11-21".
+  Left open: make the graph stable instead (`n_pool` / `n_top` / `n_sel` bucketed like `n_kv`); how far a *single*
+  generation (not a prompt) goes, and the 64K case where the prefetch turns itself off, not measured.
 
 ## Open
 

@@ -928,17 +928,24 @@ Two changes from that, both for the room, not for speed:
   after N graph rebuilds (captures or updates) of any kind, nothing is captured any more. In the hy4 configurations:
   128, with `GGML_CUDA_GRAPH_RECAPTURE_MAX` down from 200 to 16. Bounded room either way: ~128 x 2 MiB rather than
   17 x 200 x 2 MiB.
-- `--reserve-mib 2400` in `local/hy4-local.json` and `local/hy4-local-vision.json` (was 1400): the plan reserved
-  room for the compute buffers of the *first* graph only; 1,000 MiB more free on each card is insurance for what a
-  longer session asks. `1400` is one line back if the speed matters more.
+- `--reserve-mib 2400` was tried in `local/hy4-local.json` and `local/hy4-local-vision.json` (was 1400) and **put
+  back to 1400**: once the captures are bounded the room stops being the problem. Both measured at 256K with a 16K
+  prompt: 2400 leaves the cards 1.84 / 2.04 GiB free with 27 of 42 layers' experts in VRAM, 434.3 prompt and 24.54
+  decode tok/s; 1400 leaves 0.45 / 1.01 GiB, 29 of 42 layers, 469 prompt and 23.4-23.75 decode. So 2400 buys about
+  1 GiB of slack on each card for two expert layers and 7% of the prompt. The session it was meant for - resumed at
+  17:43 with the ceilings on and 1400 - read prompts up to 171,646 tokens (past the 140K where it had died) and its
+  log holds **no** `ROCm pool[0] ... failed, flushing` line at all, where the 140K death had two within a minute of
+  dying.
 
 Measured after both, the same 16,384-token prompt at 256K, greedy, 1,499 tokens: the captures stop at **82** (12,288
 computes: 432 launched, 82 captured, 11,774 direct; 18 keys, 44 graphs switched off by the two ceilings) and the
 room **stops moving**: `card 0 1628/24560 MiB free card 1 1834/24560` from step 512 to step 1408, where before the
 ceiling the same trace fell 100 -> 0 MiB in 448 steps. Speed: prompt 434.3 tok/s against the 469 of `--reserve-mib
 1400`, decode 24.54 against 23.37-23.75 - the prompt is the price of the reserve, not of the ceilings (the ceilings
-alone were free: measured +2-4% decode above). So the order to try if 140K is not enough: ceilings first (free),
-reserve second (a few percent).
+alone were free: measured +2-4% decode above). So the order to try if a session is not enough: ceilings first (free),
+reserve second (a few percent) - and the configurations ship 1400. The flat trace above is the 2400 run's; at 1400 the
+same question was answered by the real session instead (171,646 tokens read, no pool flush line), not by
+`HY4_VRAM_STATS`.
 
 ## What is not here
 
