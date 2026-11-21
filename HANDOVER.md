@@ -57,10 +57,27 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 - Streams send events while a long prompt is read or a call written inside the thinking is held; dsh's own idle
   timeout (300 s, pi-ai) must still be raised for a local provider (`streamIdleTimeoutMs`).
 - `fit_max_tokens` on: a client's max_tokens beside a long prompt gets the room left, not a 400.
+- **Hy4-flash dying at the last MiB of the cards** (segfaults on 2026-11-21 inside `libamdhip64`, at one non-temporal
+  copy with a null destination; the kernel says `*ERROR* Not enough memory for command submission!` on card 0 before
+  them): hy4's graph is unstable - 1,548 of its 1,874 trunk nodes change their `data` pointer between two computes -
+  so ggml re-captured it thousands of times a session, and each ROCm capture/instantiation keeps ~2 MiB on the card.
+  Two ceilings now, in the three hy4 configurations: `GGML_CUDA_GRAPH_RECAPTURE_MAX=16` per graph and
+  `GGML_CUDA_GRAPH_CAPTURE_MAX=128` for the process (vendored ggml, `tools/v41/ggml/graph-recapture-guard.patch`).
+  Measured: the captures stop at 82 and the free room stops moving (`card 0 1628 / card 1 1834 MiB` from step 512 to
+  1408, where it used to fall 100 -> 0 in 448); decode 24.54 tok/s (was 22.8-23.3 without the ceilings);
+  `--reserve-mib 2400` (was 1400) costs the prompt 469 -> 434 tok/s as extra insurance. A 2.99 GiB block seen on the
+  cards after a death was the hung process, not a driver leak: `VM memory stats ... is non-zero when fini` when it
+  finally exited. Measurements: docs/hy4/GGUF_NOTES.md, "The seven deaths of 2026-11-21". Left open: make the graph
+  stable instead (`n_pool` / `n_top` / `n_sel` bucketed like `n_kv`); a session past 140K tokens not measured.
 
 ## Open
 
 - Hy4-flash speed work: state, measurements and what is being tried in `docs/hy4/SPEED_WORK.md` (2026-11-20).
+- `--ipool-f16` (the indexer's pooled keys as F16): tried 2026-11-21 and not shipped - 434.3 -> 46.6 prompt tok/s at
+  256K because the F16 pool leaves the fused indexer and casts the pool to F32 inside the graph, for 80/120 MiB and no
+  expert layer, and KL 0.00000 / top-1 100.00% against the F32 pool (docs/hy4/GGUF_NOTES.md). Its 275 lines are
+  parked in `local/ipool-f16-wip.patch` (not tracked) for whoever teaches `ggml_lightning_indexer` to read F16 pool
+  keys; that same staged diff also carried the prefetch staging into `place()`'s budget, which is committed.
 
 - **Qwen3.8-27B:** images (CPU encoder, 300 image tokens: a large screenshot's small text is not legible, as on
   Flash-Next) and conversations on disk work; measured on a few pictures and one restart, not in long agent sessions. The 4-token verify window costs 1.4 decode tokens (ggml's MMVQ is

@@ -596,8 +596,21 @@ The 66K decode at 1,024-token steps was noise: 16K prompt, two alternate runs, 5
 `--kv-q8` (configurations): the full layers' KV rows as Q8_0 (the sliding rings stay F16); the gather and, below
 top-k, a get_rows of the rows in use give the attention its F16. At 256K one more expert layer in VRAM (28 -> 29),
 23.55 / 23.94 -> 24.21 / 24.44 tok/s (short prompt, alternate runs); against the reference KL 0.107, top-1 90.4%.
+Re-measured 2026-11-21 with the graph ceilings on and `--reserve-mib 2400`, 16K prompt and 1,500 greedy tokens,
+alternate configuration otherwise identical: with it 27 of 42 layers' experts in VRAM, 434.3 prompt / 24.54 decode
+tok/s; without it (F16) 25 of 42, 434.0 / 22.88. So the Q8 buys two expert layers and +7.3% decode, and costs the
+KL above. The room it saves is fixed at load, not per session: 12 full layers x (576+512) rows x 262,144 = 6.38 GiB
+in F16, 3.59 GiB in Q8_0 - 2.79 GiB, about two expert layers.
 A smaller `--reserve-mib` does not help: 1,100 and 900 leave ~1 GB a card free and the same 29 layers (an expert
 layer is ~1.3 GB), 700 puts 31 in VRAM and the compute buffers no longer fit.
+
+`--ipool-f16` (the indexer's pooled keys as F16 instead of F32) was tried the same afternoon and **left out**: what
+it frees is the pool itself and nothing more - the cards gained 80 MiB (card 0) and 120 MiB (card 1) at 256K and no
+expert layer moved into VRAM (27 of 42 with and without) - and an F16 pool drops the fused indexer: the keys are cast
+to F32 inside the graph at every compute. Same 16K prompt at 256K: 434.3 -> **46.6 tok/s** prompt, 24.54 -> 23.15
+decode. And there was nothing to win in quality either: against the F32 pool at 4K over 8,188 scored rows, KL
+0.00000 and top-1 agreement 100.00%. To do it properly the fused `ggml_lightning_indexer` would have to take F16
+pool keys itself.
 
 `--ram-requant TYPE` (opt-in, off): `ffn_down_exps` of the layers whose experts stay in RAM (Q4_K in the file)
 requantized at load, the cards' layers untouched. 2026-11-20, the configuration's flags at 256K: quality on a
@@ -707,7 +720,10 @@ The gain adds to the 2,048-token steps of the previous section: `local/hy4-local
 runs `--ubatch 2048 --expert-layers-gpu 26 --prefetch-experts`. Same 16K prompt and 100 generated tokens: prompt
 480.3 -> 528.9 tok/s, decode 21.67 -> 20.62, all 336 copies staged, `HY4_STEP_STATS` compute 35.29 s. Against the
 configuration before these two changes (426.8 tok/s prompt) that is +24% prompt for about -2% decode; the three fewer
-expert layers in VRAM make it an alternative rather than the default.
+expert layers in VRAM make it an alternative rather than the default. (2026-11-21: `place()` charges the staging to
+card 0's budget instead of the staging eating what `--reserve-mib` leaves, so card 0 should end with its ~1.1 GiB free
+*plus* the staging rather than 0.45 GiB between the staging and cuBLAS - expected, not measured again yet. The 64K
+case, where the flag turned itself off, has to be measured too.)
 
 A 4,096-token step does not fit: its compute buffers need 3,480 MiB on card 1 (1,733 MiB at 2,048), so the reserve
 halves the step to 2,048. Building the larger graph also ran out of the 24K-node graph context (`ggml_new_object`
@@ -726,6 +742,203 @@ block 128 and 37,376 bytes of dynamic shared memory after a successful `hipFuncS
 internal abort frames. The crash is in ROCm 7.14's runtime, not in a ggml-side check (the kernel has no device-side
 assert or printf). Forcing the small ncols=8 instance (9 KiB of shared memory instead of 37 KiB) did not help either, so it is not the
 LDS limit. Reverted; the attention stays on the tile kernel. A fix needs a ROCm-level investigation.
+
+## Decode: where the launches are, and what did not help (2026-11-20)
+
+A rocprofv3 kernel trace of ~19 generated tokens at 256K, `local/hy4-local.json` as it is now, shows 31,436 kernel
+dispatches and 417 ms of kernel time in a 1,162 ms window — 64% is gaps between kernels. By count the leaders are
+`quantize_q8_1` (3,862), `copyBufferRectAligned` (3,467), `mul_mat_vec_q` Q8_0 (3,246), `rms_norm_f32` (3,342) and
+`k_bin_bcast` (1,628, the learned norm weight); by time the matvecs and attention: `mul_mat_vec_q` 114 ms,
+`flash_attn_tile<576,512>` 56 ms, `mul_mat_vec_q_moe` IQ2_XXS 69 ms, `mul_mat_vec_bf16_rows` 20 ms.
+
+Tried a fused `rms_norm + weight` op (`GGML_OP_HY4_RMS_NORM_MUL`: one block per row, warp-shuffle sum of squares,
+`__fmul_rn` twice so the two products round as the stock composite does; CPU fallback in ops.cpp). It is active
+(the 1,024-token graph goes 4,961 -> 4,704 nodes) but the decode does not move: 16K prompt 476.9 -> 479.7 tok/s, both
+inside the noise, and the quality moves (4K KL 0.035 against the composite, top-1 84.17% — the sum-of-squares order).
+So the small launches are not what a decode round costs, and the op was reverted. The remaining decode levers are the
+matvec and flash-attention kernels themselves (the WMMA path is blocked, see above), not the norm/quantize launches.
+
+## The engine dies and the cards are loaded again (2026-11-20)
+
+"What looks like the engine loading card 0's VRAM again" is the process dying and the server starting it again at the
+next request: every start uploads `41.3 GiB of weights in 27 s`, reads the 59.0 GiB Engram table into RAM (4.9 s) and
+registers 23.2 GiB of CPU weights - about 50 s before the first token. `local/router.log` names hy4's log in five
+`the engine stopped unexpectedly (exit code -11)`: four on 2026-11-20, and one around 2026-11-17, long before
+`--prefetch-experts` existed. The kernel log (`journalctl -k`) has the four of the 20th, 12:28:50, 20:43:58, 21:09:40
+and 21:16:47, all at one instruction of one library:
+
+    almond-engine[...]: segfault at 0 ip 000078d8238b9f78 sp ... error 6 in libamdhip64.so.7.14.60850-0000000[...]
+
+That address is file offset 0x6b8f78 (the r-x segment maps 0x1ae000 -> 0x1af000) and it is a non-temporal copy loop
+inside the HIP runtime; the faulting instruction is `movntdq %xmm0,(%rdi)` with `rdi = 0`, so the runtime is copying
+into a buffer it does not have. The engine's log says nothing at that moment - the last lines of all three evening
+runs are `ggml_backend_cuda_graph_compute: CUDA graph warmup complete`, the router was mid-generation
+(`[high] thinking: ... 17.8 tok/s`) - and `ulimit -c` is 0, so there is no core to read.
+
+`--prefetch-experts` is not the cause: the 12:28 crash is from a run without the flag and without registered pages,
+same instruction. It does take room that nothing accounted for, though: the 660 MiB staging was allocated after the
+compute buffers, and at a byte-for-byte identical layout (`ROCm0 953 MiB ROCm1 865 MiB CPU 304 MiB`) card 0 went from
+`1.10 GiB free` to `0.45 GiB free`; one of those runs prints `ROCm pool[0]: alloc of 44.89 MiB failed, flushing
+107.58 MiB of cached buffers and retrying`. What the four crashes have in common is host memory rather than VRAM:
+59.0 GiB of Engram table in RAM, 41.3 GiB uploaded, 23.2 GiB registered and so unreclaimable, on 122 GiB with no swap
+(at 23:50:48 the kernel OOM-killed an almond-engine with `anon-rss:86120808kB`). A runtime allocation failing inside
+its own copy path is the plausible way to reach that null pointer. Not confirmed: it needs a run with
+`--engram-place ssd`, and one where the machine is not holding two engines at once.
+
+Fixed in the prefetch while here (not re-measured yet):
+
+- `place()` charges the staging to card 0's budget, so `--reserve-mib` is no longer eroded by it; the 64K case, which
+  turned the prefetch off for lack of room, may now fit instead.
+- a copy larger than the staging is left to ggml: the largest expert copy is `ffn_down_exps` at 648 MiB against a
+  660 MiB staging, and `hipMemcpyAsync` does not check - it would have written past the end of the buffer.
+- the recorded copy order is kept per step length, and a step that does not match it goes to ggml whole and is
+  recorded again for the next step. Before, the record was cleared in the middle of a step, and since `prefetch_first`
+  skips steps under 32 tokens without re-arming, every decode step appended its 39 expert copies to that record
+  without limit and the prefetch stayed disarmed until the next prompt step.
+- a HIP failure on the private stream now says which call (`prefetch off: ...`), and `--verbose` prints
+  `prefetch: 660 MiB staged on card 0, X GiB free with it` and, beside the pinned weights,
+  `X GiB of RAM available after it`. The `prefetch: N copies staged, M fallbacks` summary printed only in `~Impl`,
+  which a signal skips: none of the crashed runs shows it.
+- `serve/server.py`'s death note no longer blames RAM for every death: on a signal it names it (SIGSEGV, SIGABRT,
+  ...) and says where the faulting instruction is (`journalctl -k --since '-2 hours' | grep -i segfault`); the RAM
+  hint stays for SIGKILL. That is why four segfaults were read as "running out of RAM" for a day.
+
+## The seven deaths of 2026-11-21, and the graphs that never settle
+
+This boot's kernel log (`journalctl -k`) has seven segfaults, 10:13:05, 10:16:27, 10:24:57, 10:28:28, 10:32:25,
+10:37:05 and 10:39:38, all `almond-engine[...]: segfault at 0 ... error 6 in libamdhip64.so.7.14.60850-0000000` at
+the same address in the library. The kernel prints the faulting file offset in the `[...]`: `0x6b8f78`. Checked
+against the library: its r-x segment is file offset `0x1aea70` at vaddr `0x1afa70` (so file = vaddr - 0x1000) and the
+instruction there is `movntdq %xmm0,(%rdi)` with `%rdi = 0` - one loop of a 16-bytes-at-a-time non-temporal copy that
+ends with `sfence` and a read of the last byte. The runtime is writing into a buffer it does not have.
+
+All seven are runs of the 256K configuration: `local/serve-hy4-engine.log` has nine `engine started` lines between
+09:59 and 10:37, and pairing every segfault with the start before it gives lives of 2.5 to 6.5 minutes. The two runs
+in `local/serve-hy4-fast-engine.log` (10:04:00, 10:04:50) are not among them.
+
+What each of them was doing, from its own log: the last line is `ggml_backend_cuda_graph_compute: CUDA graph warmup
+complete`, and that is exactly where ggml starts a capture (`cudaStreamBeginCapture`, then `cudaGraphInstantiate` or
+`cudaGraphExecUpdate`). And the graphs never settle: the run started 10:37:10 and dead at 10:39:38 (148 s) printed
+**3,728 `CUDA graph warmup reset` and 3,779 `CUDA graph warmup complete`**. Counting decode rounds only (one MTP
+round ~73 ms, the prompt not counted), those 148 s hold about 2,000 rounds and so roughly 8,000 graph computes over
+the two cards (draft and trunk, two backends each) - so `ggml_cuda_graph_update_required` finds different node
+properties on nearly every one, and the ~4,700-node graph is captured over and over. `shape()` is why some of that is
+real: `n_pool`, `n_top` and `n_sel` grow with the position (`n_kv` is rounded to 256, the others are not).
+
+The room the runtime is asked for is small and the cards have almost none: the 256K configuration prints
+`prefetch: 660 MiB staged on card 0, 0.45 GiB free with it` and `compute buffers: ROCm0 953 MiB ROCm1 865 MiB CPU 304
+MiB; card 0 0.45 GiB free; card 1 1.01 GiB free`; the `-fast` configuration, which is not among the deaths, leaves
+`card 0 4.75 GiB free; card 1 0.71 GiB free`. So: a copy loop in a runtime allocation that could not be answered,
+inside a capture loop that runs thousands of times, on a card with 460 MiB left. `local/serve-hy4-engine.log` already
+shows the pool being squeezed: `ROCm pool[0]: alloc of 70.88 MiB failed, flushing 106.27 MiB of cached buffers and
+retrying`. Host RAM is not the story for these seven: the engine prints `46.0 GiB of RAM available after it` at the
+pin, and the kernel log has no OOM entry for them.
+
+Reproduced and measured the same day (below, "What the measurement said"): the cards do run out of room, the capture
+loop is what eats it, and a ceiling on the captures stops both the death and the creep.
+
+Added to measure it, all off by default:
+
+- `GGML_CUDA_GRAPH_DIFF=N` (vendored ggml, `tools/v41/ggml/graph-recapture-guard.patch`): prints the first N nodes
+  whose properties changed and what moved - `data`, `ne`, `nb`, `srcK-data/ne/nb`, or the node count. That names the
+  tensor that forces the recapture.
+- `GGML_CUDA_GRAPH_RECAPTURE_MAX=N`: after N property changes, when they are more than a quarter of that graph's
+  computes, the graph is not captured any more: its captured graph and its executable are destroyed and the graph runs
+  node by node. A capture of 4,700 nodes costs more than the launch it saves, and it is what asks the runtime for
+  room. `GGML_CUDA_GRAPH_STATS=1` (already there) counts launched / captured / direct.
+- `HY4_VRAM_STATS=N` (`src/hy4/hy4_engine.cpp`): free VRAM per card every N steps, so a session's creep is visible
+  instead of inferred.
+- `--min-free-mib N` (hy4): the prompt step halves - the same fallback a compute buffer that does not fit uses - until
+  every card would have N MiB left with that step's compute buffers and, on card 0, the prefetch staging in. It counts
+  what the reserve plans rather than what `hipMemGetInfo` says, because ggml's pool caches what a failed attempt
+  frees. With `--verbose` the engine now warns under 512 MiB:
+  `hy4: warning: N MiB left on the cards with the compute buffers in: the HIP runtime may find no room there` - for
+  the 256K configuration N is the order of 460, the `0.45 GiB` the load line prints once the 953 MiB step buffers and
+  the 660 MiB staging are counted. Without the flag the placement is exactly as it was.
+- `tools/hy4/graph-vram.hip` (`hipcc -O2 -o /tmp/graph-vram tools/hy4/graph-vram.hip`): the same questions with no
+  model and no ggml - what a capture + `hipGraphInstantiate` takes on a card, what recapturing gives back, what K
+  graphs kept alive at once cost, whether `hipGraphExecUpdate` leaks, and what the runtime does when the card has no
+  room: an error code, or a signal like the engine's. It takes a `fill_MiB` argument to put the card where hy4 leaves
+  it (`/tmp/graph-vram 0 23552 8 4096 20`).
+- `local/hy4-crash-check.sh`: 16,384-token prompt and 3,000 greedy tokens, four runs - as it is, with
+  `GGML_CUDA_GRAPH_RECAPTURE_MAX=200`, with `--min-free-mib 1024`, and as it is again - with the cards' used VRAM
+  sampled every 5 s.
+
+### What the measurement said (2026-11-21, this machine)
+
+`-c 262144`, the 16,384-id prompt of `local/hy4-prefetch-check.sh`, greedy, `--ubatch 1024 --prefetch-experts`,
+power-tune on, the cards to themselves.
+
+- **It reproduces.** Unchanged, the engine dies of SIGSEGV (exit 139) between 1,536 and 1,920 generated tokens -
+  17.9K to 18.3K tokens into the session - with graph warmup lines as its last words, as the server's runs have.
+- **The room really goes.** `HY4_VRAM_STATS=64`: card 0 free MiB at steps 64, 128, 192, 256, 320, 384, 448 =
+  100, 66, 32, 76, 44, 10, 0; card 1 at steps 64..768 = 704, 640, 562, 498, 436, 376, 300, 238, 174, 102, 38, 0.
+  After both read 0 the death follows within a minute.
+- **Why ggml recaptures.** `GGML_CUDA_GRAPH_STATS=1` over 8,192 computes: 4,719 launched, **1,624 captured**, 1,849
+  direct, 16 keys. `GGML_CUDA_GRAPH_DIFF=4` says what moves: **1,548 of the 1,874 trunk nodes** (615 of 1,604 in the
+  draft graph) change their `data` pointer between two computes, and the two small split graphs 36/95 and 57/126
+  through `src1-data`. Almost nothing of the graph is stable, so it is captured again and again - ~1,600 captures a
+  session, ~50 a second while the prompt runs.
+- **What the runtime keeps.** `tools/hy4/graph-vram.hip` with 4,096-node graphs, the card deliberately left with
+  968 MiB free (hy4 leaves it 465): every capture + `hipGraphInstantiate` cycle keeps about **2 MiB on the card**, and
+  `hipGraphDestroy` / `hipGraphExecDestroy` do not give it back (20 re-captures: -10 MiB; 20 `hipGraphExecUpdate`:
+  -18 MiB; 8 graphs kept at once: 2 MiB each). Down to that 968 MiB it answers with error codes, never a signal.
+  1,624 captures x ~2 MiB is ~3.2 GiB - which is what the cards had.
+- **The ceiling fixes it.** `GGML_CUDA_GRAPH_RECAPTURE_MAX=200`: 6 of the 16 keys print "201 recaptures in 389
+  computes: not capturing this graph any more"; as ggml destroys those graphs the room comes back (card 0 204 MiB and
+  card 1 452-678 MiB free at 17.4-19.9K tokens, against 0 and 0) and the run finishes 4,000 tokens, where without it
+  the engine dies at ~1,500-1,900.
+- **And costs nothing.** Same prompt, alternate pairs, 1,000 tokens: baseline prompt 445.3 / 469.3 tok/s, decode
+  23.28 / 22.77; capped prompt 469.4 / 469.2, decode 23.37 / 23.75. At 400 tokens: baseline 464.6 / 22.00 and
+  469.5 / 22.85, capped 469.4 / 23.03. So the prompt unchanged and the decode +2-4%: re-capturing 1,874 nodes every
+  other compute was worth less than running those nodes.
+
+Now in the configurations: `GGML_CUDA_GRAPH_RECAPTURE_MAX=200` in the `env` of `local/hy4-local.json`,
+`local/hy4-local-vision.json` and `local/hy4-local-fast.json`. `--min-free-mib 1024` cannot be met at 256K (card 0
+has 465 MiB with the 1,024-token step and the staging, and halving the step never reaches 1 GiB), so the flag now
+takes the largest step that fits and says so instead of failing the load. Whether a larger `--reserve-mib` (one
+expert layer less in VRAM) buys anything above the ceiling: not measured.
+
+### The 140K death of the same afternoon: the ceiling was per graph
+
+The session that resumed the 124,817-token conversation (`local/serve-hy4-engine.log`, run started 12:19:12,
+`GGML_CUDA_GRAPH_RECAPTURE_MAX=200` in) got to ~140K tokens and died. Its log says why the ceiling was not enough:
+**17 different graphs reached their 200 recaptures** ("201 recaptures in 475 computes: not capturing this graph any
+more") - the ceiling is per graph *key*, and a new key comes with every 256-token bucket of `n_kv`, so what those 17
+graphs hold is the order of 17 x 200 x 2 MiB ~ 6.8 GiB. Then ggml's pool starts thrashing
+(`ROCm pool[0]: alloc of 44.89 MiB failed, flushing 105.87 MiB of cached buffers and retrying`, then
+`64.58 MiB failed, flushing 72.21 MiB`), and the kernel, on card 0 (PCI 03:00.0):
+
+```
+nov 21 12:30:39 amdgpu 0000:03:00.0: [drm] *ERROR* Not enough memory for command submission!
+```
+
+After that the engine stopped making progress but stayed alive, holding its VRAM, until it was killed:
+
+```
+nov 21 12:35:12 amdgpu 0000:16:00.0: VM memory stats for proc almond-engine(1298498) ... is non-zero when fini
+```
+
+That is the 2.99 GiB the cards kept until `./stop.sh`: nothing is leaked by the driver, the room belonged to a
+process that had stopped working but had not exited. A dead engine takes its cards with it only when it exits.
+
+Two changes from that, both for the room, not for speed:
+
+- `GGML_CUDA_GRAPH_CAPTURE_MAX=N` (vendored ggml): a ceiling for the **whole process** next to the per-graph one -
+  after N graph rebuilds (captures or updates) of any kind, nothing is captured any more. In the hy4 configurations:
+  128, with `GGML_CUDA_GRAPH_RECAPTURE_MAX` down from 200 to 16. Bounded room either way: ~128 x 2 MiB rather than
+  17 x 200 x 2 MiB.
+- `--reserve-mib 2400` in `local/hy4-local.json` and `local/hy4-local-vision.json` (was 1400): the plan reserved
+  room for the compute buffers of the *first* graph only; 1,000 MiB more free on each card is insurance for what a
+  longer session asks. `1400` is one line back if the speed matters more.
+
+Measured after both, the same 16,384-token prompt at 256K, greedy, 1,499 tokens: the captures stop at **82** (12,288
+computes: 432 launched, 82 captured, 11,774 direct; 18 keys, 44 graphs switched off by the two ceilings) and the
+room **stops moving**: `card 0 1628/24560 MiB free card 1 1834/24560` from step 512 to step 1408, where before the
+ceiling the same trace fell 100 -> 0 MiB in 448 steps. Speed: prompt 434.3 tok/s against the 469 of `--reserve-mib
+1400`, decode 24.54 against 23.37-23.75 - the prompt is the price of the reserve, not of the ceilings (the ceilings
+alone were free: measured +2-4% decode above). So the order to try if 140K is not enough: ceilings first (free),
+reserve second (a few percent).
 
 ## What is not here
 

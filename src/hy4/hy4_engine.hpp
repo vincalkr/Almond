@@ -23,6 +23,8 @@ struct Hy4EngineOptions {
     int64_t n_ubatch = 512;        ///< tokens per graph during the prompt
     int threads = 0;               ///< CPU threads for the experts in RAM; 0 = hardware threads / 2
     int64_t reserve_mib = 2048;    ///< VRAM left free per card for the compute buffers
+    int64_t min_free_mib = 0;      ///< with the compute buffers in: least VRAM left per card, or the prompt step
+                                   ///< halves (--min-free-mib); 0 = as it was, whatever the reserve leaves
     int expert_layers_gpu = -1;    ///< routed-expert layers in VRAM; -1 = as many as fit
     std::string engram = "auto";  ///< the Engram table: ram, ssd (O_DIRECT rows), or auto (RAM when it fits)
     bool dense_q8 = false;

@@ -14,7 +14,7 @@
     "--fused-hc",
     "--dense-q8",
     "--reserve-mib",
-    "1400",
+    "2400",
     "--fused-proj",
     "--fused-indexer",
     "--gather-attn",
@@ -48,6 +48,8 @@
   },
   "env": {
     "ALMOND_VISION_HY4_ROWS": "1",
-    "ALMOND_MMVF_ROWS": "1"
+    "ALMOND_MMVF_ROWS": "1",
+    "GGML_CUDA_GRAPH_RECAPTURE_MAX": "16",
+    "GGML_CUDA_GRAPH_CAPTURE_MAX": "128"
   }
 }

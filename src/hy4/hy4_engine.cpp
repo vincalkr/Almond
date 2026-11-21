@@ -98,6 +98,7 @@ struct Hy4Engine::Impl {
     bool dfly_picks = false;
     // HY4_STEP_STATS: where a step's time goes (Engram rows read, the wait for them, the graph's compute)
     double st_read_us = 0, st_wait_us = 0, st_comp_us = 0;
+    int64_t vram_step = 0;               // steps computed, for HY4_VRAM_STATS
     std::vector<int64_t> dfly_out;
     bool dfly_layer(int64_t il) const { return dmask.count(il) != 0; }
     // --host-moe: in steps of up to 8 tokens a layer whose routed experts are in RAM hands its expert input to this
@@ -133,27 +134,35 @@ struct Hy4Engine::Impl {
     }
     int copy_log = 0;
 
-    // HY4_PREFETCH=1: overlap the op-offload copies of the experts in RAM with the graph's compute. ggml copies each
-    // layer's experts to card 0 synchronously, one split at a time, just before that split's compute; the 13 RAM layers
-    // reuse the same two device regions (297 MiB gate/up, 648 MiB down). We stage one layer at a time in own device
-    // buffers on a private stream: while layer L computes, layer L+1's weights are copied there, and the copy callback
-    // turns each host->device copy into a short device->device copy. Needs the mapped expert pages registered with
-    // hipHostRegister: otherwise hipMemcpyAsync from them blocks (measured: 45 ms returned vs 17 us when registered).
+    // HY4_PREFETCH=1 / --prefetch-experts: overlap the op-offload copies of the experts in RAM with the graph's
+    // compute. ggml copies each layer's experts to card 0 synchronously, one split at a time, just before that split's
+    // compute; the 13 RAM layers reuse the same two device regions (297 MiB gate, 297 MiB up, 648 MiB down). We stage
+    // one copy at a time in our own device buffer on a private stream: while split L computes, split L+1's weights are
+    // copied there, and the copy callback turns each host->device copy into a short device->device copy. Needs the
+    // mapped expert pages registered with hipHostRegister: otherwise hipMemcpyAsync from them blocks (measured: 45 ms
+    // returned against 17 us when registered). The staging is charged to card 0's placement budget (place()).
     struct Prefetch {
+        // one copy at a time: the largest offloaded expert is a layer's ffn_down_exps (648 MiB), gate/up are 297 MiB.
+        // a copy that does not fit is left to ggml (copy_prefetch), never written past the end of stg.
+        static constexpr size_t kStaging = 660ull << 20;
         bool on = false;
         hipStream_t stream = nullptr;
         hipEvent_t ev = nullptr;
-        void * stg = nullptr;                            // one 660 MiB staging buffer on card 0, reused per copy
-        struct Pair { std::string name; void * src; size_t size; int kind; };   // kind 0 gate/up, 1 down
-        std::vector<Pair> pairs;
+        void * stg = nullptr;                            // one staging buffer on card 0, reused per copy
+        struct Pair { std::string name; void * src; size_t size; };
+        // the copy order, recorded once per step length: the 1,024-token prompt steps all copy the same 39 tensors in
+        // the same order, other step lengths (a shorter last step, --ubatch) get their own sequence
+        std::map<int64_t, std::vector<Pair>> seqs;
+        std::vector<Pair> * cur = nullptr;               // the sequence of the step being staged
+        bool step_on = false;                            // this step replays or records it (decode steps do not)
         size_t idx = 0;
         bool recording = true;
         int pending = -1;                                // pair whose H2D prefetch is in flight
         long copies = 0, fallbacks = 0;
         ~Prefetch() {
-            if (stg) hipFree(stg);
-            if (ev) hipEventDestroy(ev);
-            if (stream) hipStreamDestroy(stream);
+            if (stg) (void) hipFree(stg);
+            if (ev) (void) hipEventDestroy(ev);
+            if (stream) (void) hipStreamDestroy(stream);
         }
     } prefetch;
 
@@ -161,59 +170,90 @@ struct Hy4Engine::Impl {
         auto & pf = prefetch;
         size_t fr = 0, tot = 0;
         ggml_backend_cuda_get_device_memory(o.gpus[0], &fr, &tot);
-        // 660 MiB of staging plus room for cuBLAS workspaces: at 256K with 29 experts ~1.1 GiB is free, at 64K with
-        // 31 experts only ~0.38 GiB and the graph compute runs out of memory. Skip the prefetch there instead of crashing.
-        if (fr < 1u << 30) {
-            if (o.verbose) std::fprintf(stderr, "hy4: prefetch off, only %.2f GiB free on card 0\n", fr / 1073741824.0);
+        // the staging plus room for cuBLAS workspaces. place() already took the staging out of card 0's budget, so this
+        // only fires when something else ate the room (a longer context, another process on the card): turn the prefetch
+        // off there instead of letting the graph compute run out of memory.
+        const size_t need = Prefetch::kStaging + (256ull << 20);
+        if (fr < need) {
+            if (o.verbose)
+                std::fprintf(stderr, "hy4: prefetch off, %.2f GiB free on card 0, %.2f needed\n",
+                             fr / 1073741824.0, need / 1073741824.0);
             return;
         }
-        hipSetDevice(o.gpus[0]);
+        (void) hipSetDevice(o.gpus[0]);
         if (hipStreamCreateWithFlags(&pf.stream, hipStreamNonBlocking) != hipSuccess ||
             hipEventCreateWithFlags(&pf.ev, hipEventDisableTiming) != hipSuccess) { prefetch_off(); return; }
-        if (hipMalloc(&pf.stg, 660u << 20) != hipSuccess) { prefetch_off(); return; }
+        if (hipMalloc(&pf.stg, Prefetch::kStaging) != hipSuccess) { prefetch_off(); return; }
         pf.on = true;
+        if (o.verbose)
+            std::fprintf(stderr, "hy4: prefetch: %.0f MiB staged on card 0, %.2f GiB free with it\n",
+                         Prefetch::kStaging / 1048576.0, (fr - Prefetch::kStaging) / 1073741824.0);
         ggml_backend_sched_set_copy_callback(sched, copy_prefetch, this);
     }
     void prefetch_off() {
         auto & pf = prefetch;
         pf.on = false;
-        if (pf.stg) { hipFree(pf.stg); pf.stg = nullptr; }
-        if (pf.ev) { hipEventDestroy(pf.ev); pf.ev = nullptr; }
-        if (pf.stream) { hipStreamDestroy(pf.stream); pf.stream = nullptr; }
+        if (pf.stg) { (void) hipFree(pf.stg); pf.stg = nullptr; }
+        if (pf.ev) { (void) hipEventDestroy(pf.ev); pf.ev = nullptr; }
+        if (pf.stream) { (void) hipStreamDestroy(pf.stream); pf.stream = nullptr; }
     }
+    void prefetch_fail(const char * what) {   // a HIP call on the private stream failed: ggml does the copies again
+        if (o.verbose)
+            std::fprintf(stderr, "hy4: prefetch off: %s (%ld copies staged until now)\n", what, prefetch.copies);
+        prefetch_off();
+    }
+    // before every step's compute. A prompt step's 39 expert copies come in the same order every time, so the first
+    // step of a length records them and the later ones are staged against that record. A decode step (nt < 32) copies
+    // a few MB and is left entirely to ggml: staging it costs the round trip through the device buffer.
     void prefetch_first(int64_t nt) {
         auto & pf = prefetch;
-        if (!pf.on || nt < 32 || pf.pairs.empty()) return;
-        pf.idx = 0;
-        if (pf.recording) pf.recording = false;
-        auto & nxt = pf.pairs[0];
-        hipMemcpyAsync(pf.stg, nxt.src, nxt.size, hipMemcpyHostToDevice, pf.stream);
-        hipEventRecord(pf.ev, pf.stream);
+        pf.step_on = false; pf.cur = nullptr;
+        if (!pf.on || nt < 32) return;
+        if (pf.seqs.size() > 8) pf.seqs.clear();                    // the step lengths seen: bounded
+        auto & seq = pf.seqs[nt];
+        pf.cur = &seq;
+        pf.idx = 0; pf.pending = -1;
+        if (seq.empty()) { pf.recording = true; pf.step_on = true; return; }
+        pf.recording = false; pf.step_on = true;
+        auto & nxt = seq[0];
+        if (hipMemcpyAsync(pf.stg, nxt.src, nxt.size, hipMemcpyHostToDevice, pf.stream) != hipSuccess ||
+            hipEventRecord(pf.ev, pf.stream) != hipSuccess) { prefetch_fail("the first prefetch of the step"); return; }
         pf.pending = 0;
     }
-    static bool copy_prefetch(ggml_backend_t, const ggml_tensor * src, ggml_tensor * dst, ggml_cgraph *, void * ud) {
+    static bool copy_prefetch(ggml_backend_t backend, const ggml_tensor * src, ggml_tensor * dst, ggml_cgraph *, void * ud) {
         auto * p = (Impl *) ud;
         auto & pf = p->prefetch;
-        const std::string name = src->name;
+        if (!pf.on || !pf.step_on) return false;                    // let ggml copy
+        if (backend != ggml_backend_sched_get_backend(p->sched, 0)) return false;   // staging is on card 0 only
         const size_t size = ggml_nbytes(src);
-        const int kind = name.find("down") != std::string::npos ? 1 : 0;
+        if (size > Prefetch::kStaging) return false;                // it would go past the staging: ggml copies it
+        const std::string name = src->name;
         if (pf.recording) {
-            pf.pairs.push_back({ name, (void *) src->data, size, kind });
+            pf.cur->push_back({ name, (void *) src->data, size });
             return false;
         }
-        if (pf.idx >= pf.pairs.size() || pf.pairs[pf.idx].name != name || pf.pairs[pf.idx].size != size) {
+        if (pf.idx >= pf.cur->size() || (*pf.cur)[pf.idx].name != name || (*pf.cur)[pf.idx].size != size) {
+            // not the recorded order (another split layout): this whole step goes to ggml, the next one is recorded
+            // and the ones after it staged again
             ++pf.fallbacks;
-            pf.pairs.clear(); pf.idx = 0; pf.recording = true; pf.pending = -1;
+            if (p->o.verbose)
+                std::fprintf(stderr, "hy4: prefetch: copy %zu of the step is %s %.0f MiB, ggml copies the step\n",
+                             pf.idx, name.c_str(), size / 1048576.0);
+            pf.cur->clear(); pf.idx = 0; pf.recording = false; pf.step_on = false; pf.pending = -1;
             return false;
         }
-        if (pf.pending == (int) pf.idx) hipEventSynchronize(pf.ev);
-        hipMemcpyAsync(dst->data, pf.stg, size, hipMemcpyDeviceToDevice, pf.stream);
-        hipStreamSynchronize(pf.stream);
+        if (pf.pending == (int) pf.idx && hipEventSynchronize(pf.ev) != hipSuccess) {
+            p->prefetch_fail("waiting for the prefetch"); return false;
+        }
+        if (hipMemcpyAsync(dst->data, pf.stg, size, hipMemcpyDeviceToDevice, pf.stream) != hipSuccess ||
+            hipStreamSynchronize(pf.stream) != hipSuccess) { p->prefetch_fail("staging to the destination"); return false; }
         pf.idx++;
-        if (pf.idx < pf.pairs.size()) {
-            auto & nxt = pf.pairs[pf.idx];
-            hipMemcpyAsync(pf.stg, nxt.src, nxt.size, hipMemcpyHostToDevice, pf.stream);
-            hipEventRecord(pf.ev, pf.stream);
+        if (pf.idx < pf.cur->size()) {
+            auto & nxt = (*pf.cur)[pf.idx];
+            if (hipMemcpyAsync(pf.stg, nxt.src, nxt.size, hipMemcpyHostToDevice, pf.stream) != hipSuccess) {
+                p->prefetch_fail("the next prefetch"); return false;
+            }
+            if (hipEventRecord(pf.ev, pf.stream) != hipSuccess) { p->prefetch_fail("recording the prefetch"); return false; }
             pf.pending = (int) pf.idx;
         } else pf.pending = -1;
         ++pf.copies;
@@ -326,7 +366,7 @@ struct Hy4Engine::Impl {
             uint64_t b = is_swa(l) ? (uint64_t) (G.kv_lora + G.d_rope) * 2 * r_swa_rows
                                    : (uint64_t) ggml_row_size(o.kv_q8 ? GGML_TYPE_Q8_0 : GGML_TYPE_F16, G.kv_lora + G.d_rope) * (uint64_t) n_ctx;
             if (model_has_indexer(l))
-                b += (uint64_t) G.idx_dim * 4 * ((uint64_t) n_ctx / G.idx_kpool) +
+                b += (uint64_t) ggml_row_size(GGML_TYPE_F32, G.idx_dim) * ((uint64_t) n_ctx / G.idx_kpool) +
                      (uint64_t) 2 * G.idx_dim * 4 * (uint64_t) (o.n_ubatch + 2 * G.idx_kpool);
             return b;
         };
@@ -341,6 +381,11 @@ struct Hy4Engine::Impl {
             if (o.verbose)
                 std::fprintf(stderr, "hy4: card %d: %.1f GiB free\n", o.gpus[(size_t) g], fr / 1073741824.0);
         }
+        // --prefetch-experts stages the RAM experts in a device buffer on card 0: charge it to card 0's budget like
+        // any other weight, or the placement fills the card and the staging, allocated after the compute buffers,
+        // leaves nothing for cuBLAS (2026-11-20: card 0 free 1.10 -> 0.45 GiB, "ROCm pool[0]: alloc failed, flushing")
+        if (o.prefetch_experts || std::getenv("HY4_PREFETCH"))
+            budget[0] -= (int64_t) Prefetch::kStaging;
         budget[(size_t) NG - 1] -= (int64_t) head;
         if (dmodel) {           // --dfly: the drafter's weights and mask rows on the last card, with the layers it reads
             uint64_t d = (uint64_t) dfly_tl.size() * (uint64_t) n_ctx * 8 * 2;
@@ -1810,6 +1855,18 @@ struct Hy4Engine::Impl {
         st_comp_us += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tc).count();
         if (hm.mem) hm.active = false;
         if (!computed) { ggml_free(c); err = "graph compute failed"; return false; }
+        // HY4_VRAM_STATS=N: what the cards have left every N steps. hy4 fills card 0 by design; the question for the
+        // deaths in libamdhip64 is whether that room gets smaller as a session goes on (docs/hy4/GGUF_NOTES.md).
+        static const int64_t vram_every = [] { const char * e = std::getenv("HY4_VRAM_STATS"); return e ? std::atoll(e) : 0; }();
+        if (vram_every && (++vram_step % vram_every) == 0) {
+            std::fprintf(stderr, "hy4: step %lld (%lld tokens):", (long long) vram_step, (long long) n_past);
+            for (size_t g = 0; g < o.gpus.size(); ++g) {
+                size_t fr = 0, tot = 0;
+                ggml_backend_cuda_get_device_memory(o.gpus[g], &fr, &tot);
+                std::fprintf(stderr, " card %d %.0f/%.0f MiB free", o.gpus[g], fr / 1048576.0, tot / 1048576.0);
+            }
+            std::fprintf(stderr, "\n");
+        }
         if (std::getenv("HY4_SPLITS"))
             std::fprintf(stderr, "hy4: %lld tokens: %d nodes, %d splits, %d copies\n", (long long) nt, ggml_graph_n_nodes(gf),
                          ggml_backend_sched_get_n_splits(sched), ggml_backend_sched_get_n_copies(sched));
@@ -1924,7 +1981,13 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
             else merged.push_back(p);
         for (auto & m : merged)
             if (ggml_backend_cuda_register_host_buffer((void *) m.first, m.second - m.first)) pinned += m.second - m.first;
-        if (o.verbose) std::fprintf(stderr, "hy4: %.1f GiB of CPU weights pinned\n", pinned / 1073741824.0);
+        const uint64_t avail = P.mem_available();
+        if (o.verbose)
+            std::fprintf(stderr, "hy4: %.1f GiB of CPU weights pinned, %.1f GiB of RAM available after it\n",
+                         pinned / 1073741824.0, avail / 1073741824.0);
+        if (avail < (8ull << 30))   // the registered pages cannot be reclaimed and this machine has no swap
+            std::fprintf(stderr, "hy4: warning: %.1f GiB of RAM available with the experts registered\n",
+                         avail / 1073741824.0);
     }
     if (o.host_moe && !P.host_moe_start(th, err)) return false;
     P.all = P.gpu;
@@ -1937,6 +2000,15 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
     // then fails its realloc, and the buffers of the other backends keep the sizes of the failed, larger graph. That
     // starves every smaller retry (2026-11-20: --ubatch 2048 fell all the way to 128 instead of back to 1024). Start
     // each attempt with a fresh scheduler so an attempt that fits from a clean state is not lost.
+    // what the cards hold before any compute buffer is asked for: ggml's pool caches what a failed attempt frees, so
+    // hipMemGetInfo inside the loop would tell the smaller attempts less room than they really have
+    std::vector<size_t> fr0(o.gpus.size());
+    for (size_t g = 0; g < o.gpus.size(); ++g) {
+        size_t tot = 0;
+        ggml_backend_cuda_get_device_memory(o.gpus[g], &fr0[g], &tot);
+    }
+    int64_t first_fit = 0;                      // the largest step whose compute buffers fit, room or no room
+    bool accept_any = false;                    // set when --min-free-mib proved unreachable: take that step
     for (;;) {
         ggml_init_params ip = { P.meta.size(), P.meta.data(), true };
         ggml_context * c = ggml_init(ip);
@@ -1944,14 +2016,44 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
         const int64_t nt = std::min<int64_t>(P.o.n_ubatch, P.n_ctx);
         ggml_cgraph * gf = P.build(c, P.shape(P.n_ctx - nt, nt), in);
         P.sched = ggml_backend_sched_new(P.all.data(), nullptr, (int) P.all.size(), GRAPH_NODES, false, true);
-        const bool ok = ggml_backend_sched_reserve(P.sched, gf);
+        bool ok = ggml_backend_sched_reserve(P.sched, gf);
+        // what the cards will have left once this step's compute buffers are in. The HIP runtime wants room of its own
+        // for the graphs it captures and its cuBLAS workspaces, and when it cannot get it it dies inside
+        // libamdhip64 with a null destination (docs/hy4/GGUF_NOTES.md, "The seven deaths of 2026-11-21").
+        // --min-free-mib makes the prompt step smaller until there is that room; without it the placement is as it was.
+        int64_t least_mib = INT64_MAX;
+        const int64_t stg = (o.prefetch_experts || std::getenv("HY4_PREFETCH")) ? (int64_t) Impl::Prefetch::kStaging : 0;
+        for (size_t g = 0; g < o.gpus.size(); ++g) {
+            // card 0 also gives the prefetch its staging buffer, which is allocated after this loop
+            const int64_t left = (int64_t) fr0[g] - (int64_t) ggml_backend_sched_get_buffer_size(P.sched, P.all[g]) -
+                                 (g == 0 ? stg : 0);
+            least_mib = std::min(least_mib, left / 1048576);
+        }
+        const char * why = "the compute buffers of a longer one do not fit";
+        if (ok && o.min_free_mib > 0 && least_mib < o.min_free_mib && !accept_any) {
+            if (!first_fit) first_fit = P.o.n_ubatch;     // this step's buffers fit; they just leave less than asked
+            ok = false;
+            why = "less than --min-free-mib would be left on a card";
+        } else if (ok && o.verbose && least_mib < 512) {
+            std::fprintf(stderr, "hy4: warning: %lld MiB left on the cards with the compute buffers in: the HIP "
+                                 "runtime may find no room there (--min-free-mib, or a larger --reserve-mib)\n",
+                         (long long) least_mib);
+        }
         ggml_free(c);
         if (ok) break;
         ggml_backend_sched_free(P.sched);
         P.sched = nullptr;
+        if (!accept_any && first_fit && P.o.n_ubatch <= 256) {   // the room asked for is not reachable at any step
+            accept_any = true;                                  // length: take the largest step that fits, as before
+            P.o.n_ubatch = first_fit;
+            if (o.verbose)
+                std::fprintf(stderr, "hy4: %.0f MiB free is not reachable with these cards at any step length: prompt "
+                                     "steps of %lld tokens\n", (double) o.min_free_mib, (long long) first_fit);
+            continue;
+        }
         if (P.o.n_ubatch <= 64) { err = "cannot reserve the compute buffers"; return false; }
         P.o.n_ubatch /= 2;
-        if (o.verbose) std::fprintf(stderr, "hy4: prompt steps of %lld tokens (the compute buffers of a longer one do not fit)\n", (long long) P.o.n_ubatch);
+        if (o.verbose) std::fprintf(stderr, "hy4: prompt steps of %lld tokens (%s)\n", (long long) P.o.n_ubatch, why);
     }
     if (std::getenv("HY4_COPY_DEBUG"))
         ggml_backend_sched_set_copy_callback(P.sched, Impl::copy_diag, &P);

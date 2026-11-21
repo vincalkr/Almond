@@ -8,10 +8,12 @@ another session or with another model. Measured numbers and the reasoning behind
 
 `--hy4 ... --gpus 0,1 -c 262144 --engram-place auto --mtp --fused-hc --dense-q8 --reserve-mib 1400 --fused-proj
 --fused-indexer --gather-attn --kv-q8 --ubatch 1024 --prefetch-experts`, env `ALMOND_MMVF_ROWS=1`. Last commits:
-7e5817a (indexer fix, gather attention, 256K), 261e5fa (`--kv-q8`), 5a34724 (`--ram-requant`, off).
+0145d9a (reserve fallback, 2,048-token steps), a8acd66 (`HY4_COPY_DEBUG`), cb2ead2 (`--prefetch-experts`),
+e6ffc8d (`hy4-local-fast.json`), 3f985c0 (`GRAPH_NODES`), d9c82b1 / 42d1b2b (RDNA3 MMA diagnosis).
 
 Speed now (256K, two RX 7900 XTX, card 1 on PCIe x2, 9900X with DDR5 at ~65 GB/s, greedy, MTP):
-short prompt ~24 tok/s; 16K prompt read at ~480 tok/s, then ~19-22 tok/s; 66K prompt ~377 tok/s, then ~16-19.
+short prompt ~24 tok/s; 16K prompt read at ~480 tok/s, then ~21 tok/s; the 66K numbers below are from before
+`--prefetch-experts` (it turns itself off there) and were not re-measured.
 29 of 42 layers keep their routed experts in VRAM at 256K; 13 run on the CPU.
 
 ## Where the time goes
@@ -19,11 +21,12 @@ short prompt ~24 tok/s; 16K prompt read at ~480 tok/s, then ~19-22 tok/s; 66K pr
 - Decode, one MTP round (~73 ms, 1.76 tokens): GPU kernels ~36 ms, CPU experts of the 13 RAM layers ~21 ms
   (~80 MB a layer for a 2-token verify, at the RAM's bandwidth; more threads, 2 MB pages and `--host-moe` do not
   help), syncs / launch gaps / host work ~16 ms.
-- Prompt, 16K tokens in 1,024-token steps (~41 s, `HY4_STEP_STATS=1`): graph compute 38 s, of which ~25 s are kernels
-  on the two cards and ~10 s are copies: ggml's op offload copies the whole routed-expert tensors of the 13 RAM layers
-  (~17 GB) to card 0 at every step, at full bus speed (16 steps x 17 GB in ~10 s, ~27 GB/s; a plain hipMemcpy test
-  gives 28.4 GB/s to card 0 and 3.3 GB/s to card 1 on its x2 link, pinned or not). Waiting for the Engram rows
-  read from the SSD: 2.4 s.
+- Prompt, 16K tokens in 1,024-token steps, before `--prefetch-experts` (~41 s, `HY4_STEP_STATS=1`): graph compute
+  38 s, of which ~25 s are kernels on the two cards and ~10 s are copies: ggml's op offload copies the whole
+  routed-expert tensors of the 13 RAM layers (~17 GB) to card 0 at every step, at full bus speed (16 steps x 17 GB in
+  ~10 s, ~27 GB/s; a plain hipMemcpy test gives 28.4 GB/s to card 0 and 3.3 GB/s to card 1 on its x2 link, pinned or
+  not). Waiting for the Engram rows read from the SSD: 2.4 s. With the Engram table in RAM the wait is gone and
+  `--prefetch-experts` hides part of the copies: the prompt is ~34 s (480 tok/s) and compute ~38 s.
 
 ## Done in this round (2026-11-20, in the working tree or committed with this file)
 
@@ -66,7 +69,11 @@ short prompt ~24 tok/s; 16K prompt read at ~480 tok/s, then ~19-22 tok/s; 66K pr
 
 1. Overlap the offload copies with compute: done with `--prefetch-experts` above (+11% prompt, no quality cost). What
    is left is the ~4 s of copies still exposed (a 660 MiB staging holds one layer; two layers would need ~1.3 GiB more
-   VRAM), and the 64K case where the flag is off because card 0 is short of memory.
+   VRAM), and the 64K case where the flag is off because card 0 is short of memory. The staging is now charged to card
+   0's placement budget (`place()`) instead of being allocated after the compute buffers: re-measure the 256K pair of
+   numbers and the 64K case with it (docs/hy4/GGUF_NOTES.md, "The engine dies and the cards are loaded again"). The
+   256K pair since: 16K prompt 434.3 tok/s and decode 24.54 with `--reserve-mib 2400` and the graph ceilings
+   (27 of 42 layers' experts in VRAM, 1.84/2.04 GiB free at load); the 64K case is still not re-measured.
 2. Longer prompt steps: the fallback bug is fixed and 2,048 steps are measured above (+14% prompt for -4% decode and
    3 fewer expert layers in VRAM, PPL checked). The remaining reason it is not the default is that tradeoff, not the
    reserve. A way to fit the 1.7 GiB card-1 buffer without giving up expert layers would keep both gains.
@@ -80,13 +87,31 @@ short prompt ~24 tok/s; 16K prompt read at ~480 tok/s, then ~19-22 tok/s; 66K pr
      is limited to 8 MB here (`ulimit -l`), so the experts the CPU reads cannot be protected that way.
    The cause: the weights were copied to VRAM straight from the mapping, and ROCm locks the source pages of such a
    copy and keeps them locked, so neither `MADV_PAGEOUT` nor `MADV_DONTNEED` could drop them (43.5 GiB "released",
-   the RSS unchanged, 62 GiB of shard 1 mapped). Fixed in the working tree: `set_staged()` copies a weight through
+   the RSS unchanged, 62 GiB of shard 1 mapped). Committed (b55d55e): `set_staged()` copies a weight through
    a 64 MB heap buffer, and `release_pages()` drops its pages from the mapping (`MADV_DONTNEED`, whole pages) and
    the page cache (`posix_fadvise`). RSS after loading (table on the SSD): 65.9 -> 25.2 GB, about the experts the
    CPU reads; the upload got faster too (28.5 -> 15.5 s). Then at 256K, 16K prompt: the table in RAM (read in 4.8 s)
    pages no more than on the SSD (17,637 / 17,886 major faults, the loading's), prompt 393.6 -> 417.8 tok/s (the 2.47
    s of waiting for rows gone), decode 20.72 / 19.49 tok/s (noise). `--engram-place auto` no longer counts the VRAM
    weights' pages: RAM when the table and the CPU's experts fit with 12 GiB to spare (committed).
+
+## The graph churn (2026-11-21): measured, and capped
+
+The 256K run printed 3,728 `CUDA graph warmup reset` against 3,779 `warmup complete` in 148 s: ggml found node
+properties that moved on nearly every compute, so the graph was captured again instead of launched. Measured with
+`GGML_CUDA_GRAPH_STATS=1` / `GGML_CUDA_GRAPH_DIFF=4`: 8,192 computes, 1,624 captures, 16 keys, and **1,548 of the
+1,874 trunk nodes change their `data` pointer between two computes** (615 of 1,604 in the draft; 36/95 and 57/126 in
+the small split graphs, `src1-data`). Each ROCm capture/instantiation keeps ~2 MiB on the card (measured with
+`tools/hy4/graph-vram.hip`), so the cards ran out of room and the engine segfaulted (docs/hy4/GGUF_NOTES.md, "The
+seven deaths of 2026-11-21").
+
+`GGML_CUDA_GRAPH_RECAPTURE_MAX=200` stops capturing the six churning keys. 16K prompt at 256K, greedy, alternate
+pairs: prompt 445.3 / 469.3 -> 469.4 / 469.2 tok/s, decode 23.28 / 22.77 -> 23.37 / 23.75 (at 400 tokens, 22.00 /
+22.85 -> 23.03). So the prompt is unchanged and the decode +2-4%: the capture was worth less than the compute it
+skipped, and 4,000-token runs now finish. On in the three hy4 configurations.
+
+The way to get the rest back is to make the graph stable - bucket `n_pool` / `n_top` / `n_sel` the way `n_kv` is
+bucketed to 256, so the nodes and their buffers keep still and one capture is reused: not tried.
 
 ## Next candidates (estimates, not measured)
 
@@ -95,11 +120,17 @@ short prompt ~24 tok/s; 16K prompt read at ~480 tok/s, then ~19-22 tok/s; 66K pr
   the 576/512 MMA instances and RDNA config cases are compiled, but widening the gate behind an env var crashed
   reproducibly at the first graph compute (ROCm `pthread_create() failed`). Needs a proper kernel fix. The IQ2_XXS
   expert GEMMs (`mul_mat_q<16>`) are next in size.
-- Decode: fewer kernels per layer (fusing norms, iHC, routing), maybe -5..-8 ms a round, +12-20%.
+- Decode: a fresh rocprofv3 trace of ~19 tokens at 256K shows 31,436 kernel launches and only 417 ms of kernel time
+  in a 1,162 ms window (64% gaps), but the cost is not the small launches: a fused `rms_norm + weight` op (new ggml op
+  `GGML_OP_HY4_RMS_NORM_MUL`, one block per row) cut the graph from 4,961 to 4,704 nodes and changed nothing
+  (476.9 -> 479.7 tok/s, KL 0.035), so it was reverted. The kernel time is `mul_mat_vec_q` Q8_0 114 ms,
+  `flash_attn_tile<576,512>` 56 ms, `mul_mat_vec_q_moe` IQ2_XXS 69 ms, `mul_mat_vec_bf16_rows` 20 ms. Fewer kernels is
+  the lever, but the norm fusion shows the small ops are not what the round costs.
 - With a quality cost (measured, off): `--ram-requant q3_k` +5-7% at KL 0.012.
 - Not worth it (measured): hot-expert cache in the ~2 GB left (top 60 experts of a RAM layer cover 14.7% of its
   picks); a smaller `--reserve-mib` (an expert layer is ~1.3 GB); DFly2 (`--dfly`, ~2 tokens a round, never faster
-  than MTP); `--down-requant`; wave64; one card.
+  than MTP); `--down-requant`; wave64; one card; a fused `rms_norm + weight` kernel (nodes 4,961 -> 4,704, no speed
+  change, KL 0.035: the small launches are not the decode cost).
 
 ## How to measure
 

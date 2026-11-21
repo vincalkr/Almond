@@ -41,6 +41,8 @@
   "conversation_dir": "local/hy4-slots",
   "conversation_dir_gib": 16,
   "env": {
-    "ALMOND_MMVF_ROWS": "1"
+    "ALMOND_MMVF_ROWS": "1",
+    "GGML_CUDA_GRAPH_RECAPTURE_MAX": "16",
+    "GGML_CUDA_GRAPH_CAPTURE_MAX": "128"
   }
 }
