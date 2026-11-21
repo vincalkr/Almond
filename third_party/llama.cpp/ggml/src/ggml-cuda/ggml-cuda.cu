@@ -2688,11 +2688,36 @@ static const void * ggml_cuda_graph_get_key(ggml_cgraph * cgraph) {
     return cgraph->nodes[0];
 }
 
+// an integer environment variable, 0 when it is not set (the graph diagnostics below read theirs once)
+static int ggml_cuda_graph_env_int(const char * name) {
+    const char * v = getenv(name);
+    return v ? (int) strtol(v, nullptr, 10) : 0;
+}
+
+// Almond: on ROCm a capture + instantiation takes room on the card and does not give it back - measured ~2 MiB a
+// capture, hipGraphDestroy / hipGraphExecDestroy leaving it held (tools/hy4/graph-vram.hip, docs/hy4/GGUF_NOTES.md).
+// A graph whose nodes move at every compute is captured hundreds of times and eats the card that way, so ggml is
+// allowed a bounded number of them:
+//   GGML_CUDA_GRAPH_RECAPTURE_MAX=N  per graph: after N rebuilds (and a quarter of its computes) stop capturing it
+//   GGML_CUDA_GRAPH_CAPTURE_MAX=N    whole process: after N rebuilds of any graph, capture nothing any more
+static std::atomic<int> ggml_cuda_graph_n_recaptures{0};
+static std::atomic<bool> ggml_cuda_graph_captures_off{false};
+
 static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph) {
     bool res = false;
 
     const void * graph_key = ggml_cuda_graph_get_key(cgraph);
     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
+    ++graph->n_computes;
+
+    // Almond diagnostics, both read once:
+    //   GGML_CUDA_GRAPH_DIFF=N          print the first N properties that force a recapture (which node, what moved)
+    //   GGML_CUDA_GRAPH_RECAPTURE_MAX=N stop capturing a graph after N recaptures, once they are more than a quarter
+    //                                   of its computes: the capture costs more than the launch it buys, and on ROCm
+    //                                   every capture/instantiation takes room on the card (docs/hy4/GGUF_NOTES.md)
+    static const int   diff_max   = ggml_cuda_graph_env_int("GGML_CUDA_GRAPH_DIFF");
+    static const int64_t recap_max = ggml_cuda_graph_env_int("GGML_CUDA_GRAPH_RECAPTURE_MAX");
+    static int diff_left = diff_max;
 
     if (cgraph->uid != 0 &&
         cgraph->uid == graph->uid) {
@@ -2704,10 +2729,17 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
     graph->uid = cgraph->uid;
 
     // Check if the graph size has changed
+    bool fresh = false;                       // the first compute of this key: everything is "changed", nothing to learn
     if ((int)graph->node_props.size() != cgraph->n_nodes) {
+        fresh = graph->node_props.empty();
+        if (diff_max > 0)
+            GGML_LOG_INFO("cuda graph: %zu -> %d nodes: recapturing\n", graph->node_props.size(), cgraph->n_nodes);
         res = true;
         graph->node_props.resize(cgraph->n_nodes);
     }
+
+    int ndiff = 0, first_i = -1;              // how many nodes moved this compute, and the first one
+    std::string first_moved;
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_cuda_graph::node_properties prop = {};
@@ -2721,10 +2753,67 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
             }
         }
 
-        if (res || memcmp(&graph->node_props[i], &prop, sizeof(prop)) != 0) {
+        const bool same = memcmp(&graph->node_props[i], &prop, sizeof(prop)) == 0;
+        if (!same) {
+            ++ndiff;
+            if (first_i < 0) {
+                first_i = i;
+                const ggml_cuda_graph::node_properties & p0 = graph->node_props[i];
+                if (p0.node.data != prop.node.data) first_moved += " data";
+                if (p0.node.type != prop.node.type) first_moved += " type";
+                if (memcmp(p0.node.ne, prop.node.ne, sizeof(prop.node.ne))) first_moved += " ne";
+                if (memcmp(p0.node.nb, prop.node.nb, sizeof(prop.node.nb)))  first_moved += " nb";
+                for (int j = 0; j < GGML_MAX_SRC; ++j) {
+                    const std::string s = " src" + std::to_string(j) + "-";
+                    if (p0.node_src_data_ptrs[j] != prop.node_src_data_ptrs[j]) first_moved += s + "data";
+                    if (memcmp(p0.node_src_ne[j], prop.node_src_ne[j], sizeof(prop.node_src_ne[j]))) first_moved += s + "ne";
+                    if (memcmp(p0.node_src_nb[j], prop.node_src_nb[j], sizeof(prop.node_src_nb[j]))) first_moved += s + "nb";
+                }
+            }
+        }
+        if (res || !same) {
             graph->node_props[i] = prop;
             res = true;
         }
+    }
+
+    if (ndiff && !fresh && diff_left > 0) {
+        --diff_left;
+        GGML_LOG_INFO("cuda graph: %d of %d nodes changed, first node %d %s %s (%s)%s\n", ndiff, cgraph->n_nodes,
+                      first_i, ggml_op_name(cgraph->nodes[first_i]->op),
+                      cgraph->nodes[first_i]->name[0] ? cgraph->nodes[first_i]->name : "-",
+                      graph->instance ? "captured" : "not captured", first_moved.c_str());
+    }
+
+    static const int64_t cap_max = ggml_cuda_graph_env_int("GGML_CUDA_GRAPH_CAPTURE_MAX");
+    if (res) {
+        ++graph->n_recaptures;
+        const int n_recaptures = ggml_cuda_graph_n_recaptures.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (cap_max > 0 && n_recaptures > cap_max) {
+            ggml_cuda_graph_captures_off.store(true, std::memory_order_relaxed);
+        }
+        if (!graph->disable_due_to_churn &&
+            ((recap_max > 0 && graph->n_recaptures > recap_max && graph->n_recaptures * 4 > graph->n_computes) ||
+             ggml_cuda_graph_captures_off.load(std::memory_order_relaxed))) {
+            graph->disable_due_to_churn = true;
+            // let go of what the runtime holds for this graph: the nodes it was captured into and its executable
+            if (graph->instance != nullptr) {
+                CUDA_CHECK(cudaGraphExecDestroy(graph->instance));
+                graph->instance = nullptr;
+            }
+            if (graph->graph != nullptr) {
+                CUDA_CHECK(cudaGraphDestroy(graph->graph));
+                graph->graph = nullptr;
+            }
+            GGML_LOG_INFO("cuda graph: %lld recaptures in %lld computes, %d rebuilds in all: not capturing this "
+                          "graph any more (GGML_CUDA_GRAPH_RECAPTURE_MAX / GGML_CUDA_GRAPH_CAPTURE_MAX), it runs "
+                          "node by node\n", (long long) graph->n_recaptures, (long long) graph->n_computes,
+                          n_recaptures);
+        }
+    }
+    if ((diff_max > 0 || recap_max > 0) && (graph->n_computes % 4096) == 0) {
+        GGML_LOG_INFO("cuda graph: %lld computes, %lld recaptures\n", (long long) graph->n_computes,
+                      (long long) graph->n_recaptures);
     }
 
     return res;
