@@ -184,7 +184,56 @@ layer in RAM, the hottest 112 on the GPU" - with LatentMoE's routing nearly unif
 top-60-of-a-layer covering 14.7% of the picks says per-expert ranks buy little where whole layers are bought instead);
 and their Tree-8 at 38 rows, which costs ~2,4x our 2-row check on this box (the row cost table above).
 
+## The decode pipeline: where CPU expert time can and cannot hide (2026-11-21)
+
+The idea was "run the CPU experts beside the GPU". The dependency graph says what that can mean. One decode round at
+256K is 73 ms: GPU kernels ~36, the experts of the 13 RAM layers ~21, host/sync ~16, and it yields 1.76 tokens
+(24.1 tok/s). Inside a layer the chain is strict - attention, router, routed experts (CPU for a RAM layer), then
+`rup` - so the expert time of layer L is on the critical path of the whole round: no stream, event or second card can
+move it, because layer L+1's attention needs its answer.
+
+What **can** run beside it, in the same layer, with no dependency at all: the **shared expert**. The layer's answer is
+`out = moe + shexp` (`hy4_moe.cpp`: `sgate/sup/sdown` with `shexp`, added at the end), and `shexp` does not read
+anything the routed experts produce. The mechanism for using the host for the routed part already exists: `--host-moe`
+(`ggml-cuda/host-moe.cu`) - the GPU stream publishes `x/ids/wts` into mapped pinned memory and then runs
+`host_moe_wait_copy`, a kernel that spins on the flag and copies the answer back, with no scheduler split and no
+copies. It measured as not helping, and the reason is in its position: the publish+wait node is built *before* the
+shared expert (`hy4_engine.cpp`: `ggml_host_moe` then `ffn_routed_up`, then `ffn_gate_shexp/up_shexp/down_shexp`), so
+the stream stops there and the independent branch never starts beside the host. Splitting it into publish-early /
+wait-late is ~40 lines of ggml and would give the overlap.
+
+But the ceiling of that overlap is small, and the arithmetic is worth writing down before the lines are written: what
+the host can hide behind is only the GPU work *of the same layer*, because the next layer's attention needs this
+layer's answer. A RAM layer's own GPU work is its shared expert - 3 x 3072 x 13824 = 127 M weights, 135 MB in Q8_0,
+~0,27 ms a layer at the card's bandwidth - while its host expert work is 31 experts x 2,54 MB = 79 MB at 48,4 GB/s =
+1,63 ms. So the window hides ~0,27 of 1,63 ms a layer: 13 layers x 0,27 = **3,5 ms of the 73, +4,8% decode**, not the
+20 first hoped. `rdown`/`rup` add ~0,02 ms a layer to the window. Worth having after the byte wins, not before them.
+
+The bytes are the wall: a round reads 31 experts x 2,54 MB x 13 layers = **1,02 GB of expert weights from RAM**, which
+at 48,4 GB/s is exactly the 21 ms measured, while the same 31 picks x 29 layers on the cards cost 3,6 ms of kernel
+time (`mul_mat_vec_q_moe` IQ2_XXS, 69 ms per 19 tokens). What lowers the bytes, in the order of what is measured:
+`--ram-requant q3_k` on `ffn_down_exps` of the RAM layers (+5-7%, KL 0.012, already in the
+engine); one expert layer more in VRAM (1,3 GB, ~+2%, and the room is in the KV: Strata's growable/spilling KV, our
+parked `--ipool-f16`, a shorter `-c` profile); and only then the publish/wait split above.
+
+Why the other kind of overlap - more rows through the trunk, so the CPU work hides behind the GPU work of another row
+- does not pay on this box, measured: the cost of a check with k rows (64K, mean of 12) is 55.0 / 68.6 / 90.8 / 100.4 /
+119.0 / 132.0 / 152.4 / 167.1 ms for k = 1..8, so a k-row round has to reach 1.76 x cost(k)/68.6 tokens to break even:
+2.33 at 3 rows, 2.58 at 4, 4.29 at 8. The reason the curve is steep is the same wall: 16 picks a token over 512
+experts of ~2.5 MB, so the *union* of experts a round must read is 31 per layer at 2 rows (79 MB a layer, 1.00 GiB
+over the 13 RAM layers), 60 at 4 rows (1.94 GiB) and 113 at 8 rows (3.65 GiB) - 3.6x the CPU bytes for 4x the rows.
+Wide speculation only pays if those bytes hide: the same two tracks first, the tree after.
+
+Plan, in the order the arithmetic gives: (1) the byte wins - `--ram-requant q3_k` measured, and the room for one or
+two expert layers more (a KV that grows and spills, `--ipool-f16`, a shorter `-c` where the session does not need
+256K); (2) the publish-early / wait-late split of `--host-moe`, ~40 lines of ggml, worth ~+4,8% and bit-identical
+quality, so it is a clean change; (3) only then a wider verify, because with the CPU bytes still at 1,00 GiB a round
+its break-even is 2,33 tokens a round at 3 rows and 4,29 at 8, which no drafter reaches here (DFly2 with 5 guesses got
+2,31).
+
 ## How to measure
+
+
 
 - Build: `./build.sh` (a new `.cu` in `ggml-cuda` needs `cmake third_party/llama.cpp/build-hip` first).
 - Speed: `build-hip-fused/almond-engine <config args> --temp 0 -n 400 --prompt-ids IDS` (prints prompt and
