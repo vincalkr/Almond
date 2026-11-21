@@ -913,6 +913,15 @@ class AlmondEngine:
         if rc is not None and rc >= 0 and last:          # it ended by itself: its own last words say why (#215)
             return (f"The engine exited (code {rc}). Its last log line: {last} - if that does not explain it, please "
                     "report it at github.com/vincalkr/Almond/issues with the log.")
+        if rc is not None and rc < 0:                    # a signal: the kernel log says which and at what address
+            sig = {-4: "SIGILL", -6: "SIGABRT", -8: "SIGFPE", -9: "SIGKILL", -11: "SIGSEGV"}.get(rc, f"signal {-rc}")
+            if rc == -9:
+                return ("The engine was killed by the operating system (SIGKILL): the usual cause is running out of "
+                        "RAM, Linux ends the biggest program (check: sudo dmesg | grep -i -E 'killed process|out of "
+                        "memory'). Close other programs or use a smaller model (Q2_0 / IQ2_XS).")
+            return (f"The engine died on {sig} - it did not run out of RAM quietly: the kernel log has the instruction "
+                    f"(check: journalctl -k --since '-2 hours' | grep -i segfault) and its log the work it was doing "
+                    f"(last line: {last or 'nothing but its own tracing'}). Its log: {self.log_path}")
         return ("The usual cause is running out of RAM: Linux then ends the biggest program (check: sudo dmesg | "
                 "grep -i -E 'killed process|out of memory'); Windows slows down instead. Close other programs or use a "
                 "smaller model (Q2_0 / IQ2_XS).")
