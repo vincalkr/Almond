@@ -78,6 +78,9 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 ## Open
 
 - Hy4-flash speed work: state, measurements and what is being tried in `docs/hy4/SPEED_WORK.md` (2026-11-22).
+- The other engines and forks for our models, swept 2026-11-22 (Avalon, Strata and its EXL3 AMD fork, project-maya,
+  Xolotl, exllamav3-rocm(-moe), elpis, the RDNA3 INT4 tree, llama.cpp's two-month delta against our vendored ggml):
+  what each carries that we do not, their numbers as they print them, and the six things worth taking, in `docs/ENGINES_WATCH.md`.
 - `--ipool-f16` (the indexer's pooled keys as F16): tried 2026-11-21 and not shipped - 434.3 -> 46.6 prompt tok/s at
   256K because the F16 pool leaves the fused indexer and casts the pool to F32 inside the graph, for 80/120 MiB and no
   expert layer, and KL 0.00000 / top-1 100.00% against the F32 pool (docs/hy4/GGUF_NOTES.md). Its 275 lines are

@@ -269,6 +269,26 @@ at this length because the runs fork by themselves. If it ever goes into the con
 (`--ppl-save` / `--ppl-ref`), which has not been run for it. The byte wins stay first: `--ram-requant q3_k` is measured
 at +5-7% and still is not in the configuration.
 
+**What has NOT been tested - resume here (2026-11-22).**
+
+- **Quality: nothing.** No `--ppl-save` / `--ppl-ref` run, no KL, no perplexity for the host expert path. The
+  "the same text" sentence in GGUF_NOTES (*Where the MoE runs*) was never actually checked, and the host computes the
+  products with the CPU MoE kernels, not the GPU ones.
+- **The graph path is not verified.** Those four runs printed no `hy4: graph (ggml-cuda)` counters at all
+  (`GGML_CUDA_GRAPH_STATS` was not in the harness), so it is not even known whether they replayed graphs. This is the
+  delicate part: the publish node inside a captured graph runs on the host at capture time only, and the ring slot the
+  wait reads is **baked into the graph** (`ggml-cuda/host-moe.cu`, and `st.graph_slot` advances per replay to match) - a
+  desync between the host's `seq` and the replay's slot gives a stale answer with no crash and no error, only wrong
+  tokens. What separates a kernel difference from a ring desync: three runs at 4096 with `--ppl` against one reference
+  (baseline, `--host-moe` with graphs on, `--host-moe` with `GGML_CUDA_DISABLE_GRAPHS=1`) - ~12 min of cards, through
+  the router's unload, never `./stop.sh`.
+- **Other configurations, untested**: `hy4-local-fast.json` (`--ubatch 2048 --expert-layers-gpu 26`: fewer host
+  layers, wider window), the 64K case where `--prefetch-experts` switches itself off, and DFly2 with `--host-moe`.
+- **No unit test covers it**: `src/hy4/test_hy4_moe.cpp` and the other `test_hy4_*` do not know `--host-moe`, which
+  needs mapped pinned memory and only exists in the engine path.
+- **The `--serve` path** (the router, session save/restore, `local/hy4-crash-check.sh`'s fini deaths) with hy4 +
+  `--host-moe`: never run.
+
 ## How to measure
 
 
