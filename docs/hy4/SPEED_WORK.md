@@ -354,6 +354,11 @@ So the shipped configuration can be made reproducible for under 1% of a round. *
 default would change which answers the model gives (those from a stable pick), and every number in
 `docs/hy4/GGUF_NOTES.md` measured with `--fused-indexer` on would want its reference taken again.
 
+The same hazard is live in two other places, neither measured: `src/ds41/ds41_dense.cpp:741,744` selects the routed
+experts of the dense DeepSeek-V4.1 path with `ggml_top_k` over the router scores, and `src/qwen35/qwen35.cpp:1057`
+takes its sampling candidates with it. Ties are rarer on raw logits and on sigmoid+bias router scores than on a pool
+mask, but the shape of the failure is the same - the pick, and so the answer, is not the pick of the next run.
+
 ### The other configuration, measured: the split loses there
 
 `HM_UBATCH=2048 HM_EXTRA="--expert-layers-gpu 26" bash local/hy4-host-moe-check.sh pair` - `local/hy4-local-fast.json`
