@@ -1220,17 +1220,27 @@ struct Hy4Engine::Impl {
             f_su = rows(it->second.su, G.d_expert);
         }
         ggml_tensor * routed = f_rd ? f_rd : ggml_mul_mat(c, W(b + "ffn_routed_down.weight"), x);  // [LAT, nt]
-        ggml_tensor * summed = nullptr;
+        auto shexp = [&]() {                    // the shared expert reads only x: nothing here comes from the experts
+            ggml_tensor * sg = f_sg ? f_sg : ggml_mul_mat(c, W(b + "ffn_gate_shexp.weight"), x);
+            ggml_tensor * su = f_su ? f_su : ggml_mul_mat(c, W(b + "ffn_up_shexp.weight"), x);
+            return ggml_mul_mat(c, W(b + "ffn_down_shexp.weight"), ggml_swiglu_split(c, sg, su));
+        };
         if (host_moe_layer(il, nt)) {
-            summed = ggml_host_moe(c, cont(c, routed), cont(c, ids), cont(c, ggml_reshape_2d(c, wts, USED, nt)), &hm.bell, (int32_t) il);
+            // --host-moe, two ends: ring the bell as early as the expert input is ready, and wait for the answer only
+            // after the card's own independent work - the shared expert - is issued. As one op the wait stopped the
+            // stream there and the two never overlapped (docs/hy4/SPEED_WORK.md, "The decode pipeline").
+            ggml_tensor * pub_x = cont(c, routed);
+            ggml_tensor * ticket = ggml_host_moe_publish(c, pub_x, cont(c, ids), cont(c, ggml_reshape_2d(c, wts, USED, nt)),
+                                                         &hm.bell, (int32_t) il);
+            ggml_tensor * sh = shexp();
+            ggml_tensor * summed = ggml_host_moe(c, ticket, pub_x, &hm.bell);
+            ggml_tensor * moe = ggml_mul_mat(c, W(b + "ffn_routed_up.weight"), ggml_reshape_2d(c, summed, LAT, nt));
+            return ggml_add(c, moe, sh);
         }
         routed = ggml_reshape_3d(c, routed, LAT, 1, nt);
-        if (!summed) summed = experts(c, routed, ids, wts, b);                       // [1, LAT, nt]
+        ggml_tensor * summed = experts(c, routed, ids, wts, b);          // [1, LAT, nt]
         ggml_tensor * moe = ggml_mul_mat(c, W(b + "ffn_routed_up.weight"), ggml_reshape_2d(c, summed, LAT, nt));
-        ggml_tensor * sg = f_sg ? f_sg : ggml_mul_mat(c, W(b + "ffn_gate_shexp.weight"), x);
-        ggml_tensor * su = f_su ? f_su : ggml_mul_mat(c, W(b + "ffn_up_shexp.weight"), x);
-        ggml_tensor * sh = ggml_mul_mat(c, W(b + "ffn_down_shexp.weight"), ggml_swiglu_split(c, sg, su));
-        return ggml_add(c, moe, sh);
+        return ggml_add(c, moe, shexp());
     }
 
     /// PR #32517's graph_mtp: the next token's embedding and the trunk's state before it -> eh_proj -> an ordinary

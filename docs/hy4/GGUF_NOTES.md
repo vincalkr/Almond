@@ -631,7 +631,12 @@ without); the per-head `attn_k_b` / `attn_v_b` as F16 for the prompt's GEMMs (26
 `--host-moe` (opt-in): the experts in RAM computed by a host thread the graph waits on through mapped memory
 (`ggml_host_moe`, the GLM engine's doorbell), in place of the scheduler's split: the same text, +1% with MTP (the
 CPU's expert products take 0.93 ms a layer, 40.7 MB of experts at ~44 GB/s against a measured 65 GB/s peak; more
-threads do not help, 2 MB pages for the experts did not either).
+threads do not help, 2 MB pages for the experts did not either). Split into publish-early / wait-late on 2026-11-22
+(`GGML_OP_HOST_MOE_PUBLISH` + a ticket tensor, so the layer's shared expert runs inside the window; the graph without
+`--host-moe` is unchanged): +3.4% on the prompt and -2.8% on the decode round, ~2,5 ms of the ~88 ms it costs, against
+the 3,5 ms the shared expert could hide at most - so still opt-in, and it has never had the KL run against the
+reference. `docs/hy4/SPEED_WORK.md`, *The publish / wait split*. The ggml part is
+`tools/v41/ggml/host-moe-publish.patch`, on top of `hy4-long-context.patch`.
 
 The ggml changes are kept as `tools/v41/ggml/hy4-long-context.patch`.
 

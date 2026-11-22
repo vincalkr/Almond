@@ -30,16 +30,22 @@ static __global__ void host_moe_wait_copy(const volatile uint32_t * flag, const 
     for (int i = threadIdx.x; i < n; i += blockDim.x) dst[i] = out[i];
 }
 
-void ggml_cuda_op_host_moe(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+void ggml_cuda_op_host_moe_publish(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * x = dst->src[0], * ids = dst->src[1], * w = dst->src[2];
     const ggml_host_moe_bell * bell;
     memcpy(&bell, dst->op_params, sizeof(bell));
     const int tag = ((const int32_t *) dst->op_params)[2];
-    const int nx = (int) ggml_nelements(x), nk = (int) ggml_nelements(ids), nt = (int) dst->ne[1];
-    cudaStream_t stream = ctx.stream();
-    host_moe_publish<<<1, 1024, 0, stream>>>((const float *) x->data, (const int32_t *) ids->data, (const float *) w->data,
-                                             nx, nk, tag, nt, bell->x, bell->ids, bell->w, bell->meta, bell->seq);
-    host_moe_wait_copy<<<1, 1024, 0, stream>>>(bell->flag, bell->seq, bell->out, (float *) dst->data, nx);
+    const int nx = (int) ggml_nelements(x), nk = (int) ggml_nelements(ids), nt = (int) x->ne[1];
+    host_moe_publish<<<1, 1024, 0, ctx.stream()>>>((const float *) x->data, (const int32_t *) ids->data, (const float *) w->data,
+                                                   nx, nk, tag, nt, bell->x, bell->ids, bell->w, bell->meta, bell->seq);
+}
+
+void ggml_cuda_op_host_moe(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * x = dst->src[1];                                  // for its size: the answer is in bell->out
+    const ggml_host_moe_bell * bell;
+    memcpy(&bell, dst->op_params, sizeof(bell));
+    const int nx = (int) ggml_nelements(x);
+    host_moe_wait_copy<<<1, 1024, 0, ctx.stream()>>>(bell->flag, bell->seq, bell->out, (float *) dst->data, nx);
 }
 
 void * ggml_backend_cuda_alloc_mapped(size_t size) {

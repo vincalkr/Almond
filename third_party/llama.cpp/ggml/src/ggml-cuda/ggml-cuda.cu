@@ -2487,6 +2487,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_HOST_MOE:
             ggml_cuda_op_host_moe(ctx, dst);
             break;
+        case GGML_OP_HOST_MOE_PUBLISH:
+            ggml_cuda_op_host_moe_publish(ctx, dst);
+            break;
         case GGML_OP_RWKV_WKV7:
             ggml_cuda_op_rwkv_wkv7(ctx, dst);
             break;
@@ -5943,6 +5946,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_DSV41_FAKE_QUANT:
             return op->src[0]->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]) && op->type == GGML_TYPE_F32;
         case GGML_OP_HOST_MOE:
+            return op->src[0]->type == GGML_TYPE_I32 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32;
+        case GGML_OP_HOST_MOE_PUBLISH:
             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_I32 && op->src[2]->type == GGML_TYPE_F32;
         case GGML_OP_DSV41_HC_MIXES:
             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&

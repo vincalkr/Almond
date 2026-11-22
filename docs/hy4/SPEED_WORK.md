@@ -19,8 +19,8 @@ short prompt ~24 tok/s; 16K prompt read at ~480 tok/s, then ~21 tok/s; the 66K n
 ## Where the time goes
 
 - Decode, one MTP round (~73 ms, 1.76 tokens): GPU kernels ~36 ms, CPU experts of the 13 RAM layers ~21 ms
-  (~80 MB a layer for a 2-token verify, at the RAM's bandwidth; more threads, 2 MB pages and `--host-moe` do not
-  help), syncs / launch gaps / host work ~16 ms.
+  (~80 MB a layer for a 2-token verify, at the RAM's bandwidth; more threads and 2 MB pages do not help, and
+  `--host-moe` only hides the shared expert of the same layer, ~2,8% of the round - see the section at the end).
 - Prompt, 16K tokens in 1,024-token steps, before `--prefetch-experts` (~41 s, `HY4_STEP_STATS=1`): graph compute
   38 s, of which ~25 s are kernels on the two cards and ~10 s are copies: ggml's op offload copies the whole
   routed-expert tensors of the 13 RAM layers (~17 GB) to card 0 at every step, at full bus speed (16 steps x 17 GB in
@@ -226,10 +226,48 @@ Wide speculation only pays if those bytes hide: the same two tracks first, the t
 
 Plan, in the order the arithmetic gives: (1) the byte wins - `--ram-requant q3_k` measured, and the room for one or
 two expert layers more (a KV that grows and spills, `--ipool-f16`, a shorter `-c` where the session does not need
-256K); (2) the publish-early / wait-late split of `--host-moe`, ~40 lines of ggml, worth ~+4,8% and bit-identical
-quality, so it is a clean change; (3) only then a wider verify, because with the CPU bytes still at 1,00 GiB a round
+256K); (2) the publish-early / wait-late split of `--host-moe`, ~40 lines of ggml, +4,8% by this arithmetic and
++2,8% of the round measured, below; (3) only then a wider verify, because with the CPU bytes still at 1,00 GiB a round
 its break-even is 2,33 tokens a round at 3 rows and 4,29 at 8, which no drafter reaches here (DFly2 with 5 guesses got
 2,31).
+
+## The publish / wait split of `--host-moe`, built and measured (2026-11-22)
+
+Built as planned: `GGML_OP_HOST_MOE_PUBLISH` (ggml.h, ggml.c - the op, its names, `GGML_OP_COUNT` 104 -> 105),
+`ggml_host_moe_publish(c, x, ids, w, bell, tag)` publishing and returning a one-element I32 **ticket** that carries the
+bell pointer and the layer tag in its `op_params`, and `ggml_host_moe(c, ticket, x, bell)` waiting on that ticket - so
+the wait is ordered after whatever is built between the two, and `x` rides along only for the shape. In ggml-cuda
+`ggml_cuda_op_host_moe_publish` publishes (`x->ne[1]` rows) and `ggml_cuda_op_host_moe` waits and copies
+(`dst->src[1]->ne[1]`); the kernels are the ones already there. `hy4_engine.cpp ffn()` takes the new order for a host
+layer only: publish, then the shared expert (`ffn_gate_shexp / up_shexp / down_shexp`) inside the window, then the
+wait; the graph of a run **without** `--host-moe` is node for node what it was. Kept as
+`tools/v41/ggml/host-moe-publish.patch` (on top of `hy4-long-context.patch`, which carries the op itself).
+
+Measured with `local/hy4-host-moe-check.sh pair`: the configuration of record above, 16,384 real-text ids (the repo's
+own docs and sources, `local/hy4-text-ids.py`) at 256K, greedy, 1,500 tokens, two alternate pairs.
+
+| arm | prompt tok/s | decode tok/s | rounds | tokens a round | ms a round |
+|---|---|---|---|---|---|
+| as shipped | 464.3 / 447.4 | 20.79 / 21.59 | 795 / 795 | 1.89 / 1.89 | 90.7 / 87.4 |
+| `--host-moe`, split | 471.5 / 471.1 | 21.76 / 20.99 | 789 / 834 | 1.90 / 1.80 | 87.4 / 85.7 |
+
+- The prompt: 455.8 -> 471.3 tok/s, **+3.4%**, both pairs the same way.
+- The decode **round**: 89.0 -> 86.5 ms, **-2.8%** - but the two arms overlap (as shipped 90.7 / 87.4, split
+  87.4 / 85.7), so that is the whole signal, not more.
+- The decode **token**: a wash (20.98 against 20.98 tok/s). Greedy with MTP forks between runs of the *same* config -
+  two baseline runs already differ from their 11th token (`... 12 2935 77 2411` against `... 12 77505 63 13525`) - so
+  the acceptance (1.89 / 1.89 against 1.90 / 1.80) moves the token count as much as the speed does. The round is the
+  unit that means something here; `tok/s` on 1,500 tokens is not a two-sample statistic.
+- What the host reports is the prediction: 1,579 / 1,501 us of expert compute per call, 13 host layers = ~20 ms of the
+  ~88 ms round, against the 21 ms estimated above.
+
+So the window is real and smaller than its ceiling: ~2,5 ms of the round hidden where the arithmetic said at most
+3,5. It stays opt-in and out of the configuration of record, for two reasons: 2,8% of a round is next to the spread of
+a single pair, and `--host-moe` is not quality-neutral in the way the plan assumed - the host computes the products
+with the CPU MoE kernels, not the GPU ones, and "the same text" (GGUF_NOTES, *Where the MoE runs*) cannot be checked
+at this length because the runs fork by themselves. If it ever goes into the configuration it needs the KL
+(`--ppl-save` / `--ppl-ref`), which has not been run for it. The byte wins stay first: `--ram-requant q3_k` is measured
+at +5-7% and still is not in the configuration.
 
 ## How to measure
 
@@ -241,6 +279,16 @@ its break-even is 2,33 tokens a round at 3 rows and 4,29 at 8, which no drafter 
 - Quality: `--ppl FILE -c 4096` with `--ppl-save` once and `--ppl-ref` after (KL and top-1 against it); a change of
   kernels alone moves KL by ~0.1 on this 2-bit model. `HY4_PPL_BINS=N` prints perplexity per N positions.
 - Long contexts: `--prompt-ids @FILE` reads the ids from a file (a 66K prompt does not fit in argv).
+- A real-text prompt: `python3 local/hy4-text-ids.py 16384 /tmp/hy4-p16k-text.ids` - the repo's own docs and sources
+  through `tools/almond_tokenizer.py`, byte for byte reproducible. It needs `.venv/bin/python` (the system python has
+  no `regex`).
+- Harnesses in `local/`: `hy4-host-moe-check.sh [pair]` (as shipped against `--host-moe`, the configuration of record,
+  one command per arm, and it refuses to run while an `--serve` engine holds the cards), `hy4-graph-stability-check.sh`,
+  `hy4-prefetch-check.sh`, `hy4-crash-check.sh`. All of them want the whole machine: unload the model through the
+  router (`/free`, or the CLI's `free_gpu`) rather than stopping the serve stack, which takes the user's session with it.
+- For a decode A/B, the unit is the **round** (decode seconds / MTP rounds), not tok/s: greedy forks between runs of
+  the same config, so the acceptance and with it the token count moves by more than a few percent of speed. Two
+  samples per arm show nothing below ~5%.
 - A **pseudo-random** id prompt is a bad decode harness: on `/tmp/hy4-p16k.ids` (16,384 random ids, regenerated
   2026-11-21) the model settles on repeating one token and the MTP draft hits 749 of 751 - 2.00 tokens a round, decode
   25.99 tok/s where real text gives 23.4-24.5. Use it for the prompt and for memory/room measurements, never for

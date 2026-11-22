@@ -77,12 +77,17 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 
 ## Open
 
-- Hy4-flash speed work: state, measurements and what is being tried in `docs/hy4/SPEED_WORK.md` (2026-11-20).
+- Hy4-flash speed work: state, measurements and what is being tried in `docs/hy4/SPEED_WORK.md` (2026-11-22).
 - `--ipool-f16` (the indexer's pooled keys as F16): tried 2026-11-21 and not shipped - 434.3 -> 46.6 prompt tok/s at
   256K because the F16 pool leaves the fused indexer and casts the pool to F32 inside the graph, for 80/120 MiB and no
   expert layer, and KL 0.00000 / top-1 100.00% against the F32 pool (docs/hy4/GGUF_NOTES.md). Its 275 lines are
   parked in `local/ipool-f16-wip.patch` (not tracked) for whoever teaches `ggml_lightning_indexer` to read F16 pool
   keys; that same staged diff also carried the prefetch staging into `place()`'s budget, which is committed.
+- Hy4 `--host-moe`, publish / wait split (2026-11-22, committed): one ggml op more (`GGML_OP_HOST_MOE_PUBLISH`, a
+  ticket tensor, `GGML_OP_COUNT` 105) so a RAM layer's shared expert runs while the host computes its routed experts.
+  Measured on the configuration of record, two alternate pairs: prompt +3.4%, decode round -2.8% (~2,5 ms where 3,5 ms
+  was the ceiling), decode tok/s unchanged. Kept opt-in; it has no KL run against the reference.
+  `tools/v41/ggml/host-moe-publish.patch`, `local/hy4-host-moe-check.sh`.
 
 - **Qwen3.8-27B:** images (CPU encoder, 300 image tokens: a large screenshot's small text is not legible, as on
   Flash-Next) and conversations on disk work; measured on a few pictures and one restart, not in long agent sessions. The 4-token verify window costs 1.4 decode tokens (ggml's MMVQ is

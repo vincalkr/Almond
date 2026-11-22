@@ -1087,6 +1087,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "DSV41_FAKE_QUANT",
     "DSV41_HC_MIXES",
     "HOST_MOE",
+    "HOST_MOE_PUBLISH",
 
     "UNARY",
 
@@ -1104,7 +1105,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
+static_assert(GGML_OP_COUNT == 105, "GGML_OP_COUNT != 105");   // Almond: + HOST_MOE_PUBLISH
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1204,7 +1205,8 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "dsv4_hc_post(x, residual, post, comb)",
     "dsv41_fake_quant(x)",
     "dsv41_hc_mixes(mixes, scale, base)",
-    "host_moe(x, ids, w)",
+    "host_moe(ticket, x)",
+    "host_moe_publish(x, ids, w)",
 
     "unary(x)",
 
@@ -1222,7 +1224,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
+static_assert(GGML_OP_COUNT == 105, "GGML_OP_COUNT != 105");   // Almond: + HOST_MOE_PUBLISH
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6655,9 +6657,11 @@ struct ggml_tensor * ggml_dsv4_hc_pre_gated(
     return ggml_dsv4_hc_pre_impl(ctx, x, gate, scale, true);
 }
 
-// ggml_host_moe
+// ggml_host_moe_publish and ggml_host_moe: the two ends of a host MoE handoff. The publish goes where the expert
+// input is ready, the wait wherever the answer is first needed, and the graph can put the card's own independent
+// work between them.
 
-struct ggml_tensor * ggml_host_moe(
+struct ggml_tensor * ggml_host_moe_publish(
         struct ggml_context * ctx,
         struct ggml_tensor  * x,
         struct ggml_tensor  * ids,
@@ -6667,15 +6671,32 @@ struct ggml_tensor * ggml_host_moe(
     GGML_ASSERT(x->type == GGML_TYPE_F32 && ids->type == GGML_TYPE_I32 && w->type == GGML_TYPE_F32);
     GGML_ASSERT(ggml_is_contiguous(x) && ggml_is_contiguous(ids) && ggml_is_contiguous(w));
     GGML_ASSERT(ggml_nelements(ids) == ggml_nelements(w));
-    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, x->ne[0], ggml_nelements(x) / x->ne[0]);
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);   // a ticket: the wait depends on it
     int32_t params[3];
     memcpy(params, &bell, sizeof(bell));
     params[2] = tag;
     ggml_set_op_params(result, params, sizeof(params));
-    result->op     = GGML_OP_HOST_MOE;
+    result->op     = GGML_OP_HOST_MOE_PUBLISH;
     result->src[0] = x;
     result->src[1] = ids;
     result->src[2] = w;
+    return result;
+}
+
+struct ggml_tensor * ggml_host_moe(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * ticket,
+        struct ggml_tensor  * x,
+        const struct ggml_host_moe_bell * bell) {
+    GGML_ASSERT(ggml_nelements(ticket) == 1 && ticket->type == GGML_TYPE_I32);
+    GGML_ASSERT(x->type == GGML_TYPE_F32 && ggml_is_contiguous(x));
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, x->ne[0], ggml_nelements(x) / x->ne[0]);
+    int32_t params[2];
+    memcpy(params, &bell, sizeof(bell));
+    ggml_set_op_params(result, params, sizeof(params));
+    result->op     = GGML_OP_HOST_MOE;
+    result->src[0] = ticket;
+    result->src[1] = x;   // its shape only: the wait copies bell->out into the result
     return result;
 }
 
