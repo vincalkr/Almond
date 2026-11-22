@@ -886,9 +886,10 @@ struct Hy4Engine::Impl {
             score = ggml_add(c, score, in.pool_mask);
         }
         // --fused-indexer also picks the top groups with ggml_top_k (no full sort of every pool; the order of the picks
-        // does not matter to the mask or the gather)
-        ggml_tensor * top = o.fused_indexer ? ggml_top_k(c, score, (int) sh.n_top)
-                                            : ggml_argsort_top_k(c, score, (int) sh.n_top);   // [n_top, nt]
+        // does not matter to the mask or the gather) - but ggml_top_k places the keys equal to the k-th with atomicAdd,
+        // so on ties the picks themselves change between runs: --indexer-argsort pays the sort and repeats.
+        ggml_tensor * top = (o.fused_indexer && !o.indexer_argsort) ? ggml_top_k(c, score, (int) sh.n_top)
+                                                                   : ggml_argsort_top_k(c, score, (int) sh.n_top);   // [n_top, nt]
         ggml_tensor * sel = ggml_get_rows(c, in.pool_idx, ggml_reshape_1d(c, cont(c, top), sh.n_top * nt));
         sel = ggml_reshape_2d(c, sel, kp * sh.n_top, nt);
         if (G.idx_tail) sel = ggml_concat(c, sel, in.tail, 0);                        // [n_sel, nt]

@@ -91,14 +91,16 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
   Measured on the configuration of record, two alternate pairs: prompt +3.4%, decode round -2.8% (~2,5 ms where 3,5 ms
   was the ceiling), decode tok/s unchanged; on `hy4-local-fast.json` (16 host layers) the same pair goes the other way,
   +2.3% a round. Stays off. `tools/v41/ggml/host-moe-publish.patch`, `local/hy4-host-moe-check.sh`.
-- **The hy4 engine did not repeat run to run, and the cause is `--fused-indexer`** (2026-11-22,
-  `local/hy4-determinism-check.sh` then `local/hy4-drift-hunt.sh`): the same flags scored **KL 0.12 - 0.14 and
-  perplexity +-1.3%** against their own reference over 8,190 teacher-forced rows, with graphs off and the expert
-  prefetch off as well; with `--fused-indexer` taken out the same pair is **KL 0.00000 / top-1 100.00% / the same ppl
-  to four digits**. Engram placement (ram, ssd) and `--fused-hc` excluded. Every KL between 0.003 and 0.2 in
-  `docs/hy4/GGUF_NOTES.md` was measured with that flag on, against a reference assumed to repeat. Not fixed: the next
-  step is dumping the indexer's scores and picks for two runs (the fused path casts the pool mask to F16 where the
-  unfused one adds it as F32; the kernel's own accumulators are initialized).
+- **The hy4 engine did not repeat run to run; the cause is the pool pick `ggml_top_k`** (2026-11-22,
+  `local/hy4-determinism-check.sh` → `local/hy4-drift-hunt.sh` → `local/hy4-indexer-sort-check.sh`): two runs of one
+  configuration scored **KL 0.12 - 0.14 / top-1 ~88%** over 8,190 teacher-forced rows; with `--fused-indexer` taken out
+  the same pair is **KL 0.00000 / 100.00%**. `--fused-indexer` picks the pool groups with `ggml_top_k`, whose CUDA/HIP
+  kernel is a radix select placing the keys tied with the k-th by `atomicAdd` (`ggml-cuda/top-k.cu:201,204`) - and the
+  dead pool slots all carry the same mask value, so the boundary of the top-k is a pile of ties. The new
+  `--indexer-argsort` keeps the fused score kernel and sorts for the picks: **KL 0.00000, top-1 100.00%, the same ppl
+  to four digits**, for **+0.8% of a round** (prompt unchanged, 471.0 -> 470.3). Not the default yet - that changes the
+  answers the model gives and would want the references of `docs/hy4/GGUF_NOTES.md` taken again. Engram placement
+  (ram/ssd), `--fused-hc`, the graphs and the expert prefetch were all excluded.
 
 - **Qwen3.8-27B:** images (CPU encoder, 300 image tokens: a large screenshot's small text is not legible, as on
   Flash-Next) and conversations on disk work; measured on a few pictures and one restart, not in long agent sessions. The 4-token verify window costs 1.4 decode tokens (ggml's MMVQ is

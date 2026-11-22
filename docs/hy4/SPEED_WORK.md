@@ -331,6 +331,29 @@ or the *picks* do - about ten lines in `hy4_engine.cpp` beside `route_stats` (wh
   question are both under this floor; the floor has to be re-established (or removed) before any of those numbers
   means what it says.
 
+### The cause is the pick, not the score kernel: `ggml_top_k` (same day, `local/hy4-indexer-sort-check.sh`)
+
+`--fused-indexer` builds its picks with `ggml_top_k`, the unfused path with `ggml_argsort_top_k` (`hy4_engine.cpp:888-891`).
+The CUDA/HIP `ggml_top_k` is a radix select: the keys that tie with the k-th are placed by
+`atomicAdd(&state->equal_count, 1)` (`ggml-cuda/top-k.cu:201,204`), so **which** of the tied keys wins is up to the
+scheduler. Ties are not an edge case here: every dead pool slot carries the same mask value, so the boundary of the
+top-k sits on a pile of equal scores. `--indexer-argsort` (new flag) keeps the fused score kernel and pays a real sort
+for the picks instead:
+
+| two runs, same flags | KL | top-1 | ppl |
+|---|---:|---:|---:|
+| `--fused-indexer`, picks through `ggml_top_k` | 0.12667 | 88.51% | 35.4566 / 35.6838 |
+| `--fused-indexer --indexer-argsort` | **0.00000** | **100.00%** | 35.5641 / 35.5641 |
+
+What it costs at the configuration of record (16K real text, 256K, greedy, 750 tokens): prompt **471.0 -> 470.3 tok/s**
+(the sort is free there), decode **83.6 -> 84.3 ms a round, +0.8%**. The per-token figure (-2.1%, 21.22 -> 20.78 tok/s)
+is not a cost: it is the drift itself, seen from the other side - with `ggml_top_k` the two runs pick differently, so
+they draft and accept differently (422 rounds at 1.77 tokens against 428 at 1.75).
+
+So the shipped configuration can be made reproducible for under 1% of a round. **Not flipped to default yet**: the
+default would change which answers the model gives (those from a stable pick), and every number in
+`docs/hy4/GGUF_NOTES.md` measured with `--fused-indexer` on would want its reference taken again.
+
 ### The other configuration, measured: the split loses there
 
 `HM_UBATCH=2048 HM_EXTRA="--expert-layers-gpu 26" bash local/hy4-host-moe-check.sh pair` - `local/hy4-local-fast.json`
