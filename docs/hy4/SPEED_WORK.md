@@ -359,7 +359,9 @@ for the picks instead:
 | `--fused-indexer --indexer-argsort` | **0.00000** | **100.00%** | 35.5641 / 35.5641 |
 
 What it costs at the configuration of record (16K real text, 256K, greedy, 750 tokens): prompt **471.0 -> 470.3 tok/s**
-(the sort is free there), decode **83.6 -> 84.3 ms a round, +0.8%**. The per-token figure (-2.1%, 21.22 -> 20.78 tok/s)
+(the sort is free there; the prompt is the tight measurement, 0.15%), decode **83.6 -> 84.3 ms a round, +0.8%** - which
+is under the ~2% the clock itself jitters along an identical path (see "How to measure"), so call it "not measurable, at
+worst about a per cent" rather than a measured 0.8%. The per-token figure (-2.1%, 21.22 -> 20.78 tok/s)
 is not a cost: it is the drift itself, seen from the other side - with `ggml_top_k` the two runs pick differently, so
 they draft and accept differently (422 rounds at 1.77 tokens against 428 at 1.75).
 
@@ -394,6 +396,23 @@ What is left is speed, and the speed figures in this file were taken under the d
 -2.8% a round at the configuration of record and +2.3% at `hy4-local-fast`, with the prompt +3.4%. Those want taking
 again before the flag is decided either way: `bash local/hy4-host-moe-check.sh pair` (~18 min), and the plain
 `--host-moe` against the shipped path the same harness measures with its other mode.
+
+**Taken again the same day, and the difference is gone.** Three runs at the configuration of record (`pair`'s `BASE`,
+16K real text, 256K, greedy, 1000 tokens, one arm thrown away to warm the Engram):
+
+| run | arm | rounds | tokens a round | decode a round |
+|---|---|---:|---:|---:|
+| 1 | `--host-moe` | 557 | 1.80 | 89.8 ms |
+| 2 | as shipped | 560 | 1.79 | 88.9 ms |
+| 3 | `--host-moe` | 557 | 1.80 | **87.7 ms** |
+
+The two `--host-moe` runs followed **exactly** the same path - 557 rounds, 443 drafts accepted, the same text - and
+still differ by 2.3% in wall clock. So the machine's own jitter is ~2% and the flag's effect is inside it: neither the
+-2.8% a round nor the +3.4% prompt of yesterday's pair, which was the pick's drift, can be told apart from nothing.
+`--host-moe` therefore stays off on the speed question, with a much better reason than it had yesterday: it is
+bit-identical and it is not measurably faster. (The prompt of these runs, 310-359 tok/s, is not comparable with the
+471 of the rest of this file: `pair`'s `BASE` uses `--engram-place auto` and the Engram pages come from the SSD; keep
+`ram` for prompt numbers.)
 
 ### The other configuration, measured: the split loses there
 
@@ -432,6 +451,13 @@ configuration; it is a mechanism kept because it is the only way to put host wor
 - Build: `./build.sh` (a new `.cu` in `ggml-cuda` needs `cmake third_party/llama.cpp/build-hip` first).
 - Speed: `build-hip-fused/almond-engine <config args> --temp 0 -n 400 --prompt-ids IDS` (prints prompt and
   generated tok/s and the MTP rounds). A VM on this machine adds noise: compare alternate runs.
+- **Wall clock still jitters ~2% even along an identical path** (2026-11-22: two `--host-moe` runs with the same 557
+  rounds, the same 443 accepted drafts and the same text took 50.03 and 48.87 s for 1,000 tokens, 2.3% apart). The pick
+  made the *path* repeat; it did not make the clock repeat. Anything under ~2-3% per round needs repeats or a different
+  metric - the prompt is the tight one (471.0 against 470.3, 0.15%), and a kernel's own cost is better read from
+  `rocprofv3` than from a rate.
+- An environment-knob A/B (does it change the numbers, what is it worth): `bash local/hy4-knob-ab.sh NAME=value -n 500`
+  - a perplexity pass for the KL against the shipped configuration, then the speed pair at the configuration of record.
 - Quality: `--ppl FILE -c 4096` with `--ppl-save` once and `--ppl-ref` after (KL and top-1 against it); a change of
   kernels alone moves KL by ~0.1 on this 2-bit model. `HY4_PPL_BINS=N` prints perplexity per N positions.
 - Long contexts: `--prompt-ids @FILE` reads the ids from a file (a 66K prompt does not fit in argv).
@@ -439,9 +465,12 @@ configuration; it is a mechanism kept because it is the only way to put host wor
   through `tools/almond_tokenizer.py`, byte for byte reproducible. It needs `.venv/bin/python` (the system python has
   no `regex`).
 - Harnesses in `local/`: `hy4-host-moe-check.sh [pair]` (as shipped against `--host-moe`, the configuration of record,
-  one command per arm, and it refuses to run while an `--serve` engine holds the cards), `hy4-graph-stability-check.sh`,
-  `hy4-prefetch-check.sh`, `hy4-crash-check.sh`. All of them want the whole machine: unload the model through the
-  router (`/free`, or the CLI's `free_gpu`) rather than stopping the serve stack, which takes the user's session with it.
+  one command per arm), `hy4-host-moe-quality-check.sh`, `hy4-determinism-check.sh`, `hy4-drift-hunt.sh`,
+  `hy4-indexer-sort-check.sh [default]`, `hy4-graph-stability-check.sh`, `hy4-prefetch-check.sh`, `hy4-crash-check.sh`.
+  All of them want the whole machine and refuse to run while an `almond-engine --serve` holds the cards: unload the
+  model through the router (`/free`, or the CLI's `free_gpu`) rather than stopping the serve stack, which takes the
+  user's session with it. **Since 2026-11-22 the user asked that the engine not be taken at all unless they say so** -
+  ask first before a run that would interrupt them.
 - For a decode A/B, the unit is the **round** (decode seconds / MTP rounds), not tok/s: greedy forks between runs of
   the same config, so the acceptance and with it the token count moves by more than a few percent of speed. Two
   samples per arm show nothing below ~5%.

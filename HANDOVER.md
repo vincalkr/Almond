@@ -95,7 +95,11 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
   ticket tensor, `GGML_OP_COUNT` 105) so a RAM layer's shared expert runs while the host computes its routed experts.
   Measured on the configuration of record, two alternate pairs: prompt +3.4%, decode round -2.8% (~2,5 ms where 3,5 ms
   was the ceiling), decode tok/s unchanged; on `hy4-local-fast.json` (16 host layers) the same pair goes the other way,
-  +2.3% a round. Stays off. `tools/v41/ggml/host-moe-publish.patch`, `local/hy4-host-moe-check.sh`.
+  +2.3% a round. **Re-measured the same day against a reference that repeats: the path is bit-identical (KL 0.00000,
+  graphs on and off) and its speed is inside the machine's ~2% jitter** (557 rounds, 443 accepted, the same text twice:
+  89.8 and 87.7 ms a round, against 88.9 shipped) - so the +3.4% / -2.8% above was the pick's drift, not the flag. Stays
+  off, for the better reason. `tools/v41/ggml/host-moe-publish.patch`, `local/hy4-host-moe-check.sh`,
+  `local/hy4-host-moe-quality-check.sh`.
 - **The hy4 engine did not repeat run to run; the cause is the pool pick `ggml_top_k`** (2026-11-22,
   `local/hy4-determinism-check.sh` → `local/hy4-drift-hunt.sh` → `local/hy4-indexer-sort-check.sh`): two runs of one
   configuration scored **KL 0.12 - 0.14 / top-1 ~88%** over 8,190 teacher-forced rows; with `--fused-indexer` taken out
