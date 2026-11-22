@@ -626,6 +626,13 @@ MTP, 400 tokens, two alternate runs:
 
 Q3_K is the best of them: +5-7%, at a cost below the KL ~0.1 that a change of kernels gives.
 
+**Not shipped (2026-11-22, the user's call): the quality cost is not worth +5-7%.** Two caveats found while checking
+whether to ship it. (1) The KLs in the table above were measured against a reference taken as repeating; two runs of
+one configuration now differ by **KL 0.12 - 0.14 and perplexity +-1.3%** (`docs/hy4/SPEED_WORK.md`, *Run, and the answer
+is: the path does not repeat*), so a 0.012 sits under that floor and the table's numbers are only meaningful as the
+order of the four requant options, not as their size. (2) The speed gain was measured on a short prompt (400 tokens,
+`-c 256K`); the 16K real-text configuration runs ~21 tok/s, not ~23.
+
 Tried and left out: gathering the sliding layers' window rows in short steps (22.2 / 22.3 tok/s with, 23.0 / 22.5
 without); the per-head `attn_k_b` / `attn_v_b` as F16 for the prompt's GEMMs (267.6 -> 267.0 tok/s).
 `--host-moe` (opt-in): the experts in RAM computed by a host thread the graph waits on through mapped memory

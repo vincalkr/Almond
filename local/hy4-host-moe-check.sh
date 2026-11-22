@@ -21,8 +21,8 @@ if [ -z "${HY4HM_FORCE:-}" ] && ps -eo args | grep -q "almond[-]-engine --serve"
     exit 1
 fi
 BASE="--hy4 -m models/hy4-iq2ah/Hy4-flash-IQ2_AH-00001-of-00002.gguf --gpus 0,1 -c 262144 --engram-place auto --mtp
-      --fused-hc --dense-q8 --reserve-mib 1400 --fused-proj --fused-indexer --gather-attn --kv-q8 --ubatch 1024
-      --prefetch-experts --temp 0 -n 1500 -t 12 --prompt-ids @$PROMPT"
+      --fused-hc --dense-q8 --reserve-mib 1400 --fused-proj --fused-indexer --gather-attn --kv-q8 --ubatch ${HM_UBATCH:-1024}
+      ${HM_EXTRA:-} --prefetch-experts --temp 0 -n ${HM_N:-1500} -t 12 --prompt-ids @${HM_PROMPT:-$PROMPT}"
 PAT='^hy4: (layers per card|compute buffers|prefetch|warning|host-moe)|^hy4: (MTP|DFly2)|generated tokens|Error|error'
 i=0
 run() {                                  # $1 the name, $2 extra engine flags

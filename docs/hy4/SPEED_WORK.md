@@ -274,16 +274,64 @@ at +5-7% and still is not in the configuration.
 - **Quality: nothing.** No `--ppl-save` / `--ppl-ref` run, no KL, no perplexity for the host expert path. The
   "the same text" sentence in GGUF_NOTES (*Where the MoE runs*) was never actually checked, and the host computes the
   products with the CPU MoE kernels, not the GPU ones.
-- **The graph path is not verified.** Those four runs printed no `hy4: graph (ggml-cuda)` counters at all
-  (`GGML_CUDA_GRAPH_STATS` was not in the harness), so it is not even known whether they replayed graphs. This is the
-  delicate part: the publish node inside a captured graph runs on the host at capture time only, and the ring slot the
-  wait reads is **baked into the graph** (`ggml-cuda/host-moe.cu`, and `st.graph_slot` advances per replay to match) - a
+
+### Run, and the answer is: the path does not repeat (2026-11-22)
+
+`local/hy4-host-moe-quality-check.sh` (four arms, 8,190 scored rows each, `-c 8192` with
+`--expert-layers-gpu 29` so the same 13 layers sit on the CPU as the 256K configuration puts them) and
+`local/hy4-determinism-check.sh` (five arms, each pair saving and reading its own reference):
+
+| arm | KL against the reference | top-1 | ppl |
+|---|---:|---:|---:|
+| reference, save (chunk 1 / 2) | - | - | 35.7327 (31.8600 / 35.7327) |
+| **the same flags again** (control) | **0.14530** | 88.17% | 35.5282 |
+| `--host-moe`, graphs as usual | 0.13567 | 88.18% | 36.0442 |
+| `--host-moe`, `GGML_CUDA_DISABLE_GRAPHS=1` | 0.13454 | 88.32% | 35.8203 |
+
+| same flags again, in other settings | KL | top-1 | ppl |
+|---|---:|---:|---:|
+| graphs off, prefetch on | 0.12347 | 88.42% | 36.0012 against 35.4946 |
+| graphs on, no prefetch | 0.13881 | 88.46% | 35.9419 against 36.4138 |
+| graphs off, no prefetch (against the graphs-on run) | 0.13234 | 88.57% | 35.6168 |
+
+**Two runs of one configuration differ by KL ~0.12 - 0.14 and perplexity +-1.3%.** So:
+
+- `--host-moe` changes nothing measurable - 0.1357 and 0.1345 are at or under the control's own 0.1453 - and the same
+  for graphs on against off. But that is a **floor, not a proof**: a 0.01-0.05 effect, including a ring slot that
+  desynchronizes under replay, sits under it and this test cannot see it.
+- The drift is inside one forward pass, not in the windowing: chunk 1 alone is 31.8600 against 31.2560. Graphs and the
+  expert prefetch are excluded - with both off the pair still moves 0.123. Not looked for yet.
+- **What this costs the documentation:** every KL in `docs/hy4/GGUF_NOTES.md` quoted between 0.003 and 0.2 was measured
+  against a reference that was assumed to repeat - the requant table says so in words ("the same run without it
+  repeats exactly: KL 0.00000"). That no longer holds here. `--ram-requant q3_k`'s KL 0.012 and the `--host-moe`
+  question are both under this floor; the floor has to be re-established (or removed) before any of those numbers
+  means what it says.
+
+### The other configuration, measured: the split loses there
+
+`HM_UBATCH=2048 HM_EXTRA="--expert-layers-gpu 26" bash local/hy4-host-moe-check.sh pair` - `local/hy4-local-fast.json`
+at 16K real text, 256K, greedy, 1,500 tokens. This pair is clean: the MTP trajectory is the same to the token in both
+arms (826 rounds, 673 of 826 accepted, 1.81 tokens a round either way).
+
+| arm | prompt tok/s | decode tok/s | ms a round |
+|---|---:|---:|---:|
+| as shipped | 518.7 | 20.13 | 90.1 |
+| `--host-moe`, split | 526.4 | 19.69 | **92.2** |
+
+**+2.3% per round**, the opposite sign of the configuration of record. There the split put 13 layers on the host, here
+16 (`host-moe: 13,216 calls, 1550.6 us` each = 24.8 ms of the round): the host work grows with the layers while the
+window - the same layer's shared expert, 0.27 ms each - does not, and the wait lands in front of `ffn_routed_up` on
+three more layers. The prompt still gains (+1.5%). Net: `--host-moe` is not a feature to turn on, in either
+configuration; it is a mechanism kept because it is the only way to put host work beside card work at all.
+- **The graph path: run, and it cannot be read at this resolution** - see the tables below. The delicate part remains
+  real: the publish node inside a captured graph runs on the host at capture time only, and the ring slot the wait
+  reads is **baked into the graph** (`ggml-cuda/host-moe.cu`, and `st.graph_slot` advances per replay to match) - a
   desync between the host's `seq` and the replay's slot gives a stale answer with no crash and no error, only wrong
-  tokens. What separates a kernel difference from a ring desync: three runs at 4096 with `--ppl` against one reference
-  (baseline, `--host-moe` with graphs on, `--host-moe` with `GGML_CUDA_DISABLE_GRAPHS=1`) - ~12 min of cards, through
-  the router's unload, never `./stop.sh`.
-- **Other configurations, untested**: `hy4-local-fast.json` (`--ubatch 2048 --expert-layers-gpu 26`: fewer host
-  layers, wider window), the 64K case where `--prefetch-experts` switches itself off, and DFly2 with `--host-moe`.
+  tokens. What would still show it: a check that does not go through the model's numerics, e.g. the engine writing the
+  `seq` it published and the `flag` the wait saw per layer and comparing them (cheap, in `hy4_engine.cpp`), or the same
+  comparison against a deterministic baseline once the run-to-run drift below is understood.
+- **Other configurations**: `hy4-local-fast.json` measured, and the split loses there (below). Still untested: the 64K
+  case where `--prefetch-experts` switches itself off, and DFly2 with `--host-moe`.
 - **No unit test covers it**: `src/hy4/test_hy4_moe.cpp` and the other `test_hy4_*` do not know `--host-moe`, which
   needs mapped pinned memory and only exists in the engine path.
 - **The `--serve` path** (the router, session save/restore, `local/hy4-crash-check.sh`'s fini deaths) with hy4 +

@@ -169,8 +169,9 @@ decoding, Qwen v2 checkpoints. Nothing for ROCm/discrete AMD since our read.
 
 ## What this sweep would change here, in the order it costs least
 
-1. **`--ram-requant q3_k` into the configuration** (hy4): measured +5-7% at KL 0.012, already in the engine; Strata's
-   S8_K CPU kernels are the same argument. Needs a quality OK, not code.
+1. ~~**`--ram-requant q3_k` into the configuration** (hy4)~~ - **decided against, 2026-11-22**: the quality cost is not
+   worth +5-7%. Note also that its KL 0.012 sits under the run-to-run floor now measured (KL 0.12-0.14 for identical
+   flags, `local/hy4-determinism-check.sh`), so it could not have been confirmed anyway.
 2. **An adaptive MTP length from the measured step cost** (hy4 and qwen `--spec`): Avalon's policy, and our own cost
    curve (55.0 - 167.1 ms for k = 1..8 rows) is already in `SPEED_WORK`. Days, no new mechanism.
 3. **Copy kernel vs SDMA for the expert staging on HIP** (hy4 `--prefetch-experts`, qwen): Avalon routes staged host
