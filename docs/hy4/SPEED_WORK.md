@@ -273,7 +273,8 @@ at +5-7% and still is not in the configuration.
 
 - **Quality: nothing.** No `--ppl-save` / `--ppl-ref` run, no KL, no perplexity for the host expert path. The
   "the same text" sentence in GGUF_NOTES (*Where the MoE runs*) was never actually checked, and the host computes the
-  products with the CPU MoE kernels, not the GPU ones.
+  products with the CPU MoE kernels, not the GPU ones. **Done the same day** - see "`--host-moe` re-checked against a
+  reference that repeats" below: the path is bit-identical, KL 0.00000.
 
 ### Run, and the answer is: the path does not repeat (2026-11-22)
 
@@ -373,6 +374,26 @@ The same hazard is live in two other places, neither measured: `src/ds41/ds41_de
 experts of the dense DeepSeek-V4.1 path with `ggml_top_k` over the router scores, and `src/qwen35/qwen35.cpp:1057`
 takes its sampling candidates with it. Ties are rarer on raw logits and on sigmoid+bias router scores than on a pool
 mask, but the shape of the failure is the same - the pick, and so the answer, is not the pick of the next run.
+
+### `--host-moe` re-checked against a reference that repeats (2026-11-22, `local/hy4-host-moe-quality-check.sh` again)
+
+With the pool pick sorted (the default now), the same four arms print:
+
+| arm | KL against the reference | top-1 | ppl |
+|---|---:|---:|---:|
+| reference, save | - | - | 35.5641 |
+| **the same flags again** (control) | **0.00000** | **100.00%** | 35.5641 |
+| `--host-moe`, graphs as usual | **0.00000** | **100.00%** | 35.5641 |
+| `--host-moe`, `GGML_CUDA_DISABLE_GRAPHS=1` | **0.00000** | **100.00%** | 35.5641 |
+
+So the host expert path is **bit-identical** to the scheduler's GPU -> CPU -> GPU split over 8,190 rows and 13 CPU
+layers, and the ring slot a captured graph bakes in did not desynchronize from the host thread over those rows - the
+risk the section above could not see. The quality objection to `--host-moe` is gone: there is nothing to distinguish.
+
+What is left is speed, and the speed figures in this file were taken under the drift: the publish/wait split was
+-2.8% a round at the configuration of record and +2.3% at `hy4-local-fast`, with the prompt +3.4%. Those want taking
+again before the flag is decided either way: `bash local/hy4-host-moe-check.sh pair` (~18 min), and the plain
+`--host-moe` against the shipped path the same harness measures with its other mode.
 
 ### The other configuration, measured: the split loses there
 
