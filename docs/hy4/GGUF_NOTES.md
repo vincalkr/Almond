@@ -550,6 +550,28 @@ the stacked attention input 83 -> 67 us, the output head 496 -> 431 us; about 2.
 
 The configurations use MTP, so it stays off there.
 
+**Re-measured 2026-11-22, now that a run repeats** (`bash local/hy4-knob-ab.sh ALMOND_MMVQ_ROWS=1`, 16K real text,
+256K, 500 tokens, the shipped MTP configuration unless said otherwise). The kernel is **bit-identical** to ggml's at
+one token a step - `--ppl` over 8,190 rows gives KL 0.00000, top-1 100.00%, perplexity 35.5641 both - and with
+speculation switched off (`HY4_NO_SPEC=1`) it is worth **+10.1%**: decode 16.34 -> **17.99 tok/s**.
+
+At the trunk widths of a verify batch it does not win, at any setting of the waves-per-row split
+(`ALMOND_MMVQ_WPR`, a probe added to `tools/v41/ggml/mmvq-rows.patch` for this, 0 = the heuristic, 1/2/4 forced):
+
+| one MTP round, 500 tokens | rounds | tokens a round | ms a round |
+| --- | ---: | ---: | ---: |
+| ggml's `mul_mat_vec_q` (the knob off, the shipping case) | 289 | 1.73 | **84.7** |
+| `mul_mat_vec_q8_0_rows`, heuristic split | 278 | 1.79 | 85.5 |
+| same, 1 wave a row | 289 | 1.73 | 85.5 |
+| same, 2 waves a row | 273 | 1.83 | 88.9 |
+| same, 4 waves a row | 288 | 1.73 | 92.4 |
+
+So the 2026-11-19 reading was right, and the prize is now named exactly: the kernel wins by 10% where a step carries
+one token and loses where it carries the two to four of a verify batch, whatever the split - the heuristic's 4 waves
+for long rows is the worst of them (92.4). Closing that gap needs a different block layout for several columns at once
+(ggml's own table gives a row more warps as `ncols_dst` grows, ours keeps one wave and loops over the columns), not a
+setting. It stays off in the configurations.
+
 ## The sparse layers' indexer, and 256K (2026-11-20)
 
 **A bug from e4d4d56 to here.** `--fused-proj` stacks `indexer.attn_k` into `blk.L.attn_in_cat`, and the engine

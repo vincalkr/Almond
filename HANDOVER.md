@@ -78,6 +78,11 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 ## Open
 
 - Hy4-flash speed work: state, measurements and what is being tried in `docs/hy4/SPEED_WORK.md` (2026-11-22).
+- **A named prize: `mul_mat_vec_q8_0_rows` is worth +10.1% of decode at one token a step (16.34 -> 17.99 tok/s, and it
+  is bit-identical to ggml's kernel: KL 0.00000) and nothing at the two to four tokens of an MTP verify batch**
+  (84.7 ms a round without it, 85.5/88.9/92.4 with it at 1/2/4 waves a row). Closing that gap needs a block layout for
+  several columns at once, not a setting: ggml's table widens the block with `ncols_dst`, ours keeps one wave per row
+  and loops the columns. `docs/hy4/GGUF_NOTES.md`, "The same for Q8_0 rows"; `ALMOND_MMVQ_WPR` probes the split.
 - The other engines and forks for our models, swept 2026-11-22 (Avalon, Strata and its EXL3 AMD fork, project-maya,
   Xolotl, exllamav3-rocm(-moe), elpis, the RDNA3 INT4 tree, llama.cpp's two-month delta against our vendored ggml):
   what each carries that we do not, their numbers as they print them, and the six things worth taking, in `docs/ENGINES_WATCH.md`.

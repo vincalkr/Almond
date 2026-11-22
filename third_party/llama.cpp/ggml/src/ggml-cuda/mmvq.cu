@@ -1182,7 +1182,11 @@ static void mul_mat_vec_q_switch_ncols_dst(
                            fusion.shared_up;
         if (almond_rows && !has_ids && !fused && warp_size == 32 && ncols_dst <= 8) {
             const int bpr = ncols_x / QK8_0;
-            const int wpr = bpr > 128 ? 4 : bpr > 64 ? 2 : 1;      // up to 2,048 / 4,096 values a wave, then 4 waves
+            // ALMOND_MMVQ_WPR is a probe for the multi-token case: the split below was chosen at one token a step,
+            // where it is worth +10% of decode; at the two to four tokens of an MTP verify batch it is not (docs/hy4/
+            // GGUF_NOTES.md, "The same for Q8_0 rows").  0 keeps the heuristic, 1/2/4 forces waves per row.
+            static const int wpr_env = [] { const char * e = getenv("ALMOND_MMVQ_WPR"); return e ? atoi(e) : 0; }();
+            const int wpr = wpr_env ? wpr_env : (bpr > 128 ? 4 : bpr > 64 ? 2 : 1);   // up to 2,048 / 4,096 values a wave, then 4 waves
             const dim3 nb((nrows_x + 8/wpr - 1)/(8/wpr), nchannels_dst, nsamples_dst);
 #define ALMOND_Q8_ROWS_W(N, W) mul_mat_vec_q8_0_rows<N, W><<<nb, 256, 0, stream>>>(vx, vy, dst, bpr, nrows_x, \
                 stride_row_x, stride_col_y, stride_col_dst, channel_ratio_fd, stride_channel_x, stride_channel_y, \
