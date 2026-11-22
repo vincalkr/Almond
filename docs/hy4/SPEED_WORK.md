@@ -142,7 +142,11 @@ the 13 RAM layers reading ~1.0 GB a round at the RAM's bandwidth, and the host w
   picks); a smaller `--reserve-mib` (an expert layer is ~1.3 GB); DFly2 (`--dfly`, ~2 tokens a round, never faster
   than MTP); `--down-requant`; wave64; one card; a fused `rms_norm + weight` kernel (nodes 4,961 -> 4,704, no speed
   change, KL 0.035: the small launches are not the decode cost); a **stable graph** (tried the same evening, worth
-  nothing: the graph churn is pointers, and the graphs switched off cost nothing).
+  nothing: the graph churn is pointers, and the graphs switched off cost nothing); the **dense Q8_0 mat-vec at verify
+  widths** - `build-hip-fused/bench_hy4_q8` (`local/hy4-q8-bench.sh`) puts both kernels on the shapes the engine really
+  multiplies, six weights each so the 48 MB of L2 cannot flatter the repeat, and at 2-4 tokens a step both reach
+  ~700 GB/s: at the memory roof. Those 6-7 ms a round of Q8_0 are bytes, not kernels (docs/hy4/GGUF_NOTES.md, "The
+  same for Q8_0 rows").
 
 ### What Strata's Hy4 engine does, read 2026-11-21 (MIT source, not measured here)
 

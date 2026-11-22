@@ -1,17 +1,16 @@
 diff --git a/ggml/src/ggml-cuda/mmvq.cu b/ggml/src/ggml-cuda/mmvq.cu
-index 7935f01..9420399 100644
+index 9420399..73a3727 100644
 --- a/ggml/src/ggml-cuda/mmvq.cu
 +++ b/ggml/src/ggml-cuda/mmvq.cu
-@@ -1182,7 +1182,11 @@ static void mul_mat_vec_q_switch_ncols_dst(
-                            fusion.shared_up;
-         if (almond_rows && !has_ids && !fused && warp_size == 32 && ncols_dst <= 8) {
-             const int bpr = ncols_x / QK8_0;
--            const int wpr = bpr > 128 ? 4 : bpr > 64 ? 2 : 1;      // up to 2,048 / 4,096 values a wave, then 4 waves
-+            // ALMOND_MMVQ_WPR is a probe for the multi-token case: the split below was chosen at one token a step,
-+            // where it is worth +10% of decode; at the two to four tokens of an MTP verify batch it is not (docs/hy4/
-+            // GGUF_NOTES.md, "The same for Q8_0 rows").  0 keeps the heuristic, 1/2/4 forces waves per row.
-+            static const int wpr_env = [] { const char * e = getenv("ALMOND_MMVQ_WPR"); return e ? atoi(e) : 0; }();
-+            const int wpr = wpr_env ? wpr_env : (bpr > 128 ? 4 : bpr > 64 ? 2 : 1);   // up to 2,048 / 4,096 values a wave, then 4 waves
+@@ -1186,7 +1186,10 @@ static void mul_mat_vec_q_switch_ncols_dst(
+             // where it is worth +10% of decode; at the two to four tokens of an MTP verify batch it is not (docs/hy4/
+             // GGUF_NOTES.md, "The same for Q8_0 rows").  0 keeps the heuristic, 1/2/4 forces waves per row.
+             static const int wpr_env = [] { const char * e = getenv("ALMOND_MMVQ_WPR"); return e ? atoi(e) : 0; }();
+-            const int wpr = wpr_env ? wpr_env : (bpr > 128 ? 4 : bpr > 64 ? 2 : 1);   // up to 2,048 / 4,096 values a wave, then 4 waves
++            // One wave a row, whatever the row length: measured with local/hy4-q8-bench.sh over the shapes the engine
++            // really multiplies, 1 wave beat 2 and 4 at every one of them (ffn_down at one token a step 65.1 us with 1
++            // wave, 73.9 with the split this line used to choose, 80.6 with ggml's own kernel).
++            const int wpr = wpr_env ? wpr_env : 1;   // ALMOND_MMVQ_WPR can still force 2 or 4 waves a row
              const dim3 nb((nrows_x + 8/wpr - 1)/(8/wpr), nchannels_dst, nsamples_dst);
  #define ALMOND_Q8_ROWS_W(N, W) mul_mat_vec_q8_0_rows<N, W><<<nb, 256, 0, stream>>>(vx, vy, dst, bpr, nrows_x, \
                  stride_row_x, stride_col_y, stride_col_dst, channel_ratio_fd, stride_channel_x, stride_channel_y, \

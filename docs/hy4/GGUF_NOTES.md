@@ -566,11 +566,38 @@ At the trunk widths of a verify batch it does not win, at any setting of the wav
 | same, 2 waves a row | 273 | 1.83 | 88.9 |
 | same, 4 waves a row | 288 | 1.73 | 92.4 |
 
-So the 2026-11-19 reading was right, and the prize is now named exactly: the kernel wins by 10% where a step carries
-one token and loses where it carries the two to four of a verify batch, whatever the split - the heuristic's 4 waves
-for long rows is the worst of them (92.4). Closing that gap needs a different block layout for several columns at once
-(ggml's own table gives a row more warps as `ncols_dst` grows, ours keeps one wave and loops over the columns), not a
-setting. It stays off in the configurations.
+So the 2026-11-19 reading was right: the kernel wins where a step carries one token and loses where it carries the two
+to four of a verify batch, whatever the split - the heuristic's 4 waves for long rows is the worst of them (92.4).
+
+**Then it was measured where it can be measured cheaply**: `build-hip-fused/bench_hy4_q8` (`src/hy4/bench_hy4_q8.cpp`,
+driven by `local/hy4-q8-bench.sh`) runs those products on their own - the dense shapes the engine really multiplies,
+**six different weights per shape** so the 48 MB of L2 cannot flatter the repeat, one ggml graph per measurement, a
+variant read in seconds instead of a model load. Microseconds a product (reps 6, 8 iterations, the free card; the same
+numbers came out of three separate processes):
+
+| the weight (K × N) | 1 token a passo, ggml | 1 token a passo, nostro (1 onda) | 3 tokens, ggml | 3 tokens, nostro |
+| --- | ---: | ---: | ---: | ---: |
+| `attn_q_b` 1024 × 8192 | 25.0 | **14.9** | 16.8 | 16.8 |
+| `attn_output` 8192 × 3072 | 62.8 | **48.2** | 49.6 | 48.2 |
+| `ffn_down` 13824 × 3072 | 80.1 | **65.6** | 66.6 | 66.0 |
+| `attn_gate` 3072 × 8192 | 47.4 | 42.5 | 43.7 | 43.7 |
+| `attn_q_a` / `kv_a` 3072 × 1024 | 13.1 | 12.9 | 13.7 | 13.6 |
+| `ffn_up` / `ffn_gate` 3072 × 13824 | 70.7 | 83.5 | 63.8 | 64.5 |
+
+Two things follow, and they close this line of work.
+
+- **At two to four tokens a step both kernels are at the roof, not at a disadvantage**: 45,1 MB of weights in ~64 us is
+  ~700 GB/s (with the L2 helping; the HBM peak is 504 GB/s). The bytes a step moves are the bytes of the weights, and
+  they do not depend on how many tokens the step carries - which is why a deeper verify batch costs almost nothing and
+  why no kernel can take this time back. Fewer bytes can: what `--dense-q8` puts on the cards is ~85 MB a layer (the
+  attention projections and the shared expert - **only layer 0 has a dense FFN**, the other 42 are MoE with a shared
+  expert), so ~3,7 GB a step, 6-7 ms of an ~87 ms round, which is the 114 ms of `mul_mat_vec_q` in 19 tokens that the
+  rocprofv3 trace of 2026-11-21 counted.
+- **At one token a step ours is 18-40% faster on four of the six shapes and worse on the wide one** (`ffn_up` 70.7 ->
+  83.5 at one wave, 63.4 at four). **One wave a row is now what the code chooses** (`mmvq-rows.patch`: it beat 2 and 4
+  waves at every shape but that one, and the engine's own pair agreed - 85.5 ms a round at 1 wave against 92.4 at 4);
+  `ALMOND_MMVQ_WPR` still forces 2 or 4 for the next attempt. The flag stays off in the configurations, whose steps are
+  2-4 tokens wide - there the two kernels perform the same.
 
 ## The sparse layers' indexer, and 256K (2026-11-20)
 
