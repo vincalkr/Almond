@@ -82,6 +82,8 @@ struct Hy4Engine::Impl {
     std::vector<std::vector<uint8_t>> ram_bufs;   // and their requantized bytes   // --down-requant's type, COUNT when off
     int64_t n_alloc = 0;              // layers with weights and caches: the trunk, plus the MTP block with --mtp
     int64_t draft_off = 0;            // a chained draft: its position past n_past
+    double mtp_p0 = -1.0;             // the draft model's own confidence for its first guess, averaged over the round
+    int mtp_probe = 0;                // rounds since --mtp-adaptive last let a round draft anyway
     std::vector<float> draft_h;       // and the state it starts from (the previous draft's), empty = the trunk's
     // HY4_ROUTE_STATS=<file>: how often each layer routes to each expert, written when the engine ends (a diagnostic
     // for an expert cache)
@@ -2234,12 +2236,27 @@ bool Hy4Engine::draft_chain(int64_t token, int n, std::vector<int64_t> & out, st
     std::vector<float> lg;
     P.draft_h.clear();
     int64_t t = token;
+    const int bar = P.o.mtp_adaptive_pct;
+    // The first guess of a round is worth a draft step only if it is likely to be accepted, and the estimate we have
+    // before paying for it is the same step's confidence over the stretch of text we are in.  Every fourth round
+    // drafts anyway, so a quiet stretch cannot lock the gate shut forever.
+    if (bar && P.mtp_p0 >= 0 && P.mtp_p0 * 100.0 < bar && (++P.mtp_probe % 4) != 0) return true;
     for (int k = 0; k < n && P.n_past + k + 2 <= P.n_ctx; ++k) {
         P.draft_off = k;
         const bool ok = P.step(&t, 1, lg, err, false, true);
         if (!ok) { P.draft_off = 0; P.draft_h.clear(); return false; }
         t = (int64_t) (std::max_element(lg.begin(), lg.end()) - lg.begin());
         out.push_back(t);
+        if (!bar) continue;
+        const double top = lg[(size_t) t];
+        double sum = 1.0;                                       // the top token itself
+        for (float v : lg) {                                    // 157k comparisons, and exp() only for the few that matter
+            const double d = (double) v - top;
+            if (d > -10.0) sum += std::exp(d);                  // everything below contributes less than 1e-4 of the total
+        }
+        const double p = 1.0 / sum;                             // the draft's own probability for the token it just picked
+        if (k == 0) P.mtp_p0 = P.mtp_p0 < 0.0 ? p : 0.9 * P.mtp_p0 + 0.1 * p;
+        if (p * 100.0 < bar) break;                             // the next one would cost a step it probably loses
     }
     P.draft_off = 0;
     P.draft_h.clear();

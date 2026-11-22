@@ -49,6 +49,17 @@ struct Hy4EngineOptions {
     bool host_moe = false;         ///< the experts in RAM computed by a host thread the graph waits on (--host-moe)
     std::string dfly;              ///< Tencent's DFly2 drafter as a GGUF (tools/hy4/dfly_convert.py), needs mtp (--dfly)
     int mtp_n = 1;                 ///< guesses per step (--mtp-n)              ///< load the MTP block (layer 42) and draft one token ahead (--mtp)         ///< the 2-D BF16 matrices quantized to Q8_0 on load (--dense-q8)
+    /// Stop the draft chain where its own confidence says the next guess is not worth a draft step (--mtp-adaptive,
+    /// a percentage).  A drafted token costs a draft step of its own, while its verification slot is nearly free
+    /// (docs/hy4/GGUF_NOTES.md: the products of a step do not depend on how many tokens it carries, so 2, 3 and 4
+    /// cost the same) and an accepted one saves a whole step.  So a chain is worth extending while the chance of the
+    /// next guess being accepted is above (draft step) / (full step) - a ratio this box has not been measured at,
+    /// which is what the flag is there to find.  The draft model's own top-1 probability is that chance, and it is
+    /// free: the argmax is already read off the same logits.  Greedy output does not depend on the chain length at
+    /// all - a draft is kept only when the main model agrees with it - so this is a speed knob and not a quality
+    /// one.  The check of that is the KL of a run with the gate against one without: not run yet, and the gate is
+    /// off by default until it is.
+    int mtp_adaptive_pct = 0;      ///< 0 = draft the whole --mtp-n always
     bool verbose = true;
 };
 

@@ -137,6 +137,12 @@ the 13 RAM layers reading ~1.0 GB a round at the RAM's bandwidth, and the host w
   (476.9 -> 479.7 tok/s, KL 0.035), so it was reverted. The kernel time is `mul_mat_vec_q` Q8_0 114 ms,
   `flash_attn_tile<576,512>` 56 ms, `mul_mat_vec_q_moe` IQ2_XXS 69 ms, `mul_mat_vec_bf16_rows` 20 ms. Fewer kernels is
   the lever, but the norm fusion shows the small ops are not what the round costs.
+- Decode: the length of the MTP chain is a knob now, `--mtp-adaptive <pct>`: the draft model's own top-1 probability
+  for the guess it just made is the estimate of that guess being accepted, so the chain stops where the running
+  estimate drops under the bar, and every fourth round drafts anyway so a quiet stretch cannot lock the gate shut.
+  `HY4_MTP_STATS=1` prints the histogram of the chains offered and of where they die, which is how the bar gets set.
+  Built 2026-11-22 and **not measured**: neither the speed, nor the KL 0.00000 that greedy ought to show against a
+  run without the gate.  Off by default (`mtp_adaptive_pct = 0`) until it is.
 - With a quality cost (measured, off): `--ram-requant q3_k` +5-7% at KL 0.012.
 - Not worth it (measured): hot-expert cache in the ~2 GB left (top 60 experts of a RAM layer cover 14.7% of its
   picks); a smaller `--reserve-mib` (an expert layer is ~1.3 GB); DFly2 (`--dfly`, ~2 tokens a round, never faster

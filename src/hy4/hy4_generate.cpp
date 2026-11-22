@@ -147,6 +147,11 @@ int parse(int argc, char ** argv, Args & a) {
             a.eo.mtp = true;
             if (!a.mtp_n_set) a.eo.mtp_n = 5;
         }
+        else if (!std::strcmp(s, "--mtp-adaptive")) {
+            if (++i >= argc) return 2;
+            a.eo.mtp_adaptive_pct = std::max(0, std::atoi(argv[i]));
+            a.eo.mtp = true;
+        }
         else if (!std::strcmp(s, "--mtp-n")) {
             a.mtp_n_set = true;
             if (++i >= argc) return 2;
@@ -428,6 +433,8 @@ int hy4_main(int argc, char ** argv) {
             int rounds = 0, accepted = 0;
             auto t2 = std::chrono::steady_clock::now();
             int offered = 0;
+            const bool mstats = std::getenv("HY4_MTP_STATS") != nullptr;   // which chains we offer and where they die
+            std::vector<int> len_hist((size_t) a.eo.mtp_n + 1, 0), acc_hist((size_t) a.eo.mtp_n + 1, 0);
             while ((int) out.size() < a.n_predict) {
                 std::vector<int64_t> d;
                 if (!(eng.has_dfly() ? eng.dfly_draft(y, a.eo.mtp_n, d, e) : eng.draft_chain(y, a.eo.mtp_n, d, e))) {
@@ -438,10 +445,15 @@ int hy4_main(int argc, char ** argv) {
                 if (!eng.decode_all(run.data(), (int64_t) run.size(), logits, e)) { std::fprintf(stderr, "hy4: %s\n", e.c_str()); return 1; }
                 ++rounds;
                 offered += (int) d.size();
+                if (mstats && d.size() <= (size_t) a.eo.mtp_n) ++len_hist[d.size()];
                 size_t i = 0;
                 for (;;) {
                     const int64_t cnd = sample(logits.data() + i * (size_t) G.n_vocab, G.n_vocab, temp, top_p, rng);
-                    if (i < d.size() && cnd == d[i]) { ++accepted; out.push_back(cnd); ++i; continue; }
+                    if (i < d.size() && cnd == d[i]) {
+                        ++accepted; out.push_back(cnd); ++i;
+                        if (mstats && i <= (size_t) a.eo.mtp_n) ++acc_hist[i];
+                        continue;
+                    }
                     eng.truncate(eng.n_past() - (int64_t) (d.size() - i));
                     y = cnd;
                     break;
@@ -453,6 +465,13 @@ int hy4_main(int argc, char ** argv) {
             for (size_t i = 0; i < out.size() && i < 32; ++i) std::printf(" %lld", (long long) out[i]);
             std::printf("\nhy4: %s: %d rounds, %d of %d drafts accepted (%.2f tokens a round)\n", eng.has_dfly() ? "DFly2" : "MTP", rounds,
                         accepted, offered, (double) (accepted + rounds) / std::max(rounds, 1));
+            if (mstats) {                                        // the shape of the chains, to set --mtp-adaptive from
+                std::printf("hy4: chains offered:");
+                for (size_t k = 0; k < len_hist.size(); ++k) std::printf(" %zu:%d", k, len_hist[k]);
+                std::printf("; accepted at position:");
+                for (size_t k = 1; k < acc_hist.size(); ++k) std::printf(" %zu:%d", k, acc_hist[k]);
+                std::printf("\n");
+            }
             std::printf("hy4: prompt %zu tokens %.2f s (%.1f tok/s); %zu generated tokens %.2f s (%.2f tok/s)\n", toks.size(),
                         t_prompt, toks.size() / std::max(t_prompt, 1e-9), out.size() - 1, t_gen,
                         (out.size() - 1) / std::max(t_gen, 1e-9));
