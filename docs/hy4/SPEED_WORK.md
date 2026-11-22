@@ -299,9 +299,33 @@ at +5-7% and still is not in the configuration.
 - `--host-moe` changes nothing measurable - 0.1357 and 0.1345 are at or under the control's own 0.1453 - and the same
   for graphs on against off. But that is a **floor, not a proof**: a 0.01-0.05 effect, including a ring slot that
   desynchronizes under replay, sits under it and this test cannot see it.
-- The drift is inside one forward pass, not in the windowing: chunk 1 alone is 31.8600 against 31.2560. Graphs and the
-  expert prefetch are excluded - with both off the pair still moves 0.123. Not looked for yet.
-- **What this costs the documentation:** every KL in `docs/hy4/GGUF_NOTES.md` quoted between 0.003 and 0.2 was measured
+- The drift is inside one forward pass, not in the windowing: chunk 1 alone is 31.8600 against 31.2560.
+
+### Found it: `--fused-indexer` (2026-11-22, `local/hy4-drift-hunt.sh`)
+
+The hunt takes one ingredient out at a time and runs the rest twice; a pair that prints KL 0.00000 names the ingredient:
+
+| pair, same flags twice | KL | top-1 | ppl of the two runs |
+|---|---:|---:|---|
+| `--engram-place ram` | 0.14632 | 88.50% | 35.6307 / 35.8373 |
+| `--engram-place ssd` | 0.12915 | 88.89% | 35.3498 / 35.3803 |
+| **without `--fused-indexer`** | **0.00000** | **100.00%** | 35.7561 / 35.7561 |
+| without `--fused-hc` | 0.12958 | 88.50% | 36.1732 / 36.0996 |
+
+**The fused lightning indexer is what does not repeat.** With `--fused-indexer` out, two runs are the same to the last
+digit of perplexity; everything else tried is excluded - the Engram's placement (RAM or SSD, so the page cache and the
+63.4 GB table are not it), `--fused-hc` (the one ggml op here with grid-wide atomics - not it), the graphs and the
+expert prefetch. What the two paths are: `hy4_engine.cpp:871-878` scores the pool with `ggml_lightning_indexer` (one
+kernel, no `[n_pool, nt, NH]` tensor - that tensor is 5 GB of compute buffer at 256K, which is why the flag is in the
+configuration) against `hy4_engine.cpp:880-886` building `relu(q . k)` per head with `mul_mat` and adding
+`in.pool_mask` in F32. Two differences to look at, in order: the fused path casts the mask to **F16**
+(`ggml_cast(c, in.pool_mask, GGML_TYPE_F16)`) while the unfused one adds it as **F32**; and under HIP the op takes the
+plain-float kernel (`lightning-indexer.cu:618-640` keeps the WMMA instance for NVIDIA only) which tiles `n_kv` in
+blocks of 32 and reduces across 64 heads in groups. The kernel's own accumulators are initialized
+(`score_k[K_VECS_PER_WARP] = { 0.0f }` at :313, out-of-range lanes zeroed at :293/308), so the next step is not a read
+of the kernel: it is to dump the scores and the selected pool indices for two runs and see whether the *scores* move
+or the *picks* do - about ten lines in `hy4_engine.cpp` beside `route_stats` (which already dumps the expert picks,
+`HY4_ROUTE_STATS`).- **What this costs the documentation:** every KL in `docs/hy4/GGUF_NOTES.md` quoted between 0.003 and 0.2 was measured
   against a reference that was assumed to repeat - the requant table says so in words ("the same run without it
   repeats exactly: KL 0.00000"). That no longer holds here. `--ram-requant q3_k`'s KL 0.012 and the `--host-moe`
   question are both under this floor; the floor has to be re-established (or removed) before any of those numbers
