@@ -201,6 +201,9 @@ if(TARGET ds41_generate)
   # the dense Q8_0 mat-vec on its own, so a kernel variant is read in seconds instead of a model load
   add_executable(bench_hy4_q8 src/hy4/bench_hy4_q8.cpp)
   target_link_libraries(bench_hy4_q8 PRIVATE ggml ggml-base)
+  # and the host->card copy paths the expert staging uses, likewise on their own
+  add_executable(bench_hy4_copy src/hy4/bench_hy4_copy.cu)
+  target_link_libraries(bench_hy4_copy PRIVATE ${_almond_gpu_runtime_target})
   add_executable(test_hy4_attn_multi src/hy4/test_hy4_attn_multi.cpp)
   target_include_directories(test_hy4_attn_multi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/hy4)
   target_link_libraries(test_hy4_attn_multi PRIVATE hy4_program)

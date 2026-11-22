@@ -86,6 +86,14 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
   ~87 ms round, and only fewer bytes would move it. At one token ours wins 18-40% on four of six shapes and loses on
   the wide one; the code now chooses **one wave a row** (it beat 2 and 4 waves everywhere but that), `ALMOND_MMVQ_WPR`
   forces the others. The flag stays off. `docs/hy4/GGUF_NOTES.md`, "The same for Q8_0 rows".
+- **The host -> card copy path, measured and closed (2026-11-22)**: `build-hip-fused/bench_hy4_copy <dev> <MiB>
+  [mapped]` - `hipMemcpyAsync` gives 28.0-28.7 GB/s to card 0 and 3.3 GB/s to card 1 (its x2 uplink), on the legacy
+  stream and on a non-blocking stream of its own alike, at 4..128 MiB, so the expert staging of `--prefetch-experts`
+  (~27 GB/s in the engine) is at the link's roof and Avalon's "take it off the legacy stream" buys nothing here.  The
+  other half of Avalon's trick - a copy kernel reading registered host memory - does not work on this machine: it
+  launches, times at 12.5-12.9 / 102-111 GB/s, and its bytes are wrong under a per-arm content check; the host
+  pointer instead of the `hipHostGetDevicePointer` alias faults the process (139). That check is in the bench because
+  an earlier version of it scored 107 GB/s for a kernel that moved nothing. `docs/hy4/SPEED_WORK.md`.
 - The other engines and forks for our models, swept 2026-11-22 (Avalon, Strata and its EXL3 AMD fork, project-maya,
   Xolotl, exllamav3-rocm(-moe), elpis, the RDNA3 INT4 tree, llama.cpp's two-month delta against our vendored ggml):
   what each carries that we do not, their numbers as they print them, and the six things worth taking, in `docs/ENGINES_WATCH.md`.

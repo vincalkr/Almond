@@ -448,9 +448,48 @@ configuration; it is a mechanism kept because it is the only way to put host wor
 - **The `--serve` path** (the router, session save/restore, `local/hy4-crash-check.sh`'s fini deaths) with hy4 +
   `--host-moe`: never run.
 
+### The host → card copy path, measured on its own (2026-11-22, `src/hy4/bench_hy4_copy.cu`)
+
+The last item of the queue was Avalon's claim that its staged host copies only got fast once they were taken off
+SDMA and the legacy stream (`docs/ENGINES_WATCH.md`).  Our own note on the same subject was two numbers from a plain
+`hipMemcpy` test: 28.4 GB/s to card 0, 3.3 GB/s to card 1, its x2 uplink.  `bench_hy4_copy` settles it without
+loading a model - it allocates its own buffers, so the running engine is left alone:
+
+```
+$ ./build-hip-fused/bench_hy4_copy 1 64 mapped      # card 1, 64 MiB, 12 reps, HIP events
+  memcpy/legacy    20.29 ms     3.3 GB/s
+  memcpy/stream    20.29 ms     3.3 GB/s
+  kernel/registered     5.22 ms    12.9 GB/s   (il contenuto non torna)
+  kernel/hostalloc      5.21 ms    12.9 GB/s   (il contenuto non torna)
+  kernel/fresh-512MB    5.22 ms    12.9 GB/s   (il contenuto non torna)
+```
+
+| | card 0 (x16) | card 1 (x2) |
+|---|---|---|
+| `hipMemcpyAsync`, legacy stream | 28.0 - 28.7 GB/s | 3.3 GB/s |
+| the same on a non-blocking stream of its own | 28.2 - 28.7 GB/s | 3.3 GB/s |
+| a copy kernel reading host memory the card addresses | 102 - 111 GB/s, **wrong bytes** | 12.5 - 12.9 GB/s, **wrong bytes** |
+
+The two real paths are at the link's roof and the stream they run on changes nothing, at 4, 16, 64, 96 and 128 MiB
+alike: the expert staging of `--prefetch-experts`, measured in the engine at ~27 GB/s, is already there.  So Avalon's
+first half - get it off the legacy stream - buys nothing here, and its second half cannot be tried honestly, because
+the kernel that reads registered host memory does not work on this machine.  It launches without an error, it times
+at rates no PCIe generation of this box carries, and it is wrong: each arm fills the buffer it reads from with its
+own tag and reads the destination back, and every kernel arm fails that check.  Read the host pointer directly
+instead of the alias from `hipHostGetDevicePointer` and the process dies of a GPU page fault (exit 139).
+
+That check is the reason the program exists.  The first version compared every arm's destination against the same
+pattern, so the bytes the previous arm had already left there made the next arm look correct: a kernel copy that
+moves nothing was measured at 107 GB/s and "passed".  The lesson is the general one - a copy that moves nothing is
+the fastest copy there is, and a speed number without a content check is not a measurement.
+
+**Closed**: the copies are not where the decode round's time can be won.  What is left in that direction is moving
+fewer bytes (the expert placement of `docs/hy4/VRAM_SIZING.md`) or overlapping them, not copying them differently.
+
 ## How to measure
 
-
+The knobs that repeat on this machine, and the ones that turned out to be jitter: the engine flags are in `almond.sh`'s
+`HY4_ENGINE_ARGS`, and the environment in `almond.sh.env`.
 
 - Build: `./build.sh` (a new `.cu` in `ggml-cuda` needs `cmake third_party/llama.cpp/build-hip` first).
 - Speed: `build-hip-fused/almond-engine <config args> --temp 0 -n 400 --prompt-ids IDS` (prints prompt and
