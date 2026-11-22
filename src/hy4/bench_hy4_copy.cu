@@ -32,6 +32,18 @@
 #define TRY(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) { \
     std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, hipGetErrorString(e_)); return 1; } } while (0)
 
+// What the box has left, so this bench can refuse instead of being the last gram.  Learned on 2026-11-22 at 16:24:
+// with the engines already at 121 of 122 GB, the pinned buffers of a 128 MiB run were enough for almond-engine to
+// invoke the OOM killer, and the kernel killed qwen-host (anon-rss 57.4 GB).  Pinned pages are not reclaimable.
+static long long mem_available_kib() {
+    FILE * f = std::fopen("/proc/meminfo", "r");
+    if (!f) return -1;
+    char key[64]; long long v = 0, out = -1;
+    while (std::fscanf(f, "%63s %lld kB", key, &v) == 2) if (!std::strcmp(key, "MemAvailable:")) { out = v; break; }
+    std::fclose(f);
+    return out;
+}
+
 // A 16-byte-per-lane copy: what limits this is the traffic, not the arithmetic.
 static __global__ void copy16(uchar4 * __restrict__ dst, const uchar4 * __restrict__ src, size_t n16) {
     const size_t stride = (size_t) blockDim.x * gridDim.x;
@@ -46,6 +58,17 @@ int main(int argc, char ** argv) {
     const bool  mapped = argc > 3;
     const size_t bytes = mib << 20;
     const int reps = 12;
+
+    // h_plain, and for the kernel arms h_reg + h_mapped + four windows of h_big: seven times the size, all pinned.
+    const size_t pinned = bytes * (mapped ? 7 : 1);
+    const long long avail = mem_available_kib();
+    if (avail >= 0 && avail * 1024LL < (long long) pinned + (8LL << 30)) {
+        std::fprintf(stderr, "bench_hy4_copy: MemAvailable %.1f GiB, il bench ne vuole %.2f GiB di pinned piu 8 GiB di "
+                             "margine.  Non parto: le pagine pinned non sono recuperabili e con gli engine su "
+                             "l'OOM killer colpisce un altro processo.\n",
+                     avail / 1048576.0, pinned / 1073741824.0);
+        return 3;
+    }
 
     TRY(hipSetDevice(dev));
     hipDeviceProp_t p{};
@@ -137,7 +160,7 @@ int main(int argc, char ** argv) {
                 const size_t off = (size_t) (i % 4) * bytes;
                 const int block = 256, grid = 32 * p.multiProcessorCount;
                 copy16<<<grid, block, 0, a.stream>>>((uchar4 *) d, (const uchar4 *) h_big_dev + off / 16, bytes / 16);
-            } else launch();
+            } else if (launch() != hipSuccess) break;
         }
         TRY(hipEventRecord(e1, a.stream));
         TRY(hipEventSynchronize(e1));

@@ -486,6 +486,14 @@ the fastest copy there is, and a speed number without a content check is not a m
 **Closed**: the copies are not where the decode round's time can be won.  What is left in that direction is moving
 fewer bytes (the expert placement of `docs/hy4/VRAM_SIZING.md`) or overlapping them, not copying them differently.
 
+What the bench costs to run, since that cost fell on someone else: with `mapped` it pins seven times the size it
+copies - one buffer per arm plus four windows - and pinned pages are not reclaimable.  At 16:24 on 2026-11-22, with
+the engines already at 121 of 122 GB, such a run was enough for `almond-engine` to invoke the OOM killer, and the
+kernel killed `qwen-host` (anon-rss 57.4 GB).  It now reads `MemAvailable` before allocating and refuses with exit 3
+unless the box has room for its own pinned bytes plus 8 GiB.  The kernel arms also take the process down inside the
+runtime when they are given a host pointer instead of the alias (`general protection fault ... in
+libamdhip64.so.7.14.60850`, four times at 15:57): they stay in the file as the trap, not as a path.
+
 ## How to measure
 
 The knobs that repeat on this machine, and the ones that turned out to be jitter: the engine flags are in `almond.sh`'s
