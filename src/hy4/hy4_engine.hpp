@@ -37,11 +37,14 @@ struct Hy4EngineOptions {
     bool prefetch_experts = false; ///< stage the RAM experts in device memory ahead of their split (--prefetch-experts)
     bool kv_q8 = false;            ///< the full layers' KV rows as Q8_0 (--kv-q8)
     bool fused_indexer = false;    ///< the indexer's scores through ggml_lightning_indexer (--fused-indexer)
-    /// Pick the pool groups with ggml_argsort_top_k even when the scores come from --fused-indexer.  ggml_top_k's CUDA
-    /// kernel is a radix select that places the keys equal to the k-th with atomicAdd (top-k.cu:201,204): when the
-    /// boundary scores tie - and they do, the dead pool slots all carry the same mask value - which groups are picked
-    /// changes between two runs of the same input.  See docs/hy4/SPEED_WORK.md, "Found it: --fused-indexer".
-    bool indexer_argsort = false;  ///< (--indexer-argsort)
+    /// Pick the pool groups with ggml_argsort_top_k rather than ggml_top_k.  On by default since 2026-11-22:
+    /// ggml_top_k's CUDA/HIP kernel is a radix select that places the keys equal to the k-th with atomicAdd
+    /// (top-k.cu:201,204), and the indexer's pool is all ties at that boundary (every dead slot carries the same mask
+    /// value), so the picked groups - and the answer - changed between two runs of one input: KL 0.12667, top-1 88.5%.
+    /// A sorted pick makes the engine repeat exactly (KL 0.00000, the same perplexity to four digits) for +0.8% of a
+    /// round; docs/hy4/SPEED_WORK.md, "The cause is the pick, not the score kernel".  --indexer-topk buys the old
+    /// behaviour back for that 0.8%.
+    bool indexer_argsort = true;   ///< (--indexer-topk to turn off)
     bool gather_attn = false;      ///< sparse layers attend over the indexer's picked rows only (--gather-attn)
     bool host_moe = false;         ///< the experts in RAM computed by a host thread the graph waits on (--host-moe)
     std::string dfly;              ///< Tencent's DFly2 drafter as a GGUF (tools/hy4/dfly_convert.py), needs mtp (--dfly)

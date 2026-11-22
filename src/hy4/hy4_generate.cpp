@@ -132,7 +132,8 @@ int parse(int argc, char ** argv, Args & a) {
         else if (!std::strcmp(s, "--host-moe")) a.eo.host_moe = true;
         else if (!std::strcmp(s, "--gather-attn")) a.eo.gather_attn = true;
         else if (!std::strcmp(s, "--fused-indexer")) a.eo.fused_indexer = true;
-        else if (!std::strcmp(s, "--indexer-argsort")) a.eo.indexer_argsort = true;
+        else if (!std::strcmp(s, "--indexer-argsort")) a.eo.indexer_argsort = true;     // the default; explicit for old command lines
+        else if (!std::strcmp(s, "--indexer-topk")) a.eo.indexer_argsort = false;       // the pre-2026-11-22 pick: 0.8% of a round, and the answer stops repeating
         else if (!std::strcmp(s, "--kv-q8")) a.eo.kv_q8 = true;
         else if (!std::strcmp(s, "--pin-experts")) a.eo.pin_experts = true;
         else if (!std::strcmp(s, "--prefetch-experts")) a.eo.prefetch_experts = true;

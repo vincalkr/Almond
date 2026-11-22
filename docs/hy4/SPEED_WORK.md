@@ -325,11 +325,23 @@ blocks of 32 and reduces across 64 heads in groups. The kernel's own accumulator
 (`score_k[K_VECS_PER_WARP] = { 0.0f }` at :313, out-of-range lanes zeroed at :293/308), so the next step is not a read
 of the kernel: it is to dump the scores and the selected pool indices for two runs and see whether the *scores* move
 or the *picks* do - about ten lines in `hy4_engine.cpp` beside `route_stats` (which already dumps the expert picks,
-`HY4_ROUTE_STATS`).- **What this costs the documentation:** every KL in `docs/hy4/GGUF_NOTES.md` quoted between 0.003 and 0.2 was measured
-  against a reference that was assumed to repeat - the requant table says so in words ("the same run without it
-  repeats exactly: KL 0.00000"). That no longer holds here. `--ram-requant q3_k`'s KL 0.012 and the `--host-moe`
-  question are both under this floor; the floor has to be re-established (or removed) before any of those numbers
-  means what it says.
+`HY4_ROUTE_STATS`).
+
+- **What this costs the documentation:** less than it looked at the time. The correction, same day: the KL tables of
+  `docs/hy4/GGUF_NOTES.md` (lines 455-470 and 612-624) were taken at a **2,048 to 4,096 token window**, and their own
+  "the same configuration again" row reads **0.000 / 100%** - with a pool that short the pick does not land on a pile
+  of ties, so those numbers stand. The drift is a **long-pool** effect: at 8,192 rows, and at the 256K configuration,
+  the same run does not repeat. Everything measured there has to be taken again - which from today it can be, because
+  the pick is deterministic by default. For the one number that was still open, `--ram-requant q3_k` against the same
+  run without it:
+
+| the requant against a reference that repeats | KL | top-1 | ppl |
+|---|---:|---:|---:|
+| 4,096-token window (2026-11-20, `docs/hy4/GGUF_NOTES.md`) | 0.012 | 95.8% | 12.70 -> 12.79 |
+| 8,190 rows of `local/hy4-text-ids.py` text, pick deterministic | **0.02874** | 92.81% | 35.5641 -> **35.4973** |
+
+  Same direction: a little less agreement at the long window, perplexity slightly *better*. It is still not shipped -
+  the user's call, 2026-11-22 - but it is a verified number now, not one under a floor.
 
 ### The cause is the pick, not the score kernel: `ggml_top_k` (same day, `local/hy4-indexer-sort-check.sh`)
 
@@ -350,9 +362,12 @@ What it costs at the configuration of record (16K real text, 256K, greedy, 750 t
 is not a cost: it is the drift itself, seen from the other side - with `ggml_top_k` the two runs pick differently, so
 they draft and accept differently (422 rounds at 1.77 tokens against 428 at 1.75).
 
-So the shipped configuration can be made reproducible for under 1% of a round. **Not flipped to default yet**: the
-default would change which answers the model gives (those from a stable pick), and every number in
-`docs/hy4/GGUF_NOTES.md` measured with `--fused-indexer` on would want its reference taken again.
+So the shipped configuration can be made reproducible for under 1% of a round. **Flipped to the default the same day,
+at the user's go-ahead**: the pick is sorted unless `--indexer-topk` buys the old behaviour back, and `--indexer-argsort`
+is still accepted as a no-op for old command lines. Verified with the shipped flags and no indexer flag at all, twice:
+**ppl 35.5641 both runs, KL 0.00000, top-1 100.00%** (`bash local/hy4-indexer-sort-check.sh default`). The published
+record numbers (prompt 471-477 tok/s, decode 21.0-21.6) were taken with `ggml_top_k`; with the sorted pick the same
+configuration gives 470.3 prompt and 84.3 against 83.6 ms a round.
 
 The same hazard is live in two other places, neither measured: `src/ds41/ds41_dense.cpp:741,744` selects the routed
 experts of the dense DeepSeek-V4.1 path with `ggml_top_k` over the router scores, and `src/qwen35/qwen35.cpp:1057`

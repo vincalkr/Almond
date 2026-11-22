@@ -5,8 +5,10 @@
 # pool slot carries the same mask value - the picked groups change between two runs of the same input.
 # --indexer-argsort keeps --fused-indexer's score kernel and pays a real sort for the picks instead.
 #
-#   bash local/hy4-indexer-sort-check.sh        # ~12 min: two ppl pairs and one speed pair.
-#                                               # Cards through the router's unload, never ./stop.sh.
+#   bash local/hy4-indexer-sort-check.sh          # ~12 min: two ppl pairs and one speed pair.
+#   bash local/hy4-indexer-sort-check.sh default   # ~6 min: the shipped default repeats, and what --ram-requant q3_k
+#                                                  #   really costs against a reference that repeats.
+#                                                  # Cards through the router's unload, never ./stop.sh.
 set -u
 cd "$(dirname "$0")/.."
 PPL=/tmp/hy4-p16k-text.ids
@@ -25,6 +27,15 @@ run() {                              # $1 tag, $2 the whole argument line
     echo "(engine exit $?)"
     grep -E "^hy4: (against|ppl|generated tokens|prompt |MTP:|layers per card)|Error|error" "/tmp/hy4is-$i.log"
 }
+if [ "${1:-all}" = default ]; then
+    # The flipped default: the shipped flags, no indexer flag at all, twice.  This must print KL 0.00000 / 100.00%.
+    run "shipped default, save" "$MODEL -c 8192 $STD --ubatch 1024 --expert-layers-gpu 29 --ppl $PPL --ppl-save /tmp/hy4is-d.bin"
+    run "shipped default, ref"  "$MODEL -c 8192 $STD --ubatch 1024 --expert-layers-gpu 29 --ppl $PPL --ppl-ref /tmp/hy4is-d.bin"
+    # The requant the docs left unproven, measured against a reference that repeats: its 0.012 sat under the drift floor.
+    run "shipped default + --ram-requant q3_k" \
+        "$MODEL -c 8192 $STD --ubatch 1024 --expert-layers-gpu 29 --ppl $PPL --ram-requant q3_k --ppl-ref /tmp/hy4is-d.bin"
+    exit 0
+fi
 # 1. the picks deterministic?  (ppl, -c 8192 so --ppl scores the second half, 13 layers on the CPU)
 for k in save ref; do
     f=$([ "$k" = save ] && echo "--ppl-save /tmp/hy4is-a.bin" || echo "--ppl-ref /tmp/hy4is-a.bin")

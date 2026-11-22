@@ -98,8 +98,11 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
   kernel is a radix select placing the keys tied with the k-th by `atomicAdd` (`ggml-cuda/top-k.cu:201,204`) - and the
   dead pool slots all carry the same mask value, so the boundary of the top-k is a pile of ties. The new
   `--indexer-argsort` keeps the fused score kernel and sorts for the picks: **KL 0.00000, top-1 100.00%, the same ppl
-  to four digits**, for **+0.8% of a round** (prompt unchanged, 471.0 -> 470.3). Not the default yet - that changes the
-  answers the model gives and would want the references of `docs/hy4/GGUF_NOTES.md` taken again. Engram placement
+  to four digits**, for **+0.8% of a round** (prompt unchanged, 471.0 -> 470.3). **That is the default now** (the user's
+  go-ahead, 2026-11-22): `--indexer-topk` buys the old pick back for that 0.8%, `--indexer-argsort` is kept as a no-op.
+  Verified with the shipped flags and no indexer flag at all: ppl 35.5641 twice, KL 0.00000, top-1 100.00%. The drift
+  is a long-pool effect: the KL tables of `docs/hy4/GGUF_NOTES.md` at 2,048-4,096-token windows repeat exactly and
+  stand; `--ram-requant q3_k` re-measured at the long window is KL 0.02874 / top-1 92.81% / ppl 35.5641 -> 35.4973. Engram placement
   (ram/ssd), `--fused-hc`, the graphs and the expert prefetch were all excluded.
 
 - **Qwen3.8-27B:** images (CPU encoder, 300 image tokens: a large screenshot's small text is not legible, as on
@@ -131,6 +134,7 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 
 - Never expose a server beyond `127.0.0.1` without `--api-key`.
 - A new feature is opt-in; a default changes only where it measured better, with the numbers written down.
-- The engine is not bit-reproducible run to run: compare quality with PPL on fixed documents, Lucebox or repeated
-  runs, not with a diff.
+- Reproducibility: a hy4 run **repeats exactly** since 2026-11-22 (the indexer's pool pick sorts; `--indexer-topk` for
+  the old way). The other engines do not - an expert's kernel depends on where it is served from, which depends on
+  timing. Compare quality with PPL on fixed documents, Lucebox or repeated runs, not with a diff.
 - Commit messages in English.

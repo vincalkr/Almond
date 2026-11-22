@@ -275,7 +275,8 @@ the trunk agrees with. Measured on the three chat prompts above (400 tokens, 64K
 
 The chained guesses are kept far less often (N = 2 greedy: 213 of 372 against 172 of 228), so N = 1 stays the
 default. With N = 3 the greedy text drifts from N = 1's after a while: a four-token verify batch takes other GPU
-kernels than a two-token one, and their rounding differs (the engine is not bit-reproducible, AGENTS.md).
+kernels than a two-token one, and their rounding differs - which is not the same thing as a run failing to repeat: with
+the pool pick sorted (the default since 2026-11-22) one configuration repeats at KL 0.00000 over 8,190 rows, AGENTS.md.
 
 ## Images (2026-11-18)
 
@@ -627,11 +628,17 @@ MTP, 400 tokens, two alternate runs:
 Q3_K is the best of them: +5-7%, at a cost below the KL ~0.1 that a change of kernels gives.
 
 **Not shipped (2026-11-22, the user's call): the quality cost is not worth +5-7%.** Two caveats found while checking
-whether to ship it. (1) The KLs in the table above were measured against a reference taken as repeating; two runs of
-one configuration now differ by **KL 0.12 - 0.14 and perplexity +-1.3%** (`docs/hy4/SPEED_WORK.md`, *Run, and the answer
-is: the path does not repeat*), so a 0.012 sits under that floor and the table's numbers are only meaningful as the
-order of the four requant options, not as their size. (2) The speed gain was measured on a short prompt (400 tokens,
-`-c 256K`); the 16K real-text configuration runs ~21 tok/s, not ~23.
+whether to ship it, and both resolved the same day. (1) The KLs in the table above were measured against a reference
+taken as repeating, and the engine was found not to repeat at long context (**KL 0.12 - 0.14, perplexity +-1.3%** over
+8,190 rows; `docs/hy4/SPEED_WORK.md`, *Run, and the answer is: the path does not repeat*). The cause turned out to be
+the indexer's pool pick going through `ggml_top_k`, whose radix-select kernel places the keys tied with the k-th by
+`atomicAdd` and the long pool is all such ties; **it is fixed and is now the default** (sorted pick, `--indexer-topk`
+for the old way), and the configuration repeats at **KL 0.00000 / top-1 100.00%**. The table above was taken at a
+4,096-token window, where the pick never lands on ties and the run does repeat - so its numbers stand, and re-measured
+at the long window (8,190 rows of `local/hy4-text-ids.py` text, the configuration's flags, 13 layers' experts in RAM)
+`--ram-requant q3_k` gives the same direction: **KL 0.02874, top-1 agreement 92.81%, perplexity 35.5641 -> 35.4973**.
+(2) The speed gain was measured on a short prompt (400 tokens, `-c 256K`); the 16K real-text configuration runs
+~21 tok/s, not ~23.
 
 Tried and left out: gathering the sliding layers' window rows in short steps (22.2 / 22.3 tok/s with, 23.0 / 22.5
 without); the per-head `attn_k_b` / `attn_v_b` as F16 for the prompt's GEMMs (267.6 -> 267.0 tok/s).

@@ -58,9 +58,11 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
 - Server tests: `.venv/bin/python -m unittest discover -s serve -p "test_*.py" -t .` (no GPU or model needed).
 - How the engines work and every measured number: `docs/ds4/V41_EXACT_FAST.md`, `docs/ds4/AMD_HIP_NOTES.md`,
   `docs/MODELS.md`, `docs/ENGINE_PLAN.md`, `docs/ENGINE_REVIEW.md`; the state and what is open: `HANDOVER.md`.
-- The engine is not bit-reproducible run to run (an expert's kernel depends on where it is served from, which
-  depends on timing): compare quality with repeated runs, PPL on fixed documents or the Lucebox set in
-  `local/eval-lucebox/`, not with a diff.
+- Reproducibility: **a hy4 run repeats exactly** run to run since 2026-11-22 - the indexer's pool pick sorts instead of
+  taking `ggml_top_k`'s tied keys as they come (`docs/hy4/SPEED_WORK.md`, "The cause is the pick, not the score
+  kernel"). The other engines do not: an expert's kernel depends on where it is served from, which depends on timing,
+  and `src/ds41/ds41_dense.cpp:741,744` and `src/qwen35/qwen35.cpp:1057` still pick through `ggml_top_k`. Compare
+  quality with repeated runs, PPL on fixed documents or the Lucebox set in `local/eval-lucebox/`, not with a diff.
 - Keep the docs' style: plain words, measured numbers with what they were measured on, no claims without a
   measurement.
 - A new feature is opt-in and the default path stays as it was; change a default only where it measured better, and
