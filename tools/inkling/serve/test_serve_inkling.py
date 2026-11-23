@@ -39,13 +39,6 @@ class Rewrite(unittest.TestCase):
         self.assertEqual(run(f"{M}{TH}still thinking", 4), "still thinking</think>\n\n")
 
 
-class Sampling(unittest.TestCase):
-    def test_top_k_zero_is_off(self):
-        keys = I.S.AlmondEngine.sampling_keys({"temperature": 1.0, "top_p": 1.0, "top_k": 0}).split()
-        self.assertFalse(any(k.startswith("top_k=") for k in keys))
-        self.assertIn("top_k=20", I.S.AlmondEngine.sampling_keys({"top_k": 20}).split())
-
-
 class Effort(unittest.TestCase):
     def test_levels(self):
         self.assertEqual(I.effort_kwargs("high"), {"reasoning_effort": "high"})

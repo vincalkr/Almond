@@ -46,8 +46,8 @@ values; a lower temperature or a min_p is a quality choice for the user.
 Recommended values: the original repo's `generation_config.json` gives only temperature 1.0; Unsloth's guide
 (https://unsloth.ai/docs/models/inkling-2-mini) gives temperature 1.0, top_p 1.0, top_k 0 (off), min_p 0.0; ggml-org's
 card gives reasoning_effort high as the default. No source gives a penalty or a max-token value. The configuration
-follows these (top_k 0: the shim keeps it off instead of the shared server's 64-candidate cap, and almond-inkling then
-samples over the 4,096 most likely tokens).
+follows these: it leaves top_k out (the server's config check takes only 1..64), which almond-inkling takes as off
+(it then samples over the 4,096 most likely tokens).
 
 ## Speed
 
@@ -86,9 +86,38 @@ That is phase 4 of the plan, in our own engine.
 - 256K does not fit even at ubatch 128. 160K/128 loads. The configuration keeps 128K/128 for margin. The cost is
   prefill: 444.7 tok/s at 21.7K through the server against 731 for 4096-token batches at 8K depth in llama-bench.
 
+## DSpark in almond-inkling (opt-in)
+
+`local/inkling-dspark-local.json` (`./almond -m inkling-dspark`, router entry beside `inkling`) runs
+`build-inkling/almond-inkling-dspark`: `src/inkling/inkling_serve.cpp` built with `-DALMOND_DSPARK` on llama.cpp PR
+#32218 (head `e4b1cb5`, `build-inkling/llama.cpp-dspark`, built by `build.sh` once the drafter is downloaded). The
+default `almond-inkling` and its configuration are unchanged.
+
+- Drafts: `--dspark DRAFT.gguf --dspark-n 3`, llama.cpp's `common_speculative` with greedy drafts (the drafter's
+  argmax; probabilistic drafts lost the whole gain at temperature 1.0, above).
+- Check: the target decodes [last token, drafts] in one batch, samples every position with the request's own sampler
+  (the same `sample()` as without the drafter, penalties included) and keeps the drafts up to the first one it did not
+  sample. Each kept token is a token the target sampled itself, so the output follows the target's distribution.
+- Cut back: the context is made with `n_rs_seq = 3`, llama.cpp's per-step snapshots of the recurrent (convolution)
+  state for inkling2 (`llm_arch_supports_rs_rollback`), so the rejected tail is removed with `llama_memory_seq_rm` -
+  no checkpoint copy and no re-decode (the same idea as Strata's snapshot + records). The drafter's cache is cut with
+  it. The prefix reuse between turns works as before.
+
+Through the server (`serve_inkling.py`, card 0, 128K context, q8_0 KV, the two prompts above, 600 tokens, reasoning
+off):
+
+| | temp 0 | temp 1.0 |
+|---|---|---|
+| `inkling` (no drafter) | 29.2 / 29.3 | 29.4 / 29.4 |
+| `inkling-dspark` | 41.7 / 44.2 | 46.3 / 41.4 |
+
+A three-turn chat at temperature 1.0 (a name and an age to remember, then counting to 30) answered right on every
+turn at 41-57 tok/s. Not measured yet: a long prompt with DSpark, tool calls with DSpark, and PPL / KL with it on (the
+argument for the same distribution is the construction above, plus the near-tie check at temperature 0).
+
 ## Not done
 
-- **DSpark drafter:** downloaded (`local/fetch.sh inkling-dspark`) but not wired into almond-inkling. Measured first
+- **DSpark drafter:** wired since 2026-11-23 as an opt-in (next section). Measured first
   with llama.cpp PR #32218 (`pwilkin/inkling2-dspark`, head `e4b1cb5`, built apart in `build-inkling/llama.cpp-dspark`)
   and its own `llama-server`. Card 0, UD-Q4_K_XL, q8_0 KV, 16K context, two prompts (Python code with tests; a long
   explanation), 600 tokens each, reasoning off, `--spec-draft-sampling probabilistic`:

@@ -760,3 +760,7 @@ repository's docs: KL 0.00728, same top token 95.90%, PPL +0.13%. ggml-org's IQ4
 94.31%. Speed (llama-bench): decode 30.6 tok/s at depth 0 and 29.0 at 32K; prefill 1,396 tok/s (512 tokens) and
 388 at 32K depth. Through the server, a 21,725-token prompt prefilled at 444.7 tok/s and decoded at 29.3. The decode
 is bound by ~7,400 small kernels a token, not by bytes. Details, memory and what is open: docs/inkling/NOTES.md.
+
+DSpark (opt-in, `local/inkling-dspark-local.json`, `./almond -m inkling-dspark`): Unsloth's drafter, 3 greedy drafts
+checked by the request's own sampler, on `almond-inkling-dspark` (llama.cpp PR #32218). Through the server, card 0,
+600-token answers, reasoning off: 41.4-46.3 tok/s at temperature 0 and 1.0 against 29.2-29.4 without it.

@@ -42,6 +42,9 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   `build-inkling/almond-inkling` (`src/inkling`), llama.cpp's own `inkling2_loop` graph at the commit `build.sh` pins
   (with its own ggml, so a separate executable) behind the engine's serve protocol; files in `models/inkling2-mini`
   (`local/fetch.sh inkling`), measurements in `local/inkling-measure.sh` and docs/inkling/.
+  `local/inkling-dspark-local.json` (`./almond -m inkling-dspark`, opt-in) adds Unsloth's DSpark drafter
+  (`local/fetch.sh inkling-dspark`) on `build-inkling/almond-inkling-dspark`, built on llama.cpp PR #32218 in
+  `build-inkling/llama.cpp-dspark`: 41-46 tok/s against 29.3 through the server, same distribution.
 - Qwen: `local/qwen-local.json` on card 0 (`local/qwen-local-vision.json` with its encoder,
   `models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf`, read on the CPU): the GGUF's two shards in
   `models/qwen38-iq3s`, its pack in `models/qwen38-iq3s-pack` (`tools/qwen/iq_pack.py`), the MTP block in

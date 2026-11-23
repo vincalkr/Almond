@@ -132,6 +132,9 @@ def pick_config(o: dict) -> str:
         fail(f"--model takes ds41, glm, qwen, qwen27, hy4 or inkling (got '{m}')")
     if m == "inkling" and not os.access(ROOT / "build-inkling/almond-inkling", os.X_OK):
         fail("build-inkling/almond-inkling is not built (./build.sh builds it once models/inkling2-mini exists)")
+    exe = (json.load(open(ROOT / o["config"])).get("exe") or "") if m == "inkling" and o.get("config") else ""
+    if exe and not os.access(ROOT / exe, os.X_OK):
+        fail(f"{exe} is not built (./build.sh builds almond-inkling-dspark once the drafter is downloaded)")
     if m not in ("ds41", "inkling") and not os.access(ROOT / "build-hip-fused/almond-engine", os.X_OK):
         fail("build-hip-fused/almond-engine is not built (./build.sh builds it)")
     if m not in ("ds41", "qwen27", "hy4", "inkling"):   # the dense 27B has no experts; Hy4 places its experts by layer
@@ -229,6 +232,7 @@ def missing(cfg: str) -> list:
     val = lambda f: a[a.index(f) + 1] if f in a else ""
     model, pack = val("-m"), val("--glm-pack")
     qwen = [val(f) for f in ("--pack", "--native", "--ple-gguf", "--mtp") if "--qwen" in a and f in a]
+    qwen += [val("--dspark")] if "--inkling" in a and "--dspark" in a else []   # Inkling's DSpark drafter
     engram = val("--engram").split(":") if "--engram" in a else []
     env = c.get("env") or {}
     meta = env.get("DS41_META")               # the geometry overlay a foreign pack reads

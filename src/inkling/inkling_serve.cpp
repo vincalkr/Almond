@@ -9,7 +9,18 @@
 // The model keeps a short-convolution state per layer visit beside its KV cache, so the cache cannot be cut back to
 // an arbitrary length: a prompt that shares a prefix with the last turn keeps the cache only when it extends it
 // exactly (the usual chat turn); otherwise it starts over.
+//
+// Built with -DALMOND_DSPARK (build-inkling/almond-inkling-dspark, on llama.cpp PR #32218 in
+// build-inkling/llama.cpp-dspark), `--dspark DRAFT.gguf [--dspark-n N]` adds speculative decoding with Unsloth's DSpark
+// drafter (opt-in). The drafter proposes its argmax (greedy drafts); the target samples every position with the
+// request's own sampler and keeps the draft up to the first token it did not sample itself, so the output follows the
+// same distribution as without the drafter. A rejected tail is cut back with llama.cpp's per-step recurrent snapshots
+// (n_rs_seq = N): no checkpoint copy and no re-decode. Measured in docs/inkling/NOTES.md.
 #include "llama.h"
+#ifdef ALMOND_DSPARK
+#include "common.h"
+#include "speculative.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -154,14 +165,52 @@ struct Engine {
     int n_batch = 512;
     int64_t n_vocab = 0;
     std::vector<llama_token> hist;   // the tokens in the cache
+#ifdef ALMOND_DSPARK
+    common_speculative * spec = nullptr;     // null: no drafter
+    llama_context * ctx_dft = nullptr;
+    int n_draft = 0;
+    common_batch cb;
+    long long n_drafted = 0, n_accepted = 0;
+#endif
 
     int64_t n_ctx() const { return llama_n_ctx(ctx); }
     void clear() {
         llama_memory_clear(llama_get_memory(ctx), true);
+#ifdef ALMOND_DSPARK
+        if (ctx_dft) llama_memory_clear(llama_get_memory(ctx_dft), true);
+#endif
         hist.clear();
     }
+#ifdef ALMOND_DSPARK
+    // cut the cache (and the drafter's) back to n tokens: within the last batch only (the recurrent snapshots)
+    void cut(size_t n) {
+        llama_memory_seq_rm(llama_get_memory(ctx), 0, (llama_pos) n, -1);
+        if (ctx_dft) llama_memory_seq_rm(llama_get_memory(ctx_dft), 0, (llama_pos) n, -1);
+        hist.resize(n);
+    }
+    // one batch through common_batch, so the drafter reads the target's features
+    bool run(const llama_token * ids, int n, bool all_logits, std::string & err) {
+        cb.clear();
+        for (int i = 0; i < n; ++i) cb.add(ids[i], (llama_pos) (hist.size() + i), 0, all_logits || i == n - 1);
+        const int rc = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, cb.get());
+        if (rc != 0) { err = "llama_process failed (" + std::to_string(rc) + ")"; return false; }
+        if (spec && !common_speculative_process(spec, cb)) { err = "the drafter could not read the batch"; return false; }
+        hist.insert(hist.end(), ids, ids + n);
+        return true;
+    }
+#endif
     // feed ids at the end of the cache; logits of the last token into lg
     bool decode(const llama_token * ids, int n, std::vector<float> & lg, std::string & err) {
+#ifdef ALMOND_DSPARK
+        for (int at = 0; at < n;) {
+            const int m = std::min(n_batch, n - at);
+            if (!run(ids + at, m, false, err)) return false;
+            at += m;
+        }
+        const float * l0 = llama_get_logits_ith(ctx, -1);
+        lg.assign(l0, l0 + n_vocab);
+        return true;
+#endif
         for (int at = 0; at < n;) {
             const int m = std::min(n_batch, n - at);
             batch.n_tokens = m;
@@ -192,6 +241,8 @@ int main(int argc, char ** argv) {
     bool kv_q8 = false, serve = false;
     std::vector<int> eos;
     Sampling defaults;
+    std::string dspark;      // --dspark DRAFT.gguf (almond-inkling-dspark only)
+    int n_draft = 3;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char * { return i + 1 < argc ? argv[++i] : ""; };
@@ -206,8 +257,16 @@ int main(int argc, char ** argv) {
         else if (a == "--eos") eos.push_back(std::atoi(next()));
         else if (a == "--temp") defaults.temp = (float) std::atof(next());
         else if (a == "--top-p") defaults.top_p = (float) std::atof(next());
+        else if (a == "--dspark") dspark = next();
+        else if (a == "--dspark-n") n_draft = std::max(1, std::atoi(next()));
         else { std::fprintf(stderr, "almond-inkling: unknown argument %s\n", a.c_str()); return 2; }
     }
+#ifndef ALMOND_DSPARK
+    if (!dspark.empty()) {
+        std::fprintf(stderr, "almond-inkling: --dspark needs build-inkling/almond-inkling-dspark (build.sh, INKLING_DSPARK=1)\n");
+        return 2;
+    }
+#endif
     if (path.empty() || !serve) {
         std::fprintf(stderr, "usage: almond-inkling -m MODEL.gguf [-c N] [--gpu N] [--kv-q8] [--ubatch N] --serve\n");
         return 2;
@@ -230,8 +289,52 @@ int main(int argc, char ** argv) {
     // keeps every token: 85 KB a token at q8_0, 21.7 GB at 256K, against ~17 KB for the 8 full-attention visits)
     cp.swa_full = false;
     if (kv_q8) { cp.type_k = GGML_TYPE_Q8_0; cp.type_v = GGML_TYPE_Q8_0; }
+#ifdef ALMOND_DSPARK
+    common_params P;
+    if (!dspark.empty()) {
+        // per-step snapshots of the recurrent state for the last n_draft tokens of a batch: the rejected tail of a
+        // verify batch is cut back without a checkpoint
+        cp.n_rs_seq = (uint32_t) n_draft;
+        const auto lim = common_speculative_get_output_limits((int32_t) cp.n_batch, 1, n_draft);
+        cp.n_outputs_max = (uint32_t) std::max(lim.total, 0);
+        cp.n_outputs_max_per_seq = (uint32_t) std::max(lim.per_seq, 0);
+    }
+#endif
     eng.ctx = llama_init_from_model(eng.model, cp);
     if (!eng.ctx) { std::fprintf(stderr, "almond-inkling: cannot make the context\n"); return 1; }
+#ifdef ALMOND_DSPARK
+    common_speculative_init_result_ptr spec_init;
+    eng.cb = common_batch(eng.ctx);
+    if (!dspark.empty()) {
+        P.model.path = path;
+        P.n_ctx = (int32_t) cp.n_ctx;
+        P.n_batch = (int32_t) cp.n_batch;
+        P.n_ubatch = (int32_t) cp.n_ubatch;
+        P.n_parallel = 1;
+        P.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        P.speculative.types = {COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK};
+        P.speculative.draft.mparams.path = dspark;
+        P.speculative.draft.n_max = n_draft;
+        P.speculative.draft.n_gpu_layers = 999;
+        P.speculative.draft.probabilistic = false;
+        P.main_gpu = gpu;
+        common_params pd = common_base_params_to_speculative(P);
+        spec_init = common_speculative_init_from_params(pd, eng.model, eng.ctx);
+        P.speculative.draft.ctx_tgt = eng.ctx;
+        P.speculative.draft.ctx_dft = spec_init ? spec_init->context() : nullptr;
+        eng.ctx_dft = P.speculative.draft.ctx_dft;
+        try { eng.spec = common_speculative_init(P.speculative, 1); } catch (const std::exception & e) {
+            std::fprintf(stderr, "almond-inkling: DSpark: %s\n", e.what());
+        }
+        if (!eng.spec || !eng.ctx_dft) { std::fprintf(stderr, "almond-inkling: cannot load the drafter %s\n", dspark.c_str()); return 1; }
+        if (common_context_can_seq_rm(eng.ctx) != COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
+            common_context_can_seq_rm(eng.ctx_dft) == COMMON_CONTEXT_SEQ_RM_TYPE_FULL) {
+            std::fprintf(stderr, "almond-inkling: DSpark needs partial cut-back on both contexts\n");
+            return 1;
+        }
+        eng.n_draft = n_draft;
+    }
+#endif
     eng.vocab = llama_model_get_vocab(eng.model);
     eng.n_vocab = llama_vocab_n_tokens(eng.vocab);
     eng.n_batch = (int) cp.n_batch;
@@ -242,7 +345,12 @@ int main(int argc, char ** argv) {
     std::thread rd([&] { lq.run(); });
     rd.detach();
     std::mt19937_64 rng(std::random_device{}());
+#ifdef ALMOND_DSPARK
+    say("INFO engine=%s model=inkling context=%lld mtp=0 dspark=%d\n", ALMOND_VERSION, (long long) eng.n_ctx(),
+        eng.n_draft);
+#else
     say("INFO engine=%s model=inkling context=%lld mtp=0\n", ALMOND_VERSION, (long long) eng.n_ctx());
+#endif
     say("READY %lld stop\n", (long long) eng.n_ctx());
     std::string line;
     while (lq.pop(line)) {
@@ -343,6 +451,51 @@ int main(int argc, char ** argv) {
         };
         llama_token y = sample(lg.data(), eng.n_vocab, s, hist, rng);
         bool more = emit(y);
+#ifdef ALMOND_DSPARK
+        long long drafted = 0, accepted = 0;
+        if (eng.spec && more) {
+            common_speculative_begin(eng.spec, 0, eng.hist);
+            llama_tokens draft;
+            while (more) {
+                const size_t base = eng.hist.size();
+                if ((int64_t) base + 1 > eng.n_ctx()) break;
+                int n_max = (int) std::min<int64_t>({(int64_t) eng.n_draft, eng.n_ctx() - (int64_t) base - 2,
+                                                     (int64_t) (max_new - produced - 1)});
+                draft.clear();
+                if (n_max > 0) {
+                    common_speculative_get_draft_params(eng.spec, 0) = {
+                        /* .drafting = */ true, /* .n_max = */ n_max, /* .pos0 = */ (llama_pos) base,
+                        /* .id_last = */ y, /* .prompt = */ &eng.hist, /* .result = */ &draft,
+                    };
+                    common_speculative_draft(eng.spec);
+                    if ((int) draft.size() > n_max) draft.resize((size_t) n_max);
+                    // the drafter's own tokens past the cache are dropped before the target checks them
+                    llama_memory_seq_rm(llama_get_memory(eng.ctx_dft), 0, (llama_pos) base, -1);
+                }
+                std::vector<llama_token> b(1, y);
+                b.insert(b.end(), draft.begin(), draft.end());
+                if (!eng.run(b.data(), (int) b.size(), true, err)) { ok = false; break; }
+                // the target samples each position; the draft holds up to the first token it did not sample
+                size_t i = 0, kept = 0;
+                for (; i < b.size(); ++i) {
+                    const float * l = llama_get_logits_ith(eng.ctx, (int32_t) i);
+                    y = sample(l, eng.n_vocab, s, hist, rng);
+                    more = emit(y);
+                    kept = i + 1;
+                    if (!more || i == draft.size() || y != draft[i]) break;
+                }
+                drafted += (long long) draft.size();
+                accepted += (long long) (kept - 1);
+                common_speculative_accept(eng.spec, 0, (uint16_t) (kept - 1));
+                // the cache keeps the batch's first `kept` tokens; y (the last sampled) goes in with the next batch
+                if (base + kept < eng.hist.size()) eng.cut(base + kept);
+            }
+            eng.n_drafted += drafted;
+            eng.n_accepted += accepted;
+            if (drafted > 0) say("INFO dspark drafted=%lld accepted=%lld\n", drafted, accepted);
+            more = false;
+        }
+#endif
         while (more) {
             if ((int64_t) eng.hist.size() + 1 > eng.n_ctx()) break;
             if (!eng.decode(&y, 1, lg, err)) { ok = false; break; }
@@ -353,6 +506,9 @@ int main(int argc, char ** argv) {
         if (!ok) { eng.clear(); say("ERR %s\n", err.c_str()); continue; }
         say("DONE %d %zu %.1f %.1f %s 0 0 %zu\n", produced, ids.size(), pp_ms, gen_ms, finish.c_str(), keep);
     }
+#ifdef ALMOND_DSPARK
+    if (eng.spec) common_speculative_free(eng.spec);
+#endif
     llama_batch_free(eng.batch);
     llama_free(eng.ctx);
     llama_model_free(eng.model);
