@@ -8,7 +8,12 @@
 //
 // The model keeps a short-convolution state per layer visit beside its KV cache, so the cache cannot be cut back to
 // an arbitrary length: a prompt that shares a prefix with the last turn keeps the cache only when it extends it
-// exactly (the usual chat turn); otherwise it starts over.
+// exactly (the usual chat turn). Otherwise it goes back to the last checkpoint inside the shared prefix: after each
+// prompt is read, the state that cannot be cut back (the convolution state and the window layers' cache:
+// LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) is copied to RAM, as llama-server's context checkpoints do. An agent's next
+// prompt re-renders the model's last turn (its thinking and tool call as the template writes them), which is not the
+// tokens the model produced; it does share everything up to the end of the last prompt, so only the new part is read.
+// With no usable checkpoint it starts over.
 //
 // Built with -DALMOND_DSPARK (build-inkling/almond-inkling-dspark, on llama.cpp PR #32218 in
 // build-inkling/llama.cpp-dspark), `--dspark DRAFT.gguf [--dspark-n N]` adds speculative decoding with Unsloth's DSpark
@@ -165,6 +170,9 @@ struct Engine {
     int n_batch = 512;
     int64_t n_vocab = 0;
     std::vector<llama_token> hist;   // the tokens in the cache
+    struct Ckpt { size_t n; std::vector<uint8_t> data; };
+    std::deque<Ckpt> ckpts;          // the newest last; at most kMaxCkpt
+    static constexpr size_t kMaxCkpt = 4;
 #ifdef ALMOND_DSPARK
     common_speculative * spec = nullptr;     // null: no drafter
     llama_context * ctx_dft = nullptr;
@@ -180,6 +188,33 @@ struct Engine {
         if (ctx_dft) llama_memory_clear(llama_get_memory(ctx_dft), true);
 #endif
         hist.clear();
+        ckpts.clear();
+    }
+    // copy the state that cannot be cut back, at the cache's current end
+    double save_ckpt() {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!ckpts.empty() && ckpts.back().n == hist.size()) return 0.0;
+        const auto fl = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+        Ckpt c{hist.size(), std::vector<uint8_t>(llama_state_seq_get_size_ext(ctx, 0, fl))};
+        if (c.data.empty() || llama_state_seq_get_data_ext(ctx, c.data.data(), c.data.size(), 0, fl) != c.data.size())
+            return -1.0;
+        while (ckpts.size() >= kMaxCkpt) ckpts.pop_front();
+        ckpts.push_back(std::move(c));
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    }
+    // go back to the newest checkpoint at or before `limit` tokens; 0 when there is none
+    size_t restore_ckpt(size_t limit) {
+        while (!ckpts.empty() && ckpts.back().n > limit) ckpts.pop_back();
+        if (ckpts.empty() || ckpts.back().n == 0) return 0;
+        const Ckpt & c = ckpts.back();
+        const auto fl = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+        if (llama_state_seq_set_data_ext(ctx, c.data.data(), c.data.size(), 0, fl) != c.data.size()) return 0;
+        llama_memory_seq_rm(llama_get_memory(ctx), 0, (llama_pos) c.n, -1);
+#ifdef ALMOND_DSPARK
+        if (ctx_dft) llama_memory_seq_rm(llama_get_memory(ctx_dft), 0, (llama_pos) c.n, -1);
+#endif
+        hist.resize(c.n);
+        return c.n;
     }
 #ifdef ALMOND_DSPARK
     // cut the cache (and the drafter's) back to n tokens: within the last batch only (the recurrent snapshots)
@@ -414,7 +449,13 @@ int main(int argc, char ** argv) {
         size_t keep = 0;
         if (!eng.hist.empty() && eng.hist.size() < ids.size() &&
             std::equal(eng.hist.begin(), eng.hist.end(), ids.begin())) keep = eng.hist.size();
-        else eng.clear();
+        else {
+            size_t same = 0;
+            while (same < eng.hist.size() && same < ids.size() && eng.hist[same] == ids[same]) ++same;
+            keep = eng.restore_ckpt(std::min(same, ids.size() - 1));
+            if (keep == 0) eng.clear();
+            else say("INFO checkpoint restored at %zu (shared prefix %zu)\n", keep, same);
+        }
         if (keep > 0) say("RESUME %zu\n", keep);
         const auto t0 = std::chrono::steady_clock::now();
         std::vector<float> lg;
@@ -431,6 +472,8 @@ int main(int argc, char ** argv) {
         }
         const double pp_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (!ok) { eng.clear(); say("ERR %s\n", err.c_str()); continue; }
+        // the prompt's end: where the next prompt of this conversation will part from the cache
+        if (!cancelled && !lq.stop && eng.save_ckpt() < 0) say("INFO checkpoint not saved\n");
         if (cancelled || lq.stop) {
             eng.clear();
             say("DONE 0 %zu %.1f 0.0 cancel 0 0 %zu\n", ids.size(), pp_ms, keep);

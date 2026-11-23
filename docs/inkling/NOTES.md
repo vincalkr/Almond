@@ -115,6 +115,28 @@ A three-turn chat at temperature 1.0 (a name and an age to remember, then counti
 turn at 41-57 tok/s. Not measured yet: a long prompt with DSpark, tool calls with DSpark, and PPL / KL with it on (the
 argument for the same distribution is the construction above, plus the near-tie check at temperature 0).
 
+## Prompt checkpoints (2026-11-23)
+
+The cache used to be kept only when a prompt extended it exactly. An agent's next prompt re-renders the model's last
+turn (its thinking and tool call as the template writes them), which is not the tokens the model produced, so every
+file it read restarted the prefill from 0 (seen in `local/router.log`: 17,037 tokens reused on one turn, the next
+20,037-token prompt read from 0).
+
+`almond-inkling` now copies the state that cannot be cut back (llama.cpp's `LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY`: the
+convolution state and the window layers' cache) to RAM at the end of every prompt, keeping the last 4, as
+llama-server's context checkpoints do. A prompt that parts from the cache goes back to the newest checkpoint inside
+the shared prefix and reads only the rest. Three agent-like turns (a 4K-token file, then a 5K-token file, then a
+question), card 0, temperature 1.0:
+
+| | turn 2 (9,596 tokens) | turn 3 (9,839) |
+|---|---|---|
+| before | all read again | all read again |
+| `inkling` now | 4,157 from the cache | about 240 read |
+| `inkling-dspark` now | 4,157 from the cache | about 240 read |
+
+All answers were right. The checkpoints' size in RAM was not measured (a window of 1,024+ tokens over 40 window
+visits at q8_0 plus the convolution rows: an estimate of under 100 MB each).
+
 ## Not done
 
 - **DSpark drafter:** wired since 2026-11-23 as an opt-in (next section). Measured first
