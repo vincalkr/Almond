@@ -891,8 +891,25 @@ struct Hy4Engine::Impl {
         // picks does not matter to the mask or the gather) - but ggml_top_k places the keys equal to the k-th with
         // atomicAdd, so on ties the picks, and the answer, changed between runs.  The sorted pick is the default now;
         // --indexer-topk buys the old 0.8% back.  docs/hy4/SPEED_WORK.md, "The cause is the pick".
-        ggml_tensor * top = (o.fused_indexer && !o.indexer_argsort) ? ggml_top_k(c, score, (int) sh.n_top)
-                                                                   : ggml_argsort_top_k(c, score, (int) sh.n_top);   // [n_top, nt]
+        ggml_tensor * top;
+        if (o.fused_indexer && o.indexer_argsort) {
+            // Repeatable and cheap (2026-11-23): the full sort cost 4-5% of decode at 32K and grows with the context
+            // (it orders every pool, n_past / 4 of them, for every token of 12 layers). Instead the ties are broken by
+            // the pool's index - minus idx x 1e-15, below a float's resolution for any score that is not exactly 0 and
+            // so deciding only among equal ones, the zeros of the ReLU above all - which makes ggml_top_k's set the same
+            // on every run, and only those n_top picks are then put in index order, so the attention adds them up in
+            // the same order too.
+            ggml_tensor * ramp = ggml_scale(c, ggml_arange(c, 0.0f, (float) sh.n_pool, 1.0f), -1e-15f);
+            ggml_tensor * t = ggml_top_k(c, ggml_add(c, score, ramp), (int) sh.n_top);          // [n_top, nt], any order
+            ggml_tensor * tf = ggml_cast(c, cont(c, t), GGML_TYPE_F32);
+            ggml_tensor * ord = ggml_argsort(c, tf, GGML_SORT_ORDER_ASC);
+            tf = ggml_get_rows(c, ggml_reshape_3d(c, tf, 1, sh.n_top, nt), ord);                // [1, n_top, nt]
+            top = ggml_cast(c, ggml_reshape_2d(c, tf, sh.n_top, nt), GGML_TYPE_I32);
+        } else if (o.fused_indexer) {
+            top = ggml_top_k(c, score, (int) sh.n_top);                                         // --indexer-topk
+        } else {
+            top = ggml_argsort_top_k(c, score, (int) sh.n_top);                                 // [n_top, nt]
+        }
         ggml_tensor * sel = ggml_get_rows(c, in.pool_idx, ggml_reshape_1d(c, cont(c, top), sh.n_top * nt));
         sel = ggml_reshape_2d(c, sel, kp * sh.n_top, nt);
         if (G.idx_tail) sel = ggml_concat(c, sel, in.tail, 0);                        // [n_sel, nt]

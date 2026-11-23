@@ -537,3 +537,18 @@ The knobs that repeat on this machine, and the ones that turned out to be jitter
   acceptance or decode.
 - Do not kill the engine with `pkill -f` patterns (they matched the agent's own shell); stop background loops
   with their task, not only the engine, or the loop starts the next run.
+
+## The decode regression of b07acb2, and its fix (2026-11-23)
+
+b07acb2 made the indexer's pick a full sort (`ggml_argsort_top_k` over every pool, n_past / 4 of them, for every
+token of 12 layers) to make the engine repeat itself. It costs nothing at 2K and grows with the context: real-text
+prompt, 300 greedy tokens, the configuration's flags at 256K, ms per MTP round at 32K (rounds vary with acceptance, so
+round time is the comparison): bedf452 76.4 / 77.5, the branch's head 81.2 / 81.2 (+5%), `--indexer-topk` 77.7 /
+77.2. In long sessions this is where 22-24 tok/s became ~19.
+
+Fix: the ties are broken by the pool's index (score - idx x 1e-15, below a float's resolution for any score that is
+not exactly 0, so it decides only among equal ones - the ReLU's zeros above all), `ggml_top_k` picks the set, and only
+those n_top picks are sorted by index (a 511-wide argsort), so the set and the attention's summation order are the
+same on every run. Measured: 78.2 / 78.0 ms a round at 32K; two runs over the 32K text in 4,096-token windows give the
+same perplexity (42.5465) and KL 0.00000 / top-1 100.00% over 16,376 rows; against `--indexer-topk` KL 0.12563,
+top-1 88.40% (the distance between two runs of that unrepeatable path).

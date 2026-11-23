@@ -44,7 +44,7 @@ struct Hy4EngineOptions {
     /// A sorted pick makes the engine repeat exactly (KL 0.00000, the same perplexity to four digits) for +0.8% of a
     /// round; docs/hy4/SPEED_WORK.md, "The cause is the pick, not the score kernel".  --indexer-topk buys the old
     /// behaviour back for that 0.8%.
-    bool indexer_argsort = true;   ///< (--indexer-topk to turn off)
+    bool indexer_argsort = true;   ///< repeatable picks (since 2026-11-23: top-k with ties broken by index, then the picks sorted - not a full sort); --indexer-topk to turn off
     bool gather_attn = false;      ///< sparse layers attend over the indexer's picked rows only (--gather-attn)
     bool host_moe = false;         ///< the experts in RAM computed by a host thread the graph waits on (--host-moe)
     std::string dfly;              ///< Tencent's DFly2 drafter as a GGUF (tools/hy4/dfly_convert.py), needs mtp (--dfly)
