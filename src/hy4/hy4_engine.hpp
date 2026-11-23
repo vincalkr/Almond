@@ -46,7 +46,8 @@ struct Hy4EngineOptions {
     /// behaviour back for that 0.8%.
     bool indexer_argsort = true;   ///< repeatable picks (since 2026-11-23: top-k with ties broken by index, then the picks sorted - not a full sort); --indexer-topk to turn off
     bool gather_attn = false;      ///< sparse layers attend over the indexer's picked rows only (--gather-attn)
-    bool host_moe = false;         ///< the experts in RAM computed by a host thread the graph waits on (--host-moe)
+    bool host_moe = false;
+    int pcie_share = 0;            ///< with --host-moe: up to N experts a RAM layer's step copied to card 0 and computed there (--pcie-share)         ///< the experts in RAM computed by a host thread the graph waits on (--host-moe)
     std::string dfly;              ///< Tencent's DFly2 drafter as a GGUF (tools/hy4/dfly_convert.py), needs mtp (--dfly)
     int mtp_n = 1;                 ///< guesses per step (--mtp-n)              ///< load the MTP block (layer 42) and draft one token ahead (--mtp)         ///< the 2-D BF16 matrices quantized to Q8_0 on load (--dense-q8)
     /// Stop the draft chain where its own confidence says the next guess is not worth a draft step (--mtp-adaptive,

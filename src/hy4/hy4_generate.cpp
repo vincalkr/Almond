@@ -130,6 +130,11 @@ int parse(int argc, char ** argv, Args & a) {
             a.eo.min_free_mib = std::atoll(argv[i]);
         }
         else if (!std::strcmp(s, "--host-moe")) a.eo.host_moe = true;
+        else if (!std::strcmp(s, "--pcie-share")) {
+            if (++i >= argc) return 2;
+            a.eo.pcie_share = std::max(0, std::atoi(argv[i]));
+            a.eo.host_moe = true;
+        }
         else if (!std::strcmp(s, "--gather-attn")) a.eo.gather_attn = true;
         else if (!std::strcmp(s, "--fused-indexer")) a.eo.fused_indexer = true;
         else if (!std::strcmp(s, "--indexer-argsort")) a.eo.indexer_argsort = true;     // the default; explicit for old command lines

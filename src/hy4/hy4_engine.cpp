@@ -119,6 +119,20 @@ struct Hy4Engine::Impl {
         double us = 0;
         struct G { ggml_context * c = nullptr; ggml_cgraph * gf = nullptr; std::vector<uint8_t> work; ggml_cplan plan{}; };
         std::map<std::pair<int, int>, G> graphs;
+        // --pcie-share N: up to N of a step's experts copied to card 0 and computed there while the CPU does the rest
+        std::vector<int32_t> cids; std::vector<float> cw, cout;        // the CPU's share: ids, weights (0 for card 0's), out
+        ggml_backend_t gbe = nullptr;                                   // a backend of its own on card 0
+        ggml_context * gwc = nullptr; ggml_backend_buffer_t gwb = nullptr;
+        ggml_tensor * sg = nullptr, * su = nullptr, * sd = nullptr;     // the staged experts, [.., .., N] each
+        struct GG { ggml_context * c = nullptr; ggml_cgraph * gf = nullptr; ggml_gallocr_t ga = nullptr;
+                    ggml_tensor * x = nullptr, * ids = nullptr, * w = nullptr, * out = nullptr; };
+        std::map<int, GG> ggraphs;                                      // per token count
+        std::vector<int32_t> gids; std::vector<float> gw, gout;         // card 0's share
+        std::vector<std::pair<int, int>> gjob;                          // (expert, slot) to stage
+        int glayer = 0, gnt = 0;
+        std::thread gth;
+        std::atomic<int> gstate{0};                                     // 1 = job posted, 2 = done
+        uint64_t gcalls = 0, gexperts = 0; double gus = 0;
     } hm;
     bool host_moe_layer(int64_t il, int64_t nt) const {
         return o.host_moe && hm.mem && nt <= 8 && il < n_trunk && il >= G.n_dense && edev[(size_t) il] == ng();
@@ -1119,9 +1133,13 @@ struct Hy4Engine::Impl {
 
     /// The routed experts: x [LAT, 1, nt], ids [USED, nt], wts [1, USED, nt] -> [1, LAT, nt]
     ggml_tensor * experts(ggml_context * c, ggml_tensor * routed, ggml_tensor * ids, ggml_tensor * wts, const std::string & b) const {
-        ggml_tensor * g = ggml_mul_mat_id(c, W(b + "ffn_gate_exps.weight"), routed, ids);
-        ggml_tensor * u = ggml_mul_mat_id(c, W(b + "ffn_up_exps.weight"), routed, ids);
-        ggml_tensor * d = ggml_mul_mat_id(c, W(b + "ffn_down_exps.weight"), ggml_swiglu_split(c, g, u), ids);
+        return experts_w(c, W(b + "ffn_gate_exps.weight"), W(b + "ffn_up_exps.weight"), W(b + "ffn_down_exps.weight"), routed, ids, wts);
+    }
+    static ggml_tensor * experts_w(ggml_context * c, ggml_tensor * wg, ggml_tensor * wu, ggml_tensor * wd, ggml_tensor * routed,
+                                   ggml_tensor * ids, ggml_tensor * wts) {
+        ggml_tensor * g = ggml_mul_mat_id(c, wg, routed, ids);
+        ggml_tensor * u = ggml_mul_mat_id(c, wu, routed, ids);
+        ggml_tensor * d = ggml_mul_mat_id(c, wd, ggml_swiglu_split(c, g, u), ids);
         d = ggml_mul(c, d, wts);                                                    // [LAT, USED, nt]
         return ggml_sum_rows(c, cont(c, ggml_permute(c, d, 1, 0, 2, 3)));
     }
@@ -1137,6 +1155,34 @@ struct Hy4Engine::Impl {
         hm.bell = { (float *) (hm.mem + ox), (int32_t *) (hm.mem + oi), (float *) (hm.mem + ow), (float *) (hm.mem + oo),
                     (int32_t *) (hm.mem + om), (uint32_t *) (hm.mem + os), (uint32_t *) (hm.mem + of) };
         hm.n_threads = n_threads;
+        if (o.pcie_share > 0) {
+            // the staged experts take the types and shapes of the first layer kept in RAM; every RAM layer must match
+            int64_t first = -1;
+            for (int64_t l = G.n_dense; l < n_trunk; ++l) if (edev[(size_t) l] == ng()) { first = l; break; }
+            if (first < 0) { err = "--pcie-share: no layer keeps its experts in RAM"; return false; }
+            const std::string b = "blk." + std::to_string(first) + ".";
+            ggml_tensor * tg = W(b + "ffn_gate_exps.weight"), * tu = W(b + "ffn_up_exps.weight"), * td = W(b + "ffn_down_exps.weight");
+            for (int64_t l = first; l < n_trunk; ++l) {
+                if (edev[(size_t) l] != ng()) continue;
+                const std::string bl = "blk." + std::to_string(l) + ".";
+                if (W(bl + "ffn_gate_exps.weight")->type != tg->type || W(bl + "ffn_up_exps.weight")->type != tu->type ||
+                    W(bl + "ffn_down_exps.weight")->type != td->type) { err = "--pcie-share: the RAM layers' expert types differ"; return false; }
+            }
+            hm.gbe = ggml_backend_cuda_init(o.gpus[0]);
+            ggml_init_params ip = { 8 * ggml_tensor_overhead(), nullptr, true };
+            hm.gwc = ggml_init(ip);
+            const int64_t N = o.pcie_share;
+            hm.sg = ggml_new_tensor_3d(hm.gwc, tg->type, tg->ne[0], tg->ne[1], N);
+            hm.su = ggml_new_tensor_3d(hm.gwc, tu->type, tu->ne[0], tu->ne[1], N);
+            hm.sd = ggml_new_tensor_3d(hm.gwc, td->type, td->ne[0], td->ne[1], N);
+            hm.gwb = ggml_backend_alloc_ctx_tensors(hm.gwc, hm.gbe);
+            if (!hm.gwb) { err = "--pcie-share: no room on card 0 for the staged experts"; return false; }
+            hm.cids.resize((size_t) (K * NT)); hm.cw.resize((size_t) (K * NT)); hm.cout.resize((size_t) (LAT * NT));
+            hm.gids.resize((size_t) (K * NT)); hm.gw.resize((size_t) (K * NT)); hm.gout.resize((size_t) (LAT * NT));
+            hm.gth = std::thread([this] { pcie_loop(); });
+            if (o.verbose) std::fprintf(stderr, "hy4: --pcie-share %d: %.1f MiB of staged experts on card %d\n", o.pcie_share,
+                                        ggml_backend_buffer_get_size(hm.gwb) / 1048576.0, o.gpus[0]);
+        }
         ggml_threadpool_params tp = ggml_threadpool_params_default(n_threads);
         hm.pool = ggml_threadpool_new(&tp);
         hm.th = std::thread([this] { host_moe_loop(); });
@@ -1151,6 +1197,14 @@ struct Hy4Engine::Impl {
         { std::lock_guard<std::mutex> l(hm.mu); }
         hm.cv.notify_all();
         if (hm.th.joinable()) hm.th.join();
+        if (hm.gth.joinable()) { hm.gstate = -1; hm.gth.join(); }
+        if (std::getenv("HY4_HM_STATS") && hm.gcalls)
+            std::fprintf(stderr, "hy4: pcie-share: %llu calls, %.1f experts and %.1f us each\n", (unsigned long long) hm.gcalls,
+                         (double) hm.gexperts / hm.gcalls, hm.gus / hm.gcalls);
+        for (auto & [k, g] : hm.ggraphs) { if (g.ga) ggml_gallocr_free(g.ga); ggml_free(g.c); }
+        if (hm.gwb) ggml_backend_buffer_free(hm.gwb);
+        if (hm.gwc) ggml_free(hm.gwc);
+        if (hm.gbe) ggml_backend_free(hm.gbe);
         for (auto & [k, g] : hm.graphs) ggml_free(g.c);
         if (hm.pool) ggml_threadpool_free(hm.pool);
         ggml_backend_cuda_free_mapped(hm.mem);
@@ -1171,6 +1225,7 @@ struct Hy4Engine::Impl {
         ggml_tensor * w = ggml_new_tensor_3d(g.c, GGML_TYPE_F32, 1, K, nt);
         ggml_tensor * out = ggml_new_tensor_2d(g.c, GGML_TYPE_F32, LAT, nt);
         x->data = hm.bell.x; ids->data = hm.bell.ids; w->data = hm.bell.w; out->data = hm.bell.out;
+        if (hm.gbe) { ids->data = hm.cids.data(); w->data = hm.cw.data(); out->data = hm.cout.data(); }
         const std::string b = "blk." + std::to_string(layer) + ".";
         ggml_tensor * s = experts(g.c, x, ids, w, b);
         ggml_tensor * y = ggml_cpy(g.c, ggml_reshape_2d(g.c, s, LAT, nt), out);
@@ -1180,6 +1235,95 @@ struct Hy4Engine::Impl {
         g.work.resize(g.plan.work_size + 64);
         g.plan.work_data = g.work.data();
         return hm.graphs.emplace(std::make_pair(layer, nt), std::move(g)).first->second;
+    }
+
+    /// --pcie-share: picks up to N of the step's experts (the last ones in order of first appearance) for card 0, writes
+    /// the CPU's ids / weights with those slots weighted 0 (their id swapped for another of the same token's, so the CPU
+    /// reads nothing more), card 0's ids as slot numbers (its other slots point at slot 0 with weight 0), and posts the job.
+    bool pcie_split(int layer, int nt) {
+        const int K = (int) G.n_used, N = o.pcie_share;
+        const int32_t * ids = hm.bell.ids;
+        const float * w = hm.bell.w;
+        std::vector<int> uniq;
+        for (int i = 0; i < K * nt; ++i)
+            if (std::find(uniq.begin(), uniq.end(), ids[i]) == uniq.end()) uniq.push_back(ids[i]);
+        const int ng_ = std::min<int>(N, (int) uniq.size() - 1);       // the CPU keeps at least one expert
+        if (ng_ <= 0) {
+            std::memcpy(hm.cids.data(), ids, (size_t) (K * nt) * 4);
+            std::memcpy(hm.cw.data(), w, (size_t) (K * nt) * 4);
+            return false;
+        }
+        hm.gjob.clear();
+        std::map<int, int> slot;
+        for (int j = 0; j < ng_; ++j) { const int e = uniq[uniq.size() - 1 - (size_t) j]; slot[e] = j; hm.gjob.emplace_back(e, j); }
+        for (int t = 0; t < nt; ++t) {
+            int keep = -1;                                              // a CPU id of this token for the swapped slots
+            for (int k = 0; k < K; ++k) if (!slot.count(ids[t * K + k])) { keep = ids[t * K + k]; break; }
+            for (int k = 0; k < K; ++k) {
+                const int i = t * K + k, e = ids[i];
+                auto it = slot.find(e);
+                if (it != slot.end()) {
+                    hm.cids[(size_t) i] = keep >= 0 ? keep : e; hm.cw[(size_t) i] = 0.0f;
+                    hm.gids[(size_t) i] = it->second;           hm.gw[(size_t) i] = w[i];
+                } else {
+                    hm.cids[(size_t) i] = e;                    hm.cw[(size_t) i] = w[i];
+                    hm.gids[(size_t) i] = 0;                    hm.gw[(size_t) i] = 0.0f;
+                }
+            }
+        }
+        hm.glayer = layer; hm.gnt = nt;
+        hm.gstate.store(1, std::memory_order_release);
+        return true;
+    }
+
+    HostMoe::GG & pcie_graph(int nt) {
+        auto it = hm.ggraphs.find(nt);
+        if (it != hm.ggraphs.end()) return it->second;
+        const int64_t LAT = G.d_latent, K = G.n_used;
+        HostMoe::GG g;
+        ggml_init_params ip = { 64 * ggml_tensor_overhead() + ggml_graph_overhead(), nullptr, true };
+        g.c = ggml_init(ip);
+        g.x = ggml_new_tensor_3d(g.c, GGML_TYPE_F32, LAT, 1, nt);   ggml_set_input(g.x);
+        g.ids = ggml_new_tensor_2d(g.c, GGML_TYPE_I32, K, nt);      ggml_set_input(g.ids);
+        g.w = ggml_new_tensor_3d(g.c, GGML_TYPE_F32, 1, K, nt);     ggml_set_input(g.w);
+        ggml_tensor * s = experts_w(g.c, hm.sg, hm.su, hm.sd, g.x, g.ids, g.w);
+        g.out = ggml_cont(g.c, ggml_reshape_2d(g.c, s, LAT, nt));
+        ggml_set_output(g.out);
+        g.gf = ggml_new_graph(g.c);
+        ggml_build_forward_expand(g.gf, g.out);
+        g.ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(hm.gbe));
+        ggml_gallocr_alloc_graph(g.ga, g.gf);
+        return hm.ggraphs.emplace(nt, g).first->second;
+    }
+
+    /// card 0's side: stage the job's experts from the mapped file, compute them, leave the sum in gout
+    void pcie_loop() {
+        for (;;) {
+            int st;
+            while ((st = hm.gstate.load(std::memory_order_acquire)) != 1) {
+                if (st < 0 || hm.stop) return;
+                __builtin_ia32_pause();
+            }
+            const auto t0 = std::chrono::steady_clock::now();
+            const std::string b = "blk." + std::to_string(hm.glayer) + ".";
+            ggml_tensor * src[3] = { W(b + "ffn_gate_exps.weight"), W(b + "ffn_up_exps.weight"), W(b + "ffn_down_exps.weight") };
+            ggml_tensor * dst[3] = { hm.sg, hm.su, hm.sd };
+            for (auto & [e, sl] : hm.gjob)
+                for (int m = 0; m < 3; ++m)
+                    ggml_backend_tensor_set(dst[m], (const uint8_t *) src[m]->data + (size_t) e * src[m]->nb[2],
+                                            (size_t) sl * dst[m]->nb[2], dst[m]->nb[2]);
+            const int nt = hm.gnt;
+            HostMoe::GG & g = pcie_graph(nt);
+            const int64_t K = G.n_used, LAT = G.d_latent;
+            ggml_backend_tensor_set(g.x, hm.bell.x, 0, (size_t) (LAT * nt) * 4);
+            ggml_backend_tensor_set(g.ids, hm.gids.data(), 0, (size_t) (K * nt) * 4);
+            ggml_backend_tensor_set(g.w, hm.gw.data(), 0, (size_t) (K * nt) * 4);
+            ggml_backend_graph_compute(hm.gbe, g.gf);
+            ggml_backend_tensor_get(g.out, hm.gout.data(), 0, (size_t) (LAT * nt) * 4);
+            hm.gcalls++; hm.gexperts += hm.gjob.size();
+            hm.gus += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+            hm.gstate.store(2, std::memory_order_release);
+        }
     }
 
     void host_moe_loop() {
@@ -1198,7 +1342,18 @@ struct Hy4Engine::Impl {
             std::atomic_thread_fence(std::memory_order_acquire);
             HostMoe::G & g = host_moe_graph(meta[0], meta[1]);
             const auto t0 = std::chrono::steady_clock::now();
+            const bool split = hm.gbe && pcie_split(meta[0], meta[1]);
             ggml_graph_compute(g.gf, &g.plan);
+            if (hm.gbe) {
+                const int64_t n = (int64_t) G.d_latent * meta[1];
+                if (split) {
+                    while (hm.gstate.load(std::memory_order_acquire) != 2) __builtin_ia32_pause();
+                    for (int64_t i = 0; i < n; ++i) hm.bell.out[i] = hm.cout[(size_t) i] + hm.gout[(size_t) i];
+                    hm.gstate = 0;
+                } else {
+                    std::memcpy(hm.bell.out, hm.cout.data(), (size_t) n * 4);
+                }
+            }
             hm.calls++;
             hm.us += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
             std::atomic_thread_fence(std::memory_order_seq_cst);

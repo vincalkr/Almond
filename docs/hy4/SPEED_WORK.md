@@ -552,3 +552,26 @@ those n_top picks are sorted by index (a 511-wide argsort), so the set and the a
 same on every run. Measured: 78.2 / 78.0 ms a round at 32K; two runs over the 32K text in 4,096-token windows give the
 same perplexity (42.5465) and KL 0.00000 / top-1 100.00% over 16,376 rows; against `--indexer-topk` KL 0.12563,
 top-1 88.40% (the distance between two runs of that unrepeatable path).
+
+## CPU + PCIe "miss-sharing" in decode, measured (2026-11-23): not worth it as built
+
+Idea (Strata 0.2.20's "async PCIe miss-sharing"): a RAM layer's experts split between the CPU and card 0, which gets
+its share over PCIe x16 (28 GB/s) and computes it while the CPU does the rest, so the two bandwidths add up.
+`--pcie-share N` (with `--host-moe`, off): the host thread hands up to N of a step's unique experts to a worker that
+copies their gate/up/down slices from the mapped file to staging tensors on card 0 (a ggml backend of its own) and
+runs them there; the CPU's slots for those experts are given weight 0 and another of the token's ids.
+
+2K real-text prompt, 300 greedy tokens, the configuration at 256K, one run each (`HY4_HM_STATS=1`):
+
+| N | CPU per call | card 0 per call | tok/s | ms a round |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 1,584 us | - | 23.77 | 78.6 |
+| 4 | 1,537 us | 1,202 us | 23.45 | 77.5 |
+| 8 | 1,681 us | 1,650 us | 21.31 | 79.1 |
+| 12 | 2,078 us | 2,026 us | 22.30 | 83.1 |
+
+Why: card 0's share is slow (4 experts in 1.2 ms against ~0.5 estimated: 12 synchronous copies from the pageable
+mapping, ~100 us each of launch and staging), and the CPU barely saves anything (-3% for 4 of ~31 experts instead of
+-13%: the swapped slots still compute, and from 8 experts on the copies compete with the CPU for the RAM's bandwidth).
+Doing it well would need batched asynchronous copies and a CPU product that skips the slots; the ceiling was +5-8%,
+and the bandwidth contention seen here eats into it. Left in the tree, off.
