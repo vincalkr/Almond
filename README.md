@@ -87,9 +87,8 @@ local/fetch.sh                                                        # the mode
   asks which to download (DeepSeek's pack and FP8 Engram rows through their own scripts, GLM, its MTP block, both
   image encoders, the Qwen models); `local/fetch.sh --list` only lists. The quantization is chosen there: a model's
   quantizations are separate items (`qwen27` IQ3_S or `qwen27-q8` Q8_0, and
-  `qwen27-dspine`, Tencent's DSpine drafter used inside code: +31% there on the IQ3_S; `qwen` IQ3_S or `qwen-q8`
-  Q8_0, two cards and ~16 tok/s), each with its
-  own configuration and name in the router (`./almond -m qwen27-q8`, `./almond -m qwen-q8`). The list starts with
+  `qwen27-dspine`, Tencent's DSpine drafter used inside code: +31% there on the IQ3_S), each with its
+  own configuration and name in the router (`./almond -m qwen27-q8`). The list starts with
   this machine's cards, RAM and free disk, marks what does not fit (`[needs 2 cards of 24 GB]`) and ends with a
   suggestion for the machine.
 - `local/fetch-rco-1017.sh` downloads the four shards and the pack's Engram IQ4_NL GGUF with `aria2c` (4 connections,

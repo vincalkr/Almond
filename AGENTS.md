@@ -40,9 +40,7 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
 - Qwen: `local/qwen-local.json` on card 0 (`local/qwen-local-vision.json` with its encoder,
   `models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf`, read on the CPU): the GGUF's two shards in
   `models/qwen38-iq3s`, its pack in `models/qwen38-iq3s-pack` (`tools/qwen/iq_pack.py`), the MTP block in
-  `models/qwen38-mtp` (`tools/qwen/mtp_fetch.py`, `mtp_pack.py`, `mtp_rt.py`); `local/qwen-q8-local.json` unsloth's
-  Q8_0 on two cards with at most 56 GiB of experts in RAM (`./almond -m qwen-q8`, ~16 tok/s; a whole-RAM arena
-  stalled the machine).
+  `models/qwen38-mtp` (`tools/qwen/mtp_fetch.py`, `mtp_pack.py`, `mtp_rt.py`).
 - `./almond-bench`: quality benchmarks against the router (MMLU-Pro, GPQA, MATH-500, HumanEval+/MBPP+, IFEval,
   BFCL graded without a judge, Arena-Hard with a judge model, KL divergence from logit dumps), Textual UI;
   `./almond-bench fetch` downloads the missing datasets into `local/bench/data` (`--update` newer revisions; a

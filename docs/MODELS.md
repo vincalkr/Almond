@@ -719,33 +719,10 @@ including the prompt; streamed at temperature 1.0 (the configuration's sampling)
 (HTTP, detokenizer, streaming) costs ~3%, and sampling at temperature 1.0 ~8% through MTP accepting fewer drafts;
 nothing to fix in the server.
 
-## Qwen3.8-Flash-Next Q8_0 (unsloth, 2026-11-11)
-
-`unsloth/Qwen3.8-Flash-Next-GGUF` Q8_0 (six shards, 188 GB; experts 128.3 GB, 5.2 MB each; the PLE table, 54 GB, in
-shard 3), `local/fetch.sh qwen-q8` (its pack with `--compat-bf16`: the hyper-connection projections are Q8_0 in this
-GGUF and the engine reads them as BF16), `local/qwen-q8-local.json`, `./almond -m qwen-q8` (router name
-`qwen3.8-flash-next-q8`): card 0 with 3291 expert slots (16 GiB), card 1 as the peer expert tier, the MTP block of
-`models/qwen38-mtp`.
-
-The resident arena does not fit this machine: the engine asked for 119.5 GiB of RAM with 88.9 available, only warns
-about it and goes on, and pinning that much stalled the whole machine. Since then the engine refuses an arena that does not fit with
-`ALMOND_ARENA_HEADROOM_GIB` (default 8) left over, and names a `--mmap-experts --resident-budget-gib` that does (the
-available RAM less the headroom and 16 GiB: a budget of N used about N + 7-10 GiB here); `ALMOND_ARENA_FORCE=1`
-loads it anyway. Checked: the Q8_0 without the budget stops at once with 92.8 GiB available; the IQ3_S (a 46 GiB
-arena) loads and generates as before. The configuration reads the experts through
-the page cache instead and keeps the most used in RAM (`--mmap-experts --resident-budget-gib 56`). Between these two
-cards a peer copy arrives wrong (a host bridge, no real P2P), so the second card's rows take the host route.
-
-Greedy, thinking off, the server's four prompts, power-tune on (tok/s; the share of routed experts found in VRAM):
-
-| | Python function | technical | story (Italian) | bash script | mean |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `--resident-budget-gib 56` | 17.9 (76.1%) | 20.2 (76.9%) | 14.0 (85.0%) | 13.6 (71.3%) | 16.4 |
-| `--resident-budget-gib 66` | 17.6 (81.7%) | 15.6 (78.2%) | 13.4 (85.6%) | 15.9 (72.3%) | 15.4 |
-
-10 GiB more in RAM bought nothing measurable and left 21 GiB of the machine's RAM available instead of 29: 56 stays.
-The IQ3_S on card 0 runs the same prompts at 50-78 tok/s; the Q8_0 is for the closest answers to the original
-weights at about a quarter of the speed.
+Qwen3.8-Flash-Next's resident expert arena is checked against the RAM before it is pinned (2026-11-11): pinning an
+arena of 119.5 GiB with 88.9 GiB available stalled the whole machine (the unsloth Q8_0, since removed). The engine
+refuses an arena that does not leave `ALMOND_ARENA_HEADROOM_GIB` (default 8) free and names a `--mmap-experts
+--resident-budget-gib` that fits; `ALMOND_ARENA_FORCE=1` loads it anyway. The IQ3_S (a 46 GiB arena) loads as before.
 
 ## Hy4-flash (IQ2-AH, AngelSlim, `--hy4`, 2026-11-18)
 
