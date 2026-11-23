@@ -99,10 +99,25 @@ That is phase 4 of the plan, in our own engine.
   | DSpark, draft 3 | 50.3 / 47.3 (accepted 362/709, 345/762) | 30.3 / 30.0 (341/770, 340/776) |
   | DSpark, draft 7 | 48.3 / 43.9 | 27.9 / 27.2 |
 
-  So +55-65% greedy, nothing at the card's temperature 1.0 although the acceptance is about the same (44-51%). The
-  server restores a whole state checkpoint and re-decodes the accepted tokens after a partial accept (Inkling's
-  convolution state cannot be cut back: `COMMON_CONTEXT_SEQ_RM_TYPE_FULL` in `tools/server/server-context.cpp`); why
-  that costs more at temp 1.0 was not looked into.
+  So +55-65% greedy, nothing at the card's temperature 1.0 with probabilistic drafts.
+
+  The cause is the draft sampling, not the rollback. Same setup, draft 3, `--spec-draft-sampling greedy` (the draft
+  takes its argmax; the target still samples at the request's temperature and checks the draft against it):
+
+  | | temp 0 | temp 1.0 |
+  |---|---|---|
+  | DSpark, draft 3, greedy drafts | 49.8 / 46.8 | **42.4 / 39.8** (accepted 332/799, 312/855) |
+
+  +35-44% at temperature 1.0. The log shows no speculative checkpoint restore in that run (only the prompt cache's
+  context checkpoints); mean accepted length 2.3-2.5 of 3, acceptance by position 0.64-0.68 / 0.39-0.50 / 0.26-0.35.
+
+  Same tokens? Temperature 0, three prompts, 400 tokens each, token ids compared (`/completion`, reasoning none). Two
+  runs without the drafter gave identical tokens. With DSpark the text first differs at token 36, 25 and 77. At each of
+  those points the run without the drafter had its top two tokens within 0.06-0.11 in log-probability (about 1.06-1.12x
+  apart). The target checks the drafts in batches of 4 instead of 1, and those kernels round differently, which flips
+  near-ties. That is the batch numerics already noted for the other engines in AGENTS.md, not a different
+  distribution. Speculation is exact in distribution by construction; a stronger check (PPL or KL with the drafter on)
+  was not run.
 
   How Strata (Niko1221/Strata, `engine/src/inkling2`, its own HIP engine, read 2026-11-23) does it: the drafter reads
   4 target features (visits 5, 23, 41, 48), drafts up to 7 with the length backed off by an EMA of acceptance, verifies
