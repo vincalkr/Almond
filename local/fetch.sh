@@ -26,6 +26,8 @@ GLM_REPO=pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF
 GLM_SRC_REPO=peasantsmith/GLM-5.3-Flash-Maya-GGUF
 QWEN_REPO=ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
 QWEN_SHARDS=$(for i in 1 2; do echo "$M/qwen38-iq3s/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-0000$i-of-00002.gguf"; done)
+QWEN_Q4_REPO=unsloth/Qwen3.8-Flash-Next-GGUF
+QWEN_Q4_SHARDS=$(for i in 1 2 3 4; do echo "$M/qwen38-q4/Qwen3.8-Flash-Next-UD-Q4_K_XL-0000$i-of-00004.gguf"; done)
 Q27_REPO=ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF
 Q27_Q8_REPO=unsloth/Qwen3.8-27B-GGUF
 Q27=$M/qwen38-27b
@@ -33,7 +35,7 @@ DS_SHARDS=$(for i in 1 2 3 4; do echo "$M/rco-iq2xxs/DeepSeek-V4.1-Flash-1017-GS
 HY4_REPO=AngelSlim/Hy4-flash-GGUF
 HY4_SHARDS=$(for i in 1 2; do echo "$M/hy4-iq2ah/Hy4-flash-IQ2_AH-0000$i-of-00002.gguf"; done)
 
-ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision qwen qwen-mtp qwen-vision
+ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision qwen qwen-q4 qwen-mtp qwen-vision
        qwen27 qwen27-q8 qwen27-dspine qwen27-vision hy4 hy4-vision)
 desc() {
     case $1 in
@@ -44,6 +46,7 @@ desc() {
         glm-mtp)             echo "GLM MTP draft block (from an IQ2_S quant's shard 3, 20.5 GB download, kept 3.6 GB)";;
         glm-vision)          echo "GLM image encoder (mmproj F16 + vocab)                                               1.1 GB";;
         qwen)                echo "Qwen3.8-Flash-Next GSQ-RCO IQ3_S (ISTA-DASLab) + its pack                       85 GB";;
+        qwen-q4)             echo "Qwen3.8-Flash-Next UD-Q4_K_XL (Unsloth Dynamic 3.1) + its pack: two cards      111 GB";;
         qwen-mtp)            echo "Qwen MTP draft block (the BF16 checkpoint's mtp.* tensors, 5.2 GB read, kept 0.8 GB)";;
         qwen-vision)         echo "Qwen image encoder (mmproj BF16)                                                     0.9 GB";;
         qwen27)              echo "Qwen3.8-27B dense, GSQ-RCO IQ3_S + MTP block (ISTA-DASLab), one card           12.1 GB";;
@@ -63,6 +66,7 @@ files() {   # the files that make the item present
         glm-mtp)             echo "$M/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf";;
         glm-vision)          echo "$M/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf"; echo "$M/glm53-vision/GLM-5.3-Flash-vocab.gguf";;
         qwen)                echo "$QWEN_SHARDS"; echo "$M/qwen38-iq3s-pack/native_experts.txt";;
+        qwen-q4)             echo "$QWEN_Q4_SHARDS"; echo "$M/qwen38-q4-pack/native_experts.txt";;
         qwen-mtp)            echo "$M/qwen38-mtp/experts.bin"; echo "$M/qwen38-mtp/draft_vocab.bin";;
         qwen-vision)         echo "$M/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf";;
         qwen27)              echo "$Q27/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"; echo "$Q27/tokenizer";;
@@ -122,6 +126,9 @@ fetch() {
                              [ "$DRY_RUN" = 1 ] || [ -s "$M/qwen38-iq3s-pack/native_experts.txt" ] ||
                                  "$PY" "$R/tools/qwen/iq_pack.py" --gguf "$M/qwen38-iq3s/$(basename "$(echo "$QWEN_SHARDS" | head -1)")" \
                                      --out "$M/qwen38-iq3s-pack";;
+        qwen-q4)             for f in $QWEN_Q4_SHARDS; do get $QWEN_Q4_REPO UD-Q4_K_XL/$(basename "$f") "$f"; done
+                             [ "$DRY_RUN" = 1 ] || [ -s "$M/qwen38-q4-pack/native_experts.txt" ] ||
+                                 "$PY" "$R/tools/qwen/iq_pack.py" --gguf "$(echo "$QWEN_Q4_SHARDS" | head -1)" --out "$M/qwen38-q4-pack" --compat-bf16;;
         qwen-mtp)            [ -s "$M/qwen38-mtp/experts.bin" ] && { echo "have   qwen38-mtp"; return; }
                              [ "$DRY_RUN" = 1 ] && { echo "get    Qwen/Qwen3.8-Flash-Next mtp.* tensors (5.2 GB of range reads)"; return; }
                              # the checkpoint's 31 mtp.* tensors (HTTP ranges of 28 shards, SHA256-checked), packed with
@@ -162,6 +169,7 @@ fit() {   # why an item does not fit this machine, or nothing
         glm)                 cards=2; ram=100;;   # the layers over both cards, the experts in pinned RAM
         deepseek|qwen)       ram=100;;            # the 80 GiB pinned arena (README, Requirements: 128 GB class)
         qwen27-q8)           cards=2;;            # 29 GB of weights
+        qwen-q4)             cards=2; ram=100;;   # 63.5 GiB of experts, up to 56 GiB of them in RAM
         hy4)                 cards=2; ram=120;;   # 126 GB of weights; the 59 GiB Engram table read from the SSD or RAM
         hy4-vision)          cards=2; ram=120;;
     esac

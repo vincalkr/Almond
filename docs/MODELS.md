@@ -724,6 +724,19 @@ arena of 119.5 GiB with 88.9 GiB available stalled the whole machine (the unslot
 refuses an arena that does not leave `ALMOND_ARENA_HEADROOM_GIB` (default 8) free and names a `--mmap-experts
 --resident-budget-gib` that fits; `ALMOND_ARENA_FORCE=1` loads it anyway. The IQ3_S (a 46 GiB arena) loads as before.
 
+## Qwen3.8-Flash-Next UD-Q4_K_XL (Unsloth Dynamic 3.1, 2026-11-23)
+
+`unsloth/Qwen3.8-Flash-Next-GGUF` UD-Q4_K_XL (four shards, 111.3 GB; experts 63.47 GiB, the figure the engine
+printed on an RX 6900 XT 16 GB), `local/fetch.sh qwen-q4` (its pack with `--compat-bf16`: the routers, SSM gates and
+injections are F32 and the hyper-connection projections Q8_0 in this GGUF; the engine reads them as BF16),
+`local/qwen-q4-local.json`, `./almond -m qwen-q4` (router name `qwen3.8-flash-next-q4`): card 0's expert slots, card 1
+as the peer expert tier, the rest read through the page cache with up to 56 GiB kept in RAM (`--mmap-experts
+--resident-budget-gib 56`), the MTP block of `models/qwen38-mtp`. `--ple-gguf` is left to the engine, which finds the
+shard holding the PLE table.
+
+Published against BF16, not measured here: mean KLD 0.047, top-1 92.3% (Unsloth's Dynamic 3.1 release). Speed and
+KL against the IQ3_S on this machine: not measured yet.
+
 ## Hy4-flash (IQ2-AH, AngelSlim, `--hy4`, 2026-11-18)
 
 Tencent's Hy4-flash (GGUF architecture `hy_v4_flash`: 42 trunk layers, MLA with sinks, 30 sliding-window layers and
