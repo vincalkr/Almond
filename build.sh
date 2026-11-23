@@ -62,3 +62,20 @@ fi
 cmake -S tools/glm/vision -B build-vision-hy4 -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR="$PWD/$VH"
 cmake --build build-vision-hy4 --target almond-vision -j "$JOBS"
 echo "=== done: build-hip-fused/almond-engine, build-vision/build/bin/almond-vision, build-vision-hy4/bin/almond-vision"
+# Inkling 2 Mini (docs/inkling/): llama.cpp's inkling2_loop graph at a pinned master commit with its own ggml, and
+# almond-inkling (src/inkling) linked to it. Built when its model is downloaded (local/fetch.sh inkling) or INKLING=1.
+if [ -d models/inkling2-mini ] || [ -n "${INKLING:-}" ]; then
+    VI=build-inkling/llama.cpp
+    INKLING_COMMIT=30ec35ae2e27f1eca486af02b9d3d53fa7a26950
+    echo "=== Inkling 2 Mini (build-inkling: llama.cpp $INKLING_COMMIT + almond-inkling)"
+    if [ ! -d "$VI" ]; then
+        mkdir -p "$VI" && git -C "$VI" init -q && git -C "$VI" remote add origin https://github.com/ggml-org/llama.cpp &&
+            git -C "$VI" fetch -q --depth 1 origin "$INKLING_COMMIT" && git -C "$VI" checkout -q FETCH_HEAD
+    fi
+    cmake -S "$VI" -B "$VI/build" "${COMMON[@]}" -DGGML_HIP=ON -DGGML_HIP_GRAPHS=ON -DGGML_HIP_NO_VMM=ON -DLLAMA_CURL=OFF
+    cmake --build "$VI/build" -j "$JOBS" --target llama llama-perplexity llama-bench llama-mtmd-cli
+    g++ -O2 -std=c++17 -DALMOND_VERSION="\"inkling-$(git rev-parse --short HEAD)\"" -I"$VI/include" -I"$VI/ggml/include" \
+        src/inkling/inkling_serve.cpp -L"$VI/build/bin" -lllama -lggml -lggml-base -Wl,-rpath,"$PWD/$VI/build/bin" \
+        -pthread -o build-inkling/almond-inkling
+    echo "=== done: build-inkling/almond-inkling"
+fi

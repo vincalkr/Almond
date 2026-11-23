@@ -1829,7 +1829,7 @@ class Chat:
         n = name.lower()
         # the launcher's model names; "qwen" would otherwise also match the two Qwen3.8-27B entries
         alias = {"ds41": "deepseek", "ds4": "deepseek", "qwen": "qwen3.8-flash-next", "qwen-q4": "qwen3.8-flash-next-q4", "qwen27": "qwen3.8-27b",
-                 "qwen27-q8": "qwen3.8-27b-q8", "qwen27-dspine": "qwen3.8-27b-dspine", "qwen27-q8-dspine": "qwen3.8-27b-q8-dspine", "hy4": "hy4-flash"}.get(n, n)
+                 "qwen27-q8": "qwen3.8-27b-q8", "qwen27-dspine": "qwen3.8-27b-dspine", "qwen27-q8-dspine": "qwen3.8-27b-q8-dspine", "hy4": "hy4-flash", "inkling": "inkling-2-mini"}.get(n, n)
         for want in (n, alias):
             for m in self.models:
                 if m["id"].lower() == want:
@@ -3008,7 +3008,7 @@ def sessions_text() -> str:
 
 
 CHAT_ALIASES = {"ds41": "deepseek", "ds4": "deepseek", "qwen": "qwen3.8-flash-next", "qwen-q4": "qwen3.8-flash-next-q4", "qwen27": "qwen3.8-27b",
-                "qwen27-q8": "qwen3.8-27b-q8", "qwen27-dspine": "qwen3.8-27b-dspine", "qwen27-q8-dspine": "qwen3.8-27b-q8-dspine", "hy4": "hy4-flash"}
+                "qwen27-q8": "qwen3.8-27b-q8", "qwen27-dspine": "qwen3.8-27b-dspine", "qwen27-q8-dspine": "qwen3.8-27b-q8-dspine", "hy4": "hy4-flash", "inkling": "inkling-2-mini"}
 
 
 def chat_model_match(model_id: str, name: str | None, ids: set) -> bool:

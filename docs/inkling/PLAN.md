@@ -1,6 +1,9 @@
 # Inkling 2 Mini in Almond: plan
 
-Status 2026-11-23: plan only. Nothing built, nothing downloaded, nothing measured on this box. Every number below
+Status 2026-11-23, later: phases 1 and 3 done on llama.cpp's own graph (`almond-inkling`), with Unsloth's UD-Q4_K_XL
+chosen by the user instead of IQ4_NL (half the KL at the same size, measured). The speed estimate below did not hold:
+30 tok/s measured against 120 estimated, because the decode is bound by small kernels, not by bytes. What was built
+and measured is in `NOTES.md`. The rest of this file is the plan as first written. Every number below
 carries its source; numbers marked "estimate" are arithmetic from those sources and have to be replaced by
 measurements.
 

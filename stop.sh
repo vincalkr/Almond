@@ -10,7 +10,7 @@ FORCE=0; [ "${1:-}" = --force ] && FORCE=1
 TIMEOUT=${TIMEOUT:-60}
 
 # this folder's servers and router only (another checkout's are left alone); keep in sync with launch.py's SERVERS
-servers() { pgrep -f "$R/tools/(v41/serve/serve_ds41|glm/serve/serve_glm|qwen/serve/serve_qwen|hy4/serve/serve_hy4|router/almond_router)[.]py" 2>/dev/null; }
+servers() { pgrep -f "$R/tools/(v41/serve/serve_ds41|glm/serve/serve_glm|qwen/serve/serve_qwen|hy4/serve/serve_hy4|inkling/serve/serve_inkling|router/almond_router)[.]py" 2>/dev/null; }
 
 # ./almond serve's wrapper ignores INT/TERM/HUP on purpose: it waits for its server, then switches power-tune off.
 # It exits with its server; a leftover wrapper (its server already gone) is killed below once the servers are done.

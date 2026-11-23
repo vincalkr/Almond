@@ -751,3 +751,12 @@ machine), 11.8 tok/s after a 15,000-token prompt read at 237 tok/s; perplexity w
 --dense-q8 --reserve-mib 1400 --fused-proj` (2026-11-19): 21.4-23.0 tok/s greedy and 21.3-21.7 at temperature 0.9 on
 chat prompts. Images through its encoder
 (`local/fetch.sh hy4-vision`, `build-vision-hy4`), conversations on disk (`local/hy4-slots`).
+
+## Inkling 2 Mini (Unsloth UD-Q4_K_XL, `almond-inkling`, 2026-11-23)
+
+Card 0 alone, 128K context, q8_0 KV. It runs on llama.cpp's own `inkling2_loop` graph behind the engine's serve
+protocol (`src/inkling`, built into `build-inkling/`). Quality against ggml-org's Q8_0 on 43,709 tokens of this
+repository's docs: KL 0.00728, same top token 95.90%, PPL +0.13%. ggml-org's IQ4_NL of the same size: KL 0.01416,
+94.31%. Speed (llama-bench): decode 30.6 tok/s at depth 0 and 29.0 at 32K; prefill 1,396 tok/s (512 tokens) and
+388 at 32K depth. Through the server, a 21,725-token prompt prefilled at 444.7 tok/s and decoded at 29.3. The decode
+is bound by ~7,400 small kernels a token, not by bytes. Details, memory and what is open: docs/inkling/NOTES.md.

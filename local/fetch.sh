@@ -7,6 +7,7 @@
 #   ./local/fetch.sh qwen27-q8   the dense Qwen3.8-27B at Q8_0 (the quantization is chosen here: qwen27 or qwen27-q8)
 #   ./local/fetch.sh hy4        Hy4-flash IQ2-AH: the two GGUF shards (aria2c, 4 connections)
 #   ./local/fetch.sh hy4-vision Hy4-flash's image encoder (mmproj BF16)
+#   ./local/fetch.sh inkling inkling-dspark   Inkling 2 Mini UD-Q4_K_XL (Unsloth, one card) and its DSpark drafter
 #   ./local/fetch.sh --list     the list only
 #
 # Every file goes to models/ with aria2c (CONN=4 connections, resumable); a file counts as present when its size is
@@ -33,10 +34,14 @@ Q27_Q8_REPO=unsloth/Qwen3.8-27B-GGUF
 Q27=$M/qwen38-27b
 DS_SHARDS=$(for i in 1 2 3 4; do echo "$M/rco-iq2xxs/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-0000$i-of-00004.gguf"; done)
 HY4_REPO=AngelSlim/Hy4-flash-GGUF
+INK_REPO=ggml-org/Inkling-2-Mini-GGUF
+INK_UD_REPO=unsloth/Inkling-2-Mini-GGUF
+INK=$M/inkling2-mini
 HY4_SHARDS=$(for i in 1 2; do echo "$M/hy4-iq2ah/Hy4-flash-IQ2_AH-0000$i-of-00002.gguf"; done)
 
 ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision qwen qwen-q4 qwen-mtp qwen-vision
-       qwen27 qwen27-q8 qwen27-dspine qwen27-vision hy4 hy4-vision)
+       qwen27 qwen27-q8 qwen27-dspine qwen27-vision hy4 hy4-vision
+       inkling inkling-q8 inkling-iq4nl inkling-dspark inkling-vision)
 desc() {
     case $1 in
         deepseek)            echo "DeepSeek-V4.1-Flash-1017, GSQ-RCO IQ2_XXS pack + Engram IQ4_NL (ISTA-DASLab)   ~249 GB";;
@@ -55,6 +60,11 @@ desc() {
         qwen27-vision)       echo "Qwen3.8-27B image encoder (mmproj BF16)                                          0.9 GB";;
         hy4)                 echo "Hy4-flash IQ2-AH (Tencent/AngelSlim): experts IQ2_XXS, Engram FP8 table         135 GB";;
         hy4-vision)          echo "Hy4-flash image encoder (mmproj BF16, AngelSlim)                                 1.0 GB";;
+        inkling)             echo "Inkling 2 Mini UD-Q4_K_XL (Unsloth Dynamic): one card                         17.6 GB";;
+        inkling-q8)          echo "Inkling 2 Mini Q8_0 (ggml-org): the quality reference, two cards                27.8 GB";;
+        inkling-iq4nl)       echo "Inkling 2 Mini IQ4_NL (ggml-org): 4-bit experts, rest Q8_0, one card (compared)  17.6 GB";;
+        inkling-dspark)      echo "Inkling 2 Mini DSpark drafter Q8_0 (Unsloth)                                     0.5 GB";;
+        inkling-vision)      echo "Inkling 2 Mini image encoder (mmproj BF16, Unsloth)                              0.6 GB";;
     esac
 }
 files() {   # the files that make the item present
@@ -75,6 +85,11 @@ files() {   # the files that make the item present
         qwen27-vision)       echo "$Q27/mmproj-Qwen3.8-27B-BF16.gguf";;
         hy4)                 echo "$HY4_SHARDS";;
         hy4-vision)          echo "$M/hy4-iq2ah/mmproj-Hy4-flash-bf16.gguf";;
+        inkling)             echo "$INK/Inkling-2-Mini-UD-Q4_K_XL.gguf"; echo "$INK/tokenizer";;
+        inkling-q8)          echo "$INK/Inkling-2-Mini-Q8_0.gguf";;
+        inkling-iq4nl)       echo "$INK/Inkling-2-Mini-IQ4_NL.gguf";;
+        inkling-dspark)      echo "$INK/unsloth/dspark-Inkling-2-Mini-Q8_0.gguf";;
+        inkling-vision)      echo "$INK/mmproj-BF16.gguf";;
     esac
 }
 state() {   # present / partial / missing (by the files being there; sizes are checked at download)
@@ -147,6 +162,13 @@ fetch() {
         qwen27-vision)       get $Q27_REPO mmproj-Qwen3.8-27B-BF16.gguf "$Q27/mmproj-Qwen3.8-27B-BF16.gguf";;
         hy4)                 for f in $HY4_SHARDS; do get $HY4_REPO "$(basename "$f")" "$f"; done;;
         hy4-vision)          get $HY4_REPO mmproj-Hy4-flash-bf16.gguf "$M/hy4-iq2ah/mmproj-Hy4-flash-bf16.gguf";;
+        inkling)             get $INK_UD_REPO Inkling-2-Mini-UD-Q4_K_XL.gguf "$INK/Inkling-2-Mini-UD-Q4_K_XL.gguf"
+                             [ "$DRY_RUN" = 1 ] || [ -s "$INK/tokenizer/tokenizer.json" ] ||
+                                 PYTHONPATH="$R/tools/qwen" "$PY" "$R/tools/almond_tokenizer.py" --gguf "$INK/Inkling-2-Mini-UD-Q4_K_XL.gguf" --out "$INK";;
+        inkling-q8)          get $INK_REPO Inkling-2-Mini-Q8_0.gguf "$INK/Inkling-2-Mini-Q8_0.gguf";;
+        inkling-iq4nl)       get $INK_REPO Inkling-2-Mini-IQ4_NL.gguf "$INK/Inkling-2-Mini-IQ4_NL.gguf";;
+        inkling-dspark)      get $INK_UD_REPO dspark-Inkling-2-Mini-Q8_0.gguf "$INK/unsloth/dspark-Inkling-2-Mini-Q8_0.gguf";;
+        inkling-vision)      get $INK_UD_REPO mmproj-BF16.gguf "$INK/mmproj-BF16.gguf";;
         *) echo "fetch: no item '$1' (${ITEMS[*]})" >&2; exit 2;;
     esac
 }
@@ -172,6 +194,7 @@ fit() {   # why an item does not fit this machine, or nothing
         qwen-q4)             cards=2; ram=100;;   # 63.5 GiB of experts, up to 56 GiB of them in RAM
         hy4)                 cards=2; ram=120;;   # 126 GB of weights; the 59 GiB Engram table read from the SSD or RAM
         hy4-vision)          cards=2; ram=120;;
+        inkling-q8)          cards=2;;            # 27.8 GB of weights
     esac
     [ "$CARDS" -lt $cards ] && { echo "needs $cards cards of 24 GB"; return; }
     [ "$RAM_GB" -lt $ram ] && { echo "needs ~128 GB of RAM"; return; }

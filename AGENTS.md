@@ -37,6 +37,11 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   do not fit in VRAM read from RAM, the Engram table from the SSD or RAM, `--engram-place auto`); files in
   `models/hy4-iq2ah` with the tokenizer extracted by `tools/almond_tokenizer.py`; images with
   `build-vision-hy4/bin/almond-vision` (built against the PR's mtmd); docs/hy4/GGUF_NOTES.md.
+- Inkling 2 Mini: `local/inkling-local.json` (`./almond serve --model inkling`, `./almond -m inkling`): Unsloth's
+  UD-Q4_K_XL (17.6 GB) on card 0, 128K, q8_0 KV. Runs on
+  `build-inkling/almond-inkling` (`src/inkling`), llama.cpp's own `inkling2_loop` graph at the commit `build.sh` pins
+  (with its own ggml, so a separate executable) behind the engine's serve protocol; files in `models/inkling2-mini`
+  (`local/fetch.sh inkling`), measurements in `local/inkling-measure.sh` and docs/inkling/.
 - Qwen: `local/qwen-local.json` on card 0 (`local/qwen-local-vision.json` with its encoder,
   `models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf`, read on the CPU): the GGUF's two shards in
   `models/qwen38-iq3s`, its pack in `models/qwen38-iq3s-pack` (`tools/qwen/iq_pack.py`), the MTP block in

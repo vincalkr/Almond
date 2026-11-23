@@ -9,7 +9,8 @@
     {"model": "qwen27", "config": "local/qwen27-local-dspine.json"},
     {"model": "qwen27", "config": "local/qwen27-q8-local-dspine.json"},
     {"model": "hy4"},
-    {"model": "hy4", "config": "local/hy4-local-fast.json"}
+    {"model": "hy4", "config": "local/hy4-local-fast.json"},
+    {"model": "inkling"}
   ],
   "default": "glm"
 }
