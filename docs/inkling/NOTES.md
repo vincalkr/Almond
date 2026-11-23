@@ -88,9 +88,31 @@ That is phase 4 of the plan, in our own engine.
 
 ## Not done
 
-- **DSpark drafter:** downloaded (`local/fetch.sh inkling-dspark`) but not wired. Its loader is llama.cpp PR #32218,
-  not on master. Our engine also keeps the cache only when a prompt extends it: the convolution state cannot be cut
-  back, so a rejected draft cannot be undone without a state copy.
+- **DSpark drafter:** downloaded (`local/fetch.sh inkling-dspark`) but not wired into almond-inkling. Measured first
+  with llama.cpp PR #32218 (`pwilkin/inkling2-dspark`, head `e4b1cb5`, built apart in `build-inkling/llama.cpp-dspark`)
+  and its own `llama-server`. Card 0, UD-Q4_K_XL, q8_0 KV, 16K context, two prompts (Python code with tests; a long
+  explanation), 600 tokens each, reasoning off, `--spec-draft-sampling probabilistic`:
+
+  | | temp 0 | temp 1.0 |
+  |---|---|---|
+  | no drafter | 30.5 tok/s | 29.5 |
+  | DSpark, draft 3 | 50.3 / 47.3 (accepted 362/709, 345/762) | 30.3 / 30.0 (341/770, 340/776) |
+  | DSpark, draft 7 | 48.3 / 43.9 | 27.9 / 27.2 |
+
+  So +55-65% greedy, nothing at the card's temperature 1.0 although the acceptance is about the same (44-51%). The
+  server restores a whole state checkpoint and re-decodes the accepted tokens after a partial accept (Inkling's
+  convolution state cannot be cut back: `COMMON_CONTEXT_SEQ_RM_TYPE_FULL` in `tools/server/server-context.cpp`); why
+  that costs more at temp 1.0 was not looked into.
+
+  How Strata (Niko1221/Strata, `engine/src/inkling2`, its own HIP engine, read 2026-11-23) does it: the drafter reads
+  4 target features (visits 5, 23, 41, 48), drafts up to 7 with the length backed off by an EMA of acceptance, verifies
+  a beam tree of up to 12 nodes when greedy and a chain otherwise (rejection sampling at temp > 0). Rollback is cheap:
+  before verify it snapshots the 3-step convolution history of every visit and records each step's inputs; a rejection
+  rebuilds snapshot + accepted steps in 2 kernels, with no re-decode. No speed or acceptance numbers for Inkling are
+  published there.
 - **Images:** the mmproj is downloaded (`inkling-vision`), but `GENI` answers an error.
+- **Relative-position bias:** Strata computes it over a fixed 1,024-position window (`rel_extent`) inside its fused
+  QRKV kernel, so its scratch does not grow with context. llama.cpp gathers it over the whole n_kv, which is what limits
+  us to 128K (above). Not checked here whether the window is exact for this model.
 - **Own engine (`src/inkling` graph on the vendored ggml) and fused kernels:** not started. They are what the speed
   table above needs.
