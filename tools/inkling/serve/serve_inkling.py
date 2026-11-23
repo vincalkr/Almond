@@ -48,6 +48,19 @@ def _svc_init_inkling(self, *a, **k):
 
 S.Service.__init__ = _svc_init_inkling
 
+# top_k 0 is "off" (Unsloth's recommended settings: temp 1.0, top_p 1.0, top_k 0, min_p 0.0).  The shared server
+# turns 0 into 64 (almond-engine keeps at most 64 candidates); almond-inkling takes no top_k as off (up to 4096)
+_keys = S.AlmondEngine.sampling_keys
+
+
+def _sampling_keys_inkling(sampling: dict) -> str:
+    if sampling.get("top_k") == 0:
+        sampling = {k: v for k, v in sampling.items() if k != "top_k"}
+    return _keys(sampling)
+
+
+S.AlmondEngine.sampling_keys = staticmethod(_sampling_keys_inkling)
+
 # ---- reasoning effort: the template's effort_map
 LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 ALIASES = {"off": "none", "disabled": "none", "false": "none", "no_think": "none", "auto": "high",

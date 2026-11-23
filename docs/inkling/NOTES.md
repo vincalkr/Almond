@@ -38,10 +38,16 @@ own UD-Q8_K_XL. That is a different reference and a different text, so the two d
 Tokenizer: the server's tokenizer (`tools/almond_tokenizer.py`, pre-split `inkling2` = llama.cpp's GPT-4o split with
 ignore_merges) gives the same ids as `llama-tokenize` on all 43,709 tokens of that text.
 
-Sampling: with the card's defaults (temperature 1.0, top_p 1.0, top_k 50), a tool reply over
+Sampling: with the card's defaults (temperature 1.0, top_p 1.0; top_k was 50 then), a tool reply over
 `{"high_c":17,"low_c":8}` wrote "1.7°C / 0.8°C" in 1 of 3 samples. At temperature 0 it was right ("17°C / 8°C"),
 and the other two samples were right too. This is sampling, not the engine. The configuration keeps the card's
 values; a lower temperature or a min_p is a quality choice for the user.
+
+Recommended values: the original repo's `generation_config.json` gives only temperature 1.0; Unsloth's guide
+(https://unsloth.ai/docs/models/inkling-2-mini) gives temperature 1.0, top_p 1.0, top_k 0 (off), min_p 0.0; ggml-org's
+card gives reasoning_effort high as the default. No source gives a penalty or a max-token value. The configuration
+follows these (top_k 0: the shim keeps it off instead of the shared server's 64-candidate cap, and almond-inkling then
+samples over the 4,096 most likely tokens).
 
 ## Speed
 

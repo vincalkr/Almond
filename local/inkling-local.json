@@ -22,7 +22,7 @@
   "sampling": {
     "temperature": 1.0,
     "top_p": 1.0,
-    "top_k": 50
+    "top_k": 0
   },
   "loop_guard": true,
   "fit_max_tokens": true
