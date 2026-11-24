@@ -140,10 +140,17 @@ def pick_config(o: dict) -> str:
     if m not in ("ds41", "qwen27", "hy4", "inkling"):   # the dense 27B has no experts; Hy4 places its experts by layer
         # the expert profile the engine starts its VRAM pools from and saves what it learns into: its shipped one
         # until this machine has its own
-        prof = ROOT / f"local/{m}-expert-profile.bin"
-        if not (prof.is_file() and prof.stat().st_size):
-            import shutil
-            shutil.copy(ROOT / f"tools/{m}/data/expert-profile-{m}.bin", prof)
+        # until this machine has its own.  A configuration may name its own file (qwen-q4: the same model's experts in
+        # another quantization, so the same layers and experts): that one is seeded too, or the engine stops at start
+        profs = [ROOT / f"local/{m}-expert-profile.bin"]
+        if o["config"]:
+            a = json.load(open(ROOT / o["config"])).get("args", [])
+            if "--expert-profile" in a and a.index("--expert-profile") + 1 < len(a):
+                profs.append(ROOT / a[a.index("--expert-profile") + 1])
+        for prof in profs:
+            if not (prof.is_file() and prof.stat().st_size):
+                import shutil
+                shutil.copy(ROOT / f"tools/{m}/data/expert-profile-{m}.bin", prof)
     if o["config"]:
         return o["config"]
     vision = (ROOT / "build-vision/build/bin/almond-vision").exists()
