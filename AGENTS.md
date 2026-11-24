@@ -41,9 +41,8 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   UD-Q4_K_XL (17.6 GB) on card 0, 128K, F16 KV, on Almond's own engine `build-inkling/almond-inkling-native`
   (`src/inkling/native`, HIP, no ggml; docs/inkling/ENGINE.md): through the server 1,500 tok/s prefill at 5.7K and
   1,047 at 48K, 55-64 tok/s decode, against 553 / 337 and 29 on llama.cpp, KL from Q8_0 0.00557 against 0.00573.
-  `local/inkling-llama-local.json` (`./almond -m inkling-llama`) keeps llama.cpp's own `inkling2_loop` graph on
-  `build-inkling/almond-inkling` (`src/inkling`, the commit `build.sh` pins, its own ggml, so a separate executable)
-  with q8_0 KV; files in `models/inkling2-mini` (`local/fetch.sh inkling`), measurements in `local/inkling-measure.sh`
+  The llama.cpp path (`build-inkling/almond-inkling`, `src/inkling`) is no longer served (removed as slower; its
+  numbers stay in docs/inkling/); files in `models/inkling2-mini` (`local/fetch.sh inkling`), measurements in `local/inkling-measure.sh`
   and docs/inkling/.
   `local/inkling-dspark-local.json` (`./almond -m inkling-dspark`, opt-in) adds Unsloth's DSpark drafter
   (`local/fetch.sh inkling-dspark`) to the native engine (`--dspark`, docs/inkling/ENGINE.md step 6): through the

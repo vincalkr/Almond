@@ -756,7 +756,7 @@ chat prompts. Images through its encoder
 
 Since 2026-11-24 the default configuration runs Almond's own engine (`almond-inkling-native`, docs/inkling/ENGINE.md,
 "Step 4"): F16 KV, prefill about 3x and decode about 2x the numbers below through the server, KL from Q8_0 0.00557
-against 0.00573. What follows is the llama.cpp path, now `local/inkling-llama-local.json`.
+against 0.00573. What follows is the llama.cpp path, whose configuration was removed on 2026-11-24 as slower.
 
 Card 0 alone, 128K context, q8_0 KV. It runs on llama.cpp's own `inkling2_loop` graph behind the engine's serve
 protocol (`src/inkling`, built into `build-inkling/`). Quality against ggml-org's Q8_0 on 43,709 tokens of this

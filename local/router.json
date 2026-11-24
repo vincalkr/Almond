@@ -11,8 +11,7 @@
     {"model": "hy4"},
     {"model": "hy4", "config": "local/hy4-local-fast.json"},
     {"model": "inkling"},
-    {"model": "inkling", "config": "local/inkling-dspark-local.json"},
-    {"model": "inkling", "config": "local/inkling-llama-local.json"}
+    {"model": "inkling", "config": "local/inkling-dspark-local.json"}
   ],
   "default": "glm"
 }

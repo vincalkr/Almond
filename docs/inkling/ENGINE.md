@@ -148,7 +148,7 @@ Against Q8_0 (128 positions of the text, full logits), as each path is served:
 
 | | KV | KL from Q8_0 | same top token |
 |---|---|---|---|
-| llama.cpp (`local/inkling-llama-local.json`) | q8_0 | 0.00573 | 122 / 128 |
+| llama.cpp (configuration removed) | q8_0 | 0.00573 | 122 / 128 |
 | ours (`local/inkling-local.json`) | F16 | **0.00557** | **125 / 128** |
 | ours, F32 KV (not servable at 128K) | F32 | 0.00520 | 123 / 128 |
 
@@ -164,7 +164,7 @@ Speed through the server (`/v1/chat/completions`, streamed, temperature 1.0, top
 The decode through the server is below `--bench`'s 84 tok/s: every token copies the 200K logits back and sorts them on
 the CPU (the same sampler as llama.cpp's path), and the decode at depth reads more keys. Chat, a tool call and a
 four-turn agent run answered correctly. Quality is the same or better and every speed is higher, so this is the
-default; `./almond -m inkling-llama` keeps the llama.cpp path.
+default; the llama.cpp configuration (`inkling-llama`) was removed on 2026-11-24 as slower.
 
 ## Step 5, profile and fixes (2026-11-24)
 

@@ -167,8 +167,7 @@ def pick_config(o: dict) -> str:
             whole(ROOT / "models/hy4-iq2ah/mmproj-Hy4-flash-bf16.gguf")
         return str(ROOT / ("local/hy4-local-vision.json" if on else "local/hy4-local.json"))
     if m == "inkling":
-        # Inkling 2 Mini on almond-inkling-native (src/inkling/native, our own engine), UD-Q4_K_XL on card 0;
-        # local/inkling-llama-local.json keeps llama.cpp's graph (almond-inkling)
+        # Inkling 2 Mini on almond-inkling-native (src/inkling/native, our own engine), UD-Q4_K_XL on card 0
         return str(ROOT / "local/inkling-local.json")
     if m == "qwen27":
         # the dense Qwen3.8-27B on src/qwen35 (--qwen35), one card; with its encoder (the mmproj in
