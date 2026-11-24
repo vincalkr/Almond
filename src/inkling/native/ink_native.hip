@@ -1088,6 +1088,9 @@ __global__ void k_gemm_exp(const uint8_t * W, uint32_t type, size_t ebytes, size
 // NVFP4: the doubled E2M1 values), exact in F16; the activations as two F16 parts (hi + lo, about 22 bits of
 // mantissa); each 16-wide K step is scaled by its block scale in F32. Tiles of 64 rows x BT tokens (BT/16 x 4 waves).
 typedef _Float16 h16v __attribute__((ext_vector_type(16)));
+// the low part is kept times 2^12 (an exact scale) so small values do not fall into F16's subnormals, and is summed in
+// its own accumulator then scaled back
+constexpr float LO_UP = 4096.0f, LO_DN = 1.0f / 4096.0f;
 typedef float f8v __attribute__((ext_vector_type(8)));
 typedef _Float16 h8v __attribute__((ext_vector_type(8)));
 __device__ __forceinline__ bool wmma_ok(const Seg & g) { return (g.type == T_Q8P || g.type == T_NVFP4) && g.K % 64 == 0; }
@@ -1145,7 +1148,7 @@ __device__ __forceinline__ void wmma_tile(const Seg & g, int n0, int T, int t0, 
             for (int i = 0; i < 8; ++i) {
                 const _Float16 h = (_Float16) xv[e][i];
                 Xh[tt][kp + i] = h;
-                Xl[tt][kp + i] = (_Float16) (xv[e][i] - (float) h);
+                Xl[tt][kp + i] = (_Float16) ((xv[e][i] - (float) h) * LO_UP);
             }
         }
         __syncthreads();
@@ -1198,11 +1201,11 @@ __device__ __forceinline__ void wmma_tile(const Seg & g, int n0, int T, int t0, 
 #pragma unroll
                     for (int j = 0; j < 8; ++j) { bh[8 * i + j] = vh[j]; bl[8 * i + j] = vl[j]; }
                 }
-                f8v z = {};
+                f8v z = {}, zl = {};
                 z = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, bh, z);
-                z = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, bl, z);
+                zl = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, bl, zl);
 #pragma unroll
-                for (int i = 0; i < 8; ++i) acc[b][i] += z[i] * scr[i];
+                for (int i = 0; i < 8; ++i) acc[b][i] += (z[i] + zl[i] * LO_DN) * scr[i];
             }
         }
         __syncthreads();
@@ -1251,6 +1254,131 @@ __global__ void k_gemm_exp_w(const uint8_t * W, uint32_t type, size_t ebytes, si
     __syncthreads();
     Seg g{W + (size_t) e * ebytes, x, y, rb, N, K, type};
     wmma_tile<EXP_BT, EXP_BT / 16>(g, blockIdx.x * 64, cnt, t0, xr - t0, yr - t0, scale ? scale[e] : 1.0f, wts);
+}
+// 16 halves from LDS as two 16-byte reads
+__device__ __forceinline__ h16v ld16(const _Float16 * p) {
+    const h8v a = *(const h8v *) p, b = *(const h8v *) (p + 8);
+    h16v r;
+#pragma unroll
+    for (int e = 0; e < 8; ++e) { r[e] = a[e]; r[8 + e] = b[e]; }
+    return r;
+}
+// prompt attention on the matrix cores, for the F16 KV cache (--kv-f16): the keys and values are exact in F16; Q and
+// the probabilities go in as two F16 parts (hi + lo), so the scores and P . V keep about F32 precision. One wave a
+// block: 16 rows (token, query head) of one KV head against one split of the keys, 16 keys at a time.
+// grid (Hkv, ceil(3T / 16), nsplit), 32 threads; writes part[] like k_attn_pf.
+__global__ void k_attn_pf_w(const float * q, const void * Kc, const void * Vc, int cap, const int * dpos, int span,
+                            int Hkv, const float * bias, int ext, const float * sink, float * part, int splitsz,
+                            int nsplit, int T) {
+    constexpr int D = 128, G = 3;
+    __shared__ __attribute__((aligned(16))) _Float16 Qh[16][D + 8], Ql[16][D + 8], Vt[D][16 + 8], Ph[16][16 + 8],
+        Pl[16][16 + 8];
+    const int kvh = blockIdx.x, r0 = blockIdx.y * 16, sp = blockIdx.z, lane = threadIdx.x, hf = lane >> 4, c = lane & 15;
+    const int pos0 = *dpos, H = Hkv * G, nrows = T * G;
+    const int tkf = r0 / G, tkl = min(nrows - 1, r0 + 15) / G;
+    const int kfirst = max(0, pos0 + tkf - span + 1), kend = pos0 + tkl;
+    const int j0 = kfirst + sp * splitsz, j1 = min(kend, j0 + splitsz - 1);
+    const float qsc = rsqrtf((float) D);
+    for (int i = lane; i < 16 * D; i += WS) {
+        const int rr = i / D, d = i % D, row = r0 + rr;
+        float v = 0.0f;
+        if (row < nrows) v = q[((size_t) (row / G) * H + kvh * G + row % G) * D + d] * qsc;
+        const _Float16 h = (_Float16) v;
+        Qh[rr][d] = h; Ql[rr][d] = (_Float16) ((v - (float) h) * LO_UP);
+    }
+    // this lane's 8 rows in the D layout: 2i + hf
+    float m[8], ls[8];
+    int qpos[8], brow[8];
+    bool rok[8];
+    f8v acc[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const int row = r0 + 2 * i + hf;
+        rok[i] = row < nrows;
+        qpos[i] = pos0 + row / G;
+        brow[i] = rok[i] ? (row / G) * H + kvh * G + row % G : 0;
+        m[i] = -INFINITY; ls[i] = 0.0f;
+        acc[i] = f8v{};
+    }
+    __syncthreads();
+    const _Float16 * K16 = (const _Float16 *) Kc;
+    const _Float16 * V16 = (const _Float16 *) Vc;
+    for (int jb = j0; jb <= j1; jb += 16) {
+        // values of the 16 keys into LDS (lane: half a key row)
+        {
+            const int kk = lane >> 1, j = jb + kk, d0 = (lane & 1) * 64;
+            const uint4 * src = (const uint4 *) (V16 + ((size_t) (j % cap) * Hkv + kvh) * D + d0);
+#pragma unroll
+            for (int u = 0; u < 8; ++u) {   // transposed: Vt[dim][key], so a B operand is one row
+                const uint4 v = j <= j1 ? src[u] : make_uint4(0, 0, 0, 0);
+                const h8v hv = __builtin_bit_cast(h8v, v);
+#pragma unroll
+                for (int e = 0; e < 8; ++e) Vt[d0 + 8 * u + e][kk] = hv[e];
+            }
+        }
+        // S = Q K^T: lane = key column c, its K row straight from the cache
+        f8v S = {}, Sl = {};
+        {
+            const int j = min(jb + c, j1);
+            const _Float16 * kr = K16 + ((size_t) (j % cap) * Hkv + kvh) * D;
+#pragma unroll
+            for (int dc = 0; dc < D / 16; ++dc) {
+                const h16v b = *(const h16v *) (kr + dc * 16);
+                const h16v ah = ld16(&Qh[c][dc * 16]), al = ld16(&Ql[c][dc * 16]);
+                S = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(ah, b, S);
+                Sl = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(al, b, Sl);
+            }
+#pragma unroll
+            for (int i = 0; i < 8; ++i) S[i] += Sl[i] * LO_DN;
+        }
+        const int j = jb + c;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int dd = qpos[i] - j;
+            const bool ok = rok[i] && j <= j1 && dd >= 0 && dd < span;
+            float sc = -INFINITY;
+            if (ok) sc = S[i] + (dd < ext ? bias[(size_t) brow[i] * ext + dd] : -sink[brow[i]]);
+            float mx = sc;
+#pragma unroll
+            for (int o = 8; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor(mx, o, WS));
+            const float mn = fmaxf(m[i], mx);
+            float p = 0.0f;
+            if (mn != -INFINITY) {
+                const float f = expf(m[i] - mn);
+                p = ok ? expf(sc - mn) : 0.0f;
+                float ps = p;
+#pragma unroll
+                for (int o = 8; o > 0; o >>= 1) ps += __shfl_xor(ps, o, WS);
+                ls[i] = ls[i] * f + ps;
+#pragma unroll
+                for (int dt = 0; dt < 8; ++dt) acc[dt][i] *= f;
+                m[i] = mn;
+            }
+            const _Float16 h = (_Float16) p;
+            Ph[2 * i + hf][c] = h; Pl[2 * i + hf][c] = (_Float16) ((p - (float) h) * LO_UP);
+        }
+        __syncthreads();
+        // O += P V: A = P rows (lane: row c), B = V columns (lane: dim c of the tile)
+        const h16v ph = ld16(&Ph[c][0]), pl = ld16(&Pl[c][0]);
+#pragma unroll
+        for (int dt = 0; dt < 8; ++dt) {
+            const h16v b = ld16(&Vt[dt * 16 + c][0]);
+            f8v zl = {};
+            zl = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pl, b, zl);
+            acc[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(ph, b, acc[dt]);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) acc[dt][i] += zl[i] * LO_DN;
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        if (!rok[i]) continue;
+        float * o = part + ((size_t) brow[i] * nsplit + sp) * (D + 2);
+        if (c == 0) { o[0] = m[i]; o[1] = ls[i]; }
+#pragma unroll
+        for (int dt = 0; dt < 8; ++dt) o[2 + dt * 16 + c] = acc[dt][i];
+    }
 }
 // y[t][c] = sum over the token's k entries of yd[t*k + j][c]
 __global__ void k_exp_sum(const float * yd, float * y, int C, int k) {
@@ -1603,8 +1731,15 @@ struct Runner {
             while (nsplit > 1 && m.Hkv * tiles * nsplit > 4096) --nsplit;
             const int splitsz = ((nk + nsplit - 1) / nsplit + 31) / 32 * 32;
             nsplit = (nk + splitsz - 1) / splitsz;
-            hipLaunchKernelGGL(k_attn_pf, dim3(m.Hkv, tiles, nsplit), dim3(256), 0, st, q, sl.K, sl.V, sl.cap, dpos,
-                               span, m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit, T, kvt);
+            if (kvt == 2) {   // F16 cache: the matrix cores, 16 (token, head) rows a block
+                const int sz16 = (splitsz + 15) / 16 * 16;
+                const int ns16 = (nk + sz16 - 1) / sz16;
+                hipLaunchKernelGGL(k_attn_pf_w, dim3(m.Hkv, (3 * T + 15) / 16, ns16), dim3(WS), 0, st, q, sl.K, sl.V,
+                                   sl.cap, dpos, span, m.Hkv, relb, m.ext, sinkv, part, sz16, ns16, T);
+                nsplit = ns16;
+            } else
+                hipLaunchKernelGGL(k_attn_pf, dim3(m.Hkv, tiles, nsplit), dim3(256), 0, st, q, sl.K, sl.V, sl.cap, dpos,
+                                   span, m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit, T, kvt);
         }
         hipLaunchKernelGGL(k_attn_combine, dim3(m.H, T), dim3(m.D), 0, st, part, nsplit, g, att, m.D);
         mmv(T, {MV{&l.wo, att, t0, 0}});

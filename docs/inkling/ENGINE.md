@@ -165,3 +165,46 @@ The decode through the server is below `--bench`'s 84 tok/s: every token copies 
 the CPU (the same sampler as llama.cpp's path), and the decode at depth reads more keys. Chat, a tool call and a
 four-turn agent run answered correctly. Quality is the same or better and every speed is higher, so this is the
 default; `./almond -m inkling-llama` keeps the llama.cpp path.
+
+## Step 5, profile and fixes (2026-11-24)
+
+Card 0, the served configuration (128K, F16 KV, chunks of 1,024). Engine numbers from `--serve` (GEN, DONE's timings,
+no HTTP).
+
+Decode, rocprofv3 at 1K depth: 11.1 ms of GPU time a token, about 1,040 kernels. Projections (`k_mmv`) 2.64 ms,
+expert gate_up 1.97 and down 1.12, attention 1.10, mixes 0.87, the head 0.53, the rest small kernels (router,
+controllers, norms, relative bias, split merge) at 4-7 us each. The weights read a token are about 3.1 GB (experts
+1.7 GB, projections 1.3 GB, head 0.2 GB): at 960 GB/s that bounds the decode near 9 ms, about 110 tok/s, so the
+matvecs at 485-580 GB/s and the small kernels are where the rest goes.
+
+| Change | served decode, 1K / 6K, temperature 1 | 
+|---|---|
+| before | 65.4 / 57.5 tok/s |
+| attention splits from the keys present (read on the device, the graph adapts) instead of the context size: at 128K a 1K-deep decode read all its keys in one split per head; splits of at least 32 keys | 77.6 / 76.4 |
+| logits to pinned memory; with no truncation asked (top_k 0, top_p 1, min_p 0) the token is drawn from the whole softmax in two passes, no sort (the sorted path kept the best 4,096: this one is the exact distribution) | **78.7 / 77.4** (temperature 0: 83.2) |
+
+Logits unchanged (KL 7e-12 from the token-by-token path at 64K context). Tried and dropped, slower or no change: 2 or
+4 rows a wave in the matvecs (x read once for them: 79.4 and 70.9 against 83.2), unrolled matvec loops (80.4), the
+router as one wave with no block barriers (same speed).
+
+Prefill:
+- Matrix-core GEMMs: the activations' low F16 part is kept times 2^12 (exact) and summed in its own accumulator, so
+  values below about 0.12 no longer lose it to F16 subnormals. KL from the token-by-token path (F32 KV, 511
+  positions) went from max 2.3e-10 to 6.5e-11.
+- Prompt attention on the matrix cores for the F16 cache (`k_attn_pf_w`): keys and values are exact in F16; Q and
+  the probabilities as two parts (the low one scaled the same way); one wave per 16 (token, head) rows. Its output
+  is within 1e-5 (values up to 5) of the FP32 kernel on the same inputs, the size of FP32 summation-order noise.
+  32K: 1,205 -> 1,286 tok/s; 4K: 1,613.
+- One F16 part for the activations (no low part) was 15% faster and cost KL 0.0018 from the token-by-token path:
+  dropped.
+
+The F16 cache makes a whole-text diff unusable as a check: K and V come out of the prompt GEMM and the decode matvec
+within 1e-7 of each other, a few values round to the other F16 neighbour, and the model carries that on (prompt vs
+token by token with F16 KV: KL 0.0005-0.0015, already with the FP32 attention kernel; two chunk sizes with the same
+kernel: 0.0003). The check is KL from Q8_0: 0.00566 (124/128 same top token) here, 0.00557-0.00575 for every F16
+variant, against 0.00573 for llama.cpp's served q8_0 path.
+
+Where it stands against project-maya's reported 109 tok/s decode / 2,267 tok/s prefill (not measured here): 83 / 1,613
+at 4K on the engine. Decode is bound by the matvecs' bandwidth and ~1,000 launches; prefill by the experts' GEMM at
+about 50 TFLOPS with the two activation parts, and at 32K by the attention's softmax work per 16 keys. Not done yet:
+DSpark in this engine, fewer launches per decode token, larger key blocks in the prompt attention.
