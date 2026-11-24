@@ -46,8 +46,11 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   and docs/inkling/.
   Images: `local/inkling-local-vision.json` (launch.py picks it when the encoder is there): Unsloth's mmproj F32
   (`local/fetch.sh inkling-vision`) through `build-vision-inkling/bin/almond-vision` (built by `./build.sh` against
-  `build-inkling/llama.cpp`'s mtmd) on the CPU, the rows read by the native engine (`GENI`); answers checked against
-  llama.cpp's server (docs/inkling/ENGINE.md, step 9); `local/inkling-dspark-local-vision.json` the same with DSpark.
+  `build-inkling/llama.cpp`'s mtmd), the rows read by the native engine (`GENI`); the encoder on card 0 only while a
+  request's pictures are encoded, in the experts' memory the engine lends it (`VLEND` / `VRECLAIM`, as GLM; F32
+  products and no flash attention, `f32_matmul` / `no_flash_attn`), then the model is back byte for byte; answers
+  checked against llama.cpp's server (docs/inkling/ENGINE.md, steps 9-10); `local/inkling-dspark-local-vision.json`
+  the same with DSpark.
   `local/inkling-dspark-local.json` (`./almond -m inkling-dspark`, opt-in) adds Unsloth's DSpark drafter
   (`local/fetch.sh inkling-dspark`) to the native engine (`--dspark`, docs/inkling/ENGINE.md step 6): through the
   server 123-144 tok/s at temperature 0 and 98-135 at 0.6 against 77-78, the same distribution; requests above

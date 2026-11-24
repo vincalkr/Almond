@@ -340,3 +340,40 @@ is on the CPU, so card 0 has what the DSpark configuration had: 0.61 GiB free af
 at temperature 0 (the three pictures above and a code question, 400 tokens out at most), the answers with and
 without DSpark are the same text, character for character; requests (prompt reading included) 58.0 -> 75.0,
 49.6 -> 61.3, 41.2 -> 42.3 and 83.7 -> 109.5 tok/s.
+
+## Step 10, the encoder on the card in lent memory; the prompt GEMM tried again (2026-11-24)
+
+Images now work the way GLM's and DeepSeek's do: the encoder runs on the GPU only while a request's pictures are
+encoded, in memory the engine lends it, and the engine then has its model back as if the encoder had not been there.
+
+- Lending (`VLEND` / `VRECLAIM`, GLM's protocol): the expert tensors are placed in reserved virtual address ranges
+  with their own physical memory (`hipMemAddressReserve` / `hipMemCreate` / `hipMemMap`). `VLEND` unmaps and
+  releases the last ones until the encoder's measured need is free (2.5 GB in 2 ms in the test), `VRECLAIM` maps
+  new memory at the same addresses and copies the tensors back from the mapped GGUF (87 ms for 2.5 GB). The
+  addresses do not move, so the captured graphs stay valid, and the weights come back byte for byte: generations
+  before and after a lend are identical, and a request that arrives while memory is lent takes it back first.
+  Text speed unchanged (decode 85.2, prefill 1,623 tok/s; logits KL 0). `INK_NO_LEND=1` uses plain allocations.
+- The encoder on the GPU was not right by default: against the CPU its rows ended at cosine 0.895 - 0.983. Dumping
+  the graph's tensors (`ALMOND_VISION_DUMP=<dir>` in almond-vision) showed two causes: ggml's hipBLAS path picks F16
+  products for this F32 encoder (the patch embedding already 2.8e-3 off), and the flash attention reads Q / K / V
+  as F16. With `--f32-matmul` (GGML_CUDA_CUBLAS_COMPUTE_TYPE=f32 for the encoder's process only, so the ggml
+  engines are not touched) and `--no-flash-attn`: cosine 0.9999998, relative error 1e-5 against the CPU without
+  flash attention, and the screenshot in 0.59 s instead of 3.5 s.
+- Without flash attention the attention's buffers grow with the square of the image tokens: measured 2.79 / 5.80 /
+  8.93 GiB at 1,024 / 2,048 / 4,096 tokens (the model stops at 2,704). The configurations ask for 4,096
+  (`max_tokens`), so no picture is shrunk, as on the CPU; the engine has about 13.7 GB of experts to lend.
+- Through the server (`local/inkling-local-vision.json`, `"gpu": true, "no_flash_attn": true, "f32_matmul": true,
+  "on_demand": true`): card 0 at 23,771 MiB before and 23,786 after the requests; a 1920x1080 screenshot's first
+  token after 2.53 s against 4.55 s with the CPU encoder, a 1800x1350 photo 2.71 against 5.57 s; small pictures
+  0.5 - 0.7 s slower (the encoder starts per request, which reads its 1.3 GB). The answers are the same as with the
+  CPU encoder up to a word (the CPU encoder ran with its F32 flash attention); with DSpark
+  (`local/inkling-dspark-local-vision.json`, 0.61 GiB free) the same four answers as without, character for
+  character.
+
+The prompt's expert GEMM, tried again before this: kept exact, nothing gained. Removing the low part of the
+activations from the matrix cores took the kernel from 3,014 to 1,736 us (it is bound by the matrix cores: the
+exact two-part product is 42% of it), removing the weights' decoding to 2,187 us; decoding with byte permutes
+(the doubled E2M1 values as F16 have a zero low byte) and the E4M3 scale computed instead of read from a table
+changed nothing (1,623 tok/s); two to four row fragments a wave, 1,633 / 1,385 / 1,239 tok/s. (A first version of
+the computed scale had the exponent off by 2^7 and gave 1,817 tok/s with NaN logits - a reminder to check the
+logits before the speed.)

@@ -4566,6 +4566,14 @@ class VisionArgs(unittest.TestCase):
         self.assertEqual(self.args_for({"max_tokens": 1024, "min_tokens": 768})[-4:],
                          ["--max-tokens", "1024", "--min-tokens", "768"])
 
+    def test_f32_matmul_is_passed_only_when_set(self):
+        self.assertNotIn("--f32-matmul", self.args_for({"gpu": True}))
+        self.assertIn("--f32-matmul", self.args_for({"gpu": True, "no_flash_attn": True, "f32_matmul": True}))
+
+    def test_the_lending_engines(self):
+        import serve.server as server
+        self.assertEqual(server.LENDERS, {"--glm-pack", "--inkling"})
+
 
 class VisionCacheEviction(unittest.TestCase):
     """#1072: the cache of encoded images keeps 64; a request's own images are never evicted for a later one."""

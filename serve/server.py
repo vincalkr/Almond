@@ -2050,6 +2050,8 @@ class Vision:
             args += ["--min-tokens", str(cfg["min_tokens"])]
         if cfg.get("no_flash_attn"):   # GLM-5.3's encoder on a GPU: full-precision attention (cosine 0.9997 vs 0.999)
             args.append("--no-flash-attn")
+        if cfg.get("f32_matmul"):      # hipBLAS products in F32 (Inkling's encoder on a GPU: cosine 0.95 -> 0.9999998)
+            args.append("--f32-matmul")
         self.dir = self.work_dir()
         self.spawn = (args, log, env)                   # to start it again after an unload
         self.proc = None
@@ -2343,7 +2345,8 @@ def vision_footprint(vcfg: dict, env: dict, cache_file: Path) -> tuple[int, int]
     caps = [int(vcfg["max_tokens"])] if vcfg.get("max_tokens") else [4096, 2048, 1024]
     for i, cap in enumerate(caps):
         nofa = bool(vcfg.get("no_flash_attn"))
-        key = f"{Path(vcfg['mmproj']).resolve()}|{st.st_size}|{int(st.st_mtime)}|cap{cap}" + ("|nofa" if nofa else "")
+        key = f"{Path(vcfg['mmproj']).resolve()}|{st.st_size}|{int(st.st_mtime)}|cap{cap}" + ("|nofa" if nofa else "") + \
+            ("|f32" if vcfg.get("f32_matmul") else "")
         m = cache.get(key)
         if not isinstance(m, dict) or not all(isinstance(m.get(k), int) and m[k] > 0 for k in ("bytes", "total")):
             m = None
@@ -2352,7 +2355,8 @@ def vision_footprint(vcfg: dict, env: dict, cache_file: Path) -> tuple[int, int]
             # image tokens (a screenshot needed 1.82 GiB of compute buffer beside the weights, more than the measure
             # with flash attention lent it: the encoder stopped on cudaMalloc, 2026-10-31)
             args = [vcfg["exe"], "--mmproj", vcfg["mmproj"], "--model", vcfg["model"], "--gpu", "--max-tokens",
-                    str(cap), "--measure"] + (["--no-flash-attn"] if nofa else [])
+                    str(cap), "--measure"] + (["--no-flash-attn"] if nofa else []) + \
+                (["--f32-matmul"] if vcfg.get("f32_matmul") else [])
             print(f"[almond] images: measuring the vision encoder on the GPU ({cap} image tokens) ...", flush=True)
             try:
                 r = subprocess.run(args, capture_output=True, text=True, timeout=600, env=env)
@@ -2703,6 +2707,9 @@ def hip_env_guard(env: dict, cfg: dict) -> list[str]:
     for line in said:
         print(f"almond serve: AMD: {line}", file=sys.stderr, flush=True)
     return said
+
+
+LENDERS = {"--glm-pack", "--inkling"}   # the engines' flags whose engines answer VLEND / VRECLAIM
 
 
 def vision_env(cfg: dict, env: dict) -> dict:
@@ -6213,8 +6220,9 @@ def main() -> int:
                         if k in ("exe", "mmproj", "model") and isinstance(v, str) and not os.path.isabs(v) else v)
                     for k, v in cfg["vision"].items()}
             on_demand = vcfg.get("on_demand") is True
-            if on_demand and "--glm-pack" not in (cfg.get("args") or []):   # VLEND / VRECLAIM: GLM's path only
-                raise SystemExit("[almond] images: \"on_demand\" needs the GLM engine (VLEND / VRECLAIM); "
+            if on_demand and not LENDERS & set(cfg.get("args") or []):   # the engines that answer VLEND / VRECLAIM
+                raise SystemExit("[almond] images: \"on_demand\" needs an engine that lends its memory (VLEND / VRECLAIM: "
+                                 "GLM's, Inkling's); "
                                  "DeepSeek's engine loads its encoder itself (--vision)")
             if on_demand:                               # the GLM engine lends the encoder its expert pool's tail
                 fp = vision_footprint(vcfg, vision_env(cfg, env),

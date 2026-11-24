@@ -67,6 +67,86 @@ struct Tensor {
     void * dev = nullptr;
 };
 
+// ---- the experts' memory lent to an on-demand image encoder (VLEND / VRECLAIM, as the GLM engine does). The
+// expert tensors sit in reserved virtual address ranges with their own physical memory: lending unmaps and releases
+// the last ones' memory (their addresses stay reserved, so the captured graphs stay valid), reclaiming maps new
+// memory at the same addresses and copies the tensors back from the mapped GGUF - the model is bit for bit what it was
+struct Lendable { void * va; size_t size; const uint8_t * host; size_t bytes; hipMemGenericAllocationHandle_t h; bool mapped; };
+std::vector<Lendable> g_lend;
+hipMemAllocationProp lend_prop() {
+    hipMemAllocationProp pr{};
+    pr.type = hipMemAllocationTypePinned;
+    pr.location.type = hipMemLocationTypeDevice;
+    int dev = 0;
+    (void) hipGetDevice(&dev);
+    pr.location.id = dev;
+    return pr;
+}
+bool lend_map(Lendable & L) {
+    hipMemAllocationProp pr = lend_prop();
+    if (hipMemCreate(&L.h, L.size, &pr, 0) != hipSuccess) { (void) hipGetLastError(); return false; }
+    if (hipMemMap(L.va, L.size, 0, L.h, 0) != hipSuccess) { (void) hipMemRelease(L.h); (void) hipGetLastError(); return false; }
+    hipMemAccessDesc ad{};
+    ad.location = pr.location;
+    ad.flags = hipMemAccessFlagsProtReadWrite;
+    if (hipMemSetAccess(L.va, L.size, &ad, 1) != hipSuccess) {
+        (void) hipMemUnmap(L.va, L.size); (void) hipMemRelease(L.h); (void) hipGetLastError(); return false;
+    }
+    L.mapped = true;
+    return true;
+}
+// a lendable device copy of host bytes (null when the device cannot: then a plain allocation)
+void * lend_alloc(const uint8_t * host, size_t bytes) {
+    static int ok = -1;
+    if (ok < 0) {
+        int dev = 0, v = 0;
+        (void) hipGetDevice(&dev);
+        ok = hipDeviceGetAttribute(&v, hipDeviceAttributeVirtualMemoryManagementSupported, dev) == hipSuccess && v &&
+             !std::getenv("INK_NO_LEND");
+    }
+    if (!ok) return nullptr;
+    hipMemAllocationProp pr = lend_prop();
+    size_t gran = 0;
+    if (hipMemGetAllocationGranularity(&gran, &pr, hipMemAllocationGranularityRecommended) != hipSuccess || !gran) gran = 2 << 20;
+    Lendable L{nullptr, (bytes + gran - 1) / gran * gran, host, bytes, {}, false};
+    if (hipMemAddressReserve(&L.va, L.size, 0, nullptr, 0) != hipSuccess) { (void) hipGetLastError(); return nullptr; }
+    if (!lend_map(L)) { (void) hipMemAddressFree(L.va, L.size); return nullptr; }
+    if (hipMemcpy(L.va, host, bytes, hipMemcpyHostToDevice) != hipSuccess) { std::fprintf(stderr, "lend: upload failed\n"); std::exit(1); }
+    g_lend.push_back(L);
+    return L.va;
+}
+// frees the last expert tensors' memory until `want` bytes are free on the device (the encoder's measured need);
+// returns the bytes released
+size_t lend_out(size_t want) {
+    (void) hipDeviceSynchronize();
+    size_t fr = 0, tot = 0;
+    (void) hipMemGetInfo(&fr, &tot);
+    size_t got = 0;
+    for (size_t i = g_lend.size(); i-- > 0 && fr + got < want;) {
+        Lendable & L = g_lend[i];
+        if (!L.mapped) continue;
+        (void) hipMemUnmap(L.va, L.size);
+        (void) hipMemRelease(L.h);
+        L.mapped = false;
+        got += L.size;
+    }
+    (void) hipDeviceSynchronize();
+    return got;
+}
+size_t lend_owed() { size_t n = 0; for (const Lendable & L : g_lend) n += L.mapped ? 0 : 1; return n; }
+// maps and refills what was lent; false while the memory is still taken (then nothing more is mapped)
+bool lend_back() {
+    for (Lendable & L : g_lend) {
+        if (L.mapped) continue;
+        if (!lend_map(L)) return false;
+        if (hipMemcpy(L.va, L.host, L.bytes, hipMemcpyHostToDevice) != hipSuccess) {
+            std::fprintf(stderr, "lend: the copy back failed\n");
+            std::exit(1);
+        }
+    }
+    return true;
+}
+
 size_t row_bytes(uint32_t type, int64_t n) {
     switch (type) {
         case T_F32: return 4 * n;
@@ -188,6 +268,9 @@ struct Gguf {
                 x->bytes = out.size();
                 CK(hipMalloc(&x->dev, x->bytes));
                 CK(hipMemcpy(x->dev, out.data(), x->bytes, hipMemcpyHostToDevice));
+            } else if (n.size() > 12 && n.compare(n.size() - 12, 12, "_exps.weight") == 0 &&
+                       (x->dev = lend_alloc(x->host, x->bytes))) {
+                // (the experts: lendable to an image encoder, see lend_alloc)
             } else {
                 CK(hipMalloc(&x->dev, x->bytes));
                 CK(hipMemcpy(x->dev, x->host, x->bytes, hipMemcpyHostToDevice));
@@ -2851,6 +2934,22 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
         if (line.empty()) continue;
         if (line == "QUIT") break;
         if (line == "CONVCLEAR") { clear(); say("CLEARED 0 0\n"); continue; }
+        // VLEND / VRECLAIM (between requests, as the GLM engine): the on-demand image encoder is about to start on
+        // this card - the last expert tensors' memory is released for it ("VLENT <bytes>") - and has ended
+        // ("VRECLAIMED", or an ERR while its memory is not back yet: the server asks again)
+        if (line == "VLEND") {
+            const char * e = std::getenv("ALMOND_VISION_LEND_MB");
+            if (!e) e = std::getenv("ALMOND_GLM_VISION_LEND_MB");
+            const size_t want = (size_t) (e ? std::atof(e) : 3072.0) * 1048576 + (256u << 20);
+            if (g_lend.empty()) { say("ERR nothing to lend (the experts are not in lendable memory)\n"); continue; }
+            say("VLENT %zu\n", lend_out(want));
+            continue;
+        }
+        if (line == "VRECLAIM") {
+            if (lend_back()) say("VRECLAIMED\n");
+            else say("ERR the lent memory is not free yet\n");
+            continue;
+        }
         if (line.rfind("SAVE ", 0) == 0 || line.rfind("RESTORE ", 0) == 0) {
             const bool save = line[0] == 'S';
             const std::string file = line.substr(save ? 5 : 8);
@@ -2869,6 +2968,7 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
             else say("SERR %s 0 the cache file could not be %s\n", save ? "write" : "read", save ? "written" : "read");
             continue;
         }
+        if (lend_owed() && !lend_back()) { say("ERR the experts' memory lent to the image encoder is not back yet\n"); continue; }
         const bool geni = line.rfind("GENI ", 0) == 0;
         if (geni) line = "GEN " + line.substr(5);   // GENI <max_new> [keys] [img_keys=..] <embeddings file> <ids>
         if (line.rfind("GEN ", 0) != 0) { say("ERR unknown command\n"); continue; }
@@ -3059,6 +3159,7 @@ int main(int argc, char ** argv) {
         else if (a == "--serve") serve_mode = true;
         else if (a == "--inkling") {}
         else if (a == "--vision") {}   // (the server says images may come: GENI is always read)
+        else if (a == "--vram-reserve-mib") (void) next();   // (the server's, for engines that size pools: none here)
         else if (a == "--ubatch") chunk = std::atoi(next());
         else if (a == "--eos") eos.push_back(std::atoi(next()));
         else if (a == "--temp") defaults.temp = (float) std::atof(next());
