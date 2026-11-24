@@ -804,6 +804,97 @@ __global__ void k_attn_split(const float * q, const float * Kc, const float * Vc
         }
     }
 }
+// prompt attention: a block takes 16 tokens x the 3 query heads of one KV head (48 rows, 6 a wave) against one split
+// of the keys, the keys and values staged in LDS 32 at a time and shared by all 48 rows (the decode kernel reads
+// them again for every token). F32 throughout, same online softmax; writes part[] like k_attn_split.
+// grid (Hkv, ceil(T / 16), nsplit), 256 threads
+__global__ void k_attn_pf(const float * q, const float * Kc, const float * Vc, int cap, const int * dpos, int span,
+                          int Hkv, const float * bias, int ext, const float * sink, float * part, int splitsz,
+                          int nsplit, int T) {
+    constexpr int D = 128, G = 3, KT = 32, R = 6;
+    __shared__ float4 Ks[KT][D / 4 + 1];
+    __shared__ float Vs[KT][D];
+    __shared__ float Qs[16 * G][D];
+    const int kvh = blockIdx.x, tt0 = blockIdx.y * 16, sp = blockIdx.z;
+    const int lane = threadIdx.x % WS, wv = threadIdx.x / WS;
+    const int pos0 = *dpos, H = Hkv * G;
+    const int lastT = min(T, tt0 + 16) - 1;
+    const int kfirst = max(0, pos0 + tt0 - span + 1), kend = pos0 + lastT;   // the tile's keys
+    const int j0 = kfirst + sp * splitsz, j1 = min(kend, j0 + splitsz - 1);
+    const float qsc = rsqrtf((float) D);
+    for (int i = threadIdx.x; i < 16 * G * D; i += blockDim.x) {
+        const int rr = i / D, d = i % D, tk = tt0 + rr / G;
+        Qs[rr][d] = tk < T ? q[((size_t) tk * H + kvh * G + rr % G) * D + d] * qsc : 0.0f;
+    }
+    // wave wv: rows 6wv..6wv+5 = tokens tt0 + 2wv (+1), heads g = row % 3
+    float m[R], ls[R];
+    float4 acc[R];
+    int qpos[R];
+#pragma unroll
+    for (int r = 0; r < R; ++r) { m[r] = -INFINITY; ls[r] = 0.0f; acc[r] = make_float4(0, 0, 0, 0); qpos[r] = pos0 + tt0 + (R * wv + r) / G; }
+    for (int jb = j0; jb <= j1; jb += KT) {
+        __syncthreads();
+        for (int i = threadIdx.x; i < KT * D / 4; i += blockDim.x) {
+            const int kk = i / (D / 4), d4 = (i % (D / 4)) * 4, j = jb + kk;
+            float4 a = make_float4(0, 0, 0, 0), b = a;
+            if (j <= j1) {
+                const size_t row = ((size_t) (j % cap) * Hkv + kvh) * D + d4;
+                a = *(const float4 *) (Kc + row); b = *(const float4 *) (Vc + row);
+            }
+            Ks[kk][d4 / 4] = a;
+            *(float4 *) &Vs[kk][d4] = b;
+        }
+        __syncthreads();
+        // lane = key jb + lane: its score for the wave's 6 rows
+        float s[R];
+#pragma unroll
+        for (int r = 0; r < R; ++r) s[r] = 0.0f;
+        for (int d = 0; d < D / 4; ++d) {
+            const float4 kv = Ks[lane][d];
+#pragma unroll
+            for (int r = 0; r < R; ++r) {
+                const float4 qv = *(const float4 *) &Qs[R * wv + r][4 * d];
+                s[r] += qv.x * kv.x + qv.y * kv.y + qv.z * kv.z + qv.w * kv.w;
+            }
+        }
+        const int j = jb + lane;
+        float pr[R];
+#pragma unroll
+        for (int r = 0; r < R; ++r) {
+            const int tk = tt0 + (R * wv + r) / G, h = kvh * G + (R * wv + r) % G, dd = qpos[r] - j;
+            const bool ok = tk < T && j <= j1 && dd >= 0 && dd < span;
+            float sc = -INFINITY;
+            if (ok) sc = s[r] + (dd < ext ? bias[((size_t) tk * H + h) * ext + dd] : -sink[(size_t) tk * H + h]);
+            float mx = sc;
+#pragma unroll
+            for (int o = WS / 2; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor(mx, o, WS));
+            const float mn = fmaxf(m[r], mx);
+            if (mn == -INFINITY) { pr[r] = 0.0f; continue; }   // nothing visible yet for this row
+            const float f = expf(m[r] - mn);
+            pr[r] = ok ? expf(sc - mn) : 0.0f;
+            ls[r] = ls[r] * f + wsum(pr[r]);
+            acc[r] = make_float4(acc[r].x * f, acc[r].y * f, acc[r].z * f, acc[r].w * f);
+            m[r] = mn;
+        }
+        // P . V: every value row read once for the wave's 6 rows
+        for (int kk = 0; kk < KT; ++kk) {
+            const float4 vv = *(const float4 *) &Vs[kk][lane * 4];
+#pragma unroll
+            for (int r = 0; r < R; ++r) {
+                const float pk = __shfl(pr[r], kk, WS);
+                acc[r].x += pk * vv.x; acc[r].y += pk * vv.y; acc[r].z += pk * vv.z; acc[r].w += pk * vv.w;
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < R; ++r) {
+        const int tk = tt0 + (R * wv + r) / G, h = kvh * G + (R * wv + r) % G;
+        if (tk >= T) continue;
+        float * o = part + (((size_t) tk * H + h) * nsplit + sp) * (D + 2);
+        if (lane == 0) { o[0] = m[r]; o[1] = ls[r]; }
+        *(float4 *) (o + 2 + lane * 4) = acc[r];
+    }
+}
 // merge the splits with the zero sink logit, times the gate's sigmoid; block per query head, D threads
 __global__ void k_attn_combine(const float * part, int nsplit, const float * gate, float * out, int D) {
     const int h = blockIdx.x, i = threadIdx.x, H = gridDim.x, tk = blockIdx.y;
@@ -905,6 +996,7 @@ __global__ void k_gemm(GSegs S, int T) {
     while (tile >= S.tstart[j + 1]) ++j;
     gemm_tile<32>(S.s[j], (tile - S.tstart[j]) * 64, T, blockIdx.y * 32, nullptr, nullptr, 1.0f, nullptr);
 }
+constexpr int EXP_BT = 32;   // entries a tile in the matrix-core expert GEMM
 // group the (token, slot) entries by expert: counts, offsets and the entry list (one block)
 __global__ void k_group(const int * ids, int n, int n_exp, int * offs, int * list) {
     __shared__ int cnt[256], cur[256];
@@ -914,8 +1006,13 @@ __global__ void k_group(const int * ids, int n, int n_exp, int * offs, int * lis
     __syncthreads();
     if (threadIdx.x == 0) {
         int a = 0;
-        for (int e = 0; e < n_exp; ++e) { offs[e] = a; cur[e] = a; a += cnt[e]; }
+        int nt = 0;   // and the list of (expert, first entry) tiles of EXP_BT after offs[n_exp + 1]
+        for (int e = 0; e < n_exp; ++e) {
+            offs[e] = a; cur[e] = a; a += cnt[e];
+            for (int t = 0; t < cnt[e]; t += EXP_BT) { offs[n_exp + 2 + 2 * nt] = e; offs[n_exp + 3 + 2 * nt] = t; ++nt; }
+        }
         offs[n_exp] = a;
+        offs[n_exp + 1] = nt;
     }
     __syncthreads();
     for (int i = threadIdx.x; i < n; i += blockDim.x) list[atomicAdd(&cur[ids[i]], 1)] = i;
@@ -938,6 +1035,174 @@ __global__ void k_gemm_exp(const uint8_t * W, uint32_t type, size_t ebytes, size
     Seg g{W + (size_t) e * ebytes, x, y, rb, N, K, type};
     // the tile's tokens are local 0..31: shift the row tables so token t0 + i reads xr[i]
     gemm_tile<16>(g, blockIdx.x * 64, cnt, t0, xr - t0, yr - t0, scale ? scale[e] : 1.0f, wts);
+}
+// ---- matrix cores (gfx11 WMMA, 16x16x16 F16 -> F32). The weights go in as their quantized integers (Q8_0: the int8,
+// NVFP4: the doubled E2M1 values), exact in F16; the activations as two F16 parts (hi + lo, about 22 bits of
+// mantissa); each 16-wide K step is scaled by its block scale in F32. Tiles of 64 rows x BT tokens (BT/16 x 4 waves).
+typedef _Float16 h16v __attribute__((ext_vector_type(16)));
+typedef float f8v __attribute__((ext_vector_type(8)));
+typedef _Float16 h8v __attribute__((ext_vector_type(8)));
+__device__ __forceinline__ bool wmma_ok(const Seg & g) { return (g.type == T_Q8P || g.type == T_NVFP4) && g.K % 64 == 0; }
+template <int BT, int NB>   // NB: 16-token tiles a wave (the decoded weights reused NB times)
+__device__ __forceinline__ void wmma_tile(const Seg & g, int n0, int T, int t0, const int * xrow, const int * yrow,
+                                          float yscale_fixed, const float * yscale_row) {
+    __shared__ _Float16 Xh[BT][64 + 8], Xl[BT][64 + 8];
+    const int tid = threadIdx.x, lane = tid & 31, w = tid >> 5;
+    constexpr int NT = 128 * BT / (16 * NB);
+    const int rw = (w & 3) * 16, tw = (w >> 2) * 16 * NB;
+    const int xs = g.xs ? g.xs : g.K, ys = g.ys ? g.ys : g.N;
+    const int m = lane & 15, n = n0 + rw + m;
+    const bool rok = n < g.N;
+    const uint8_t * row = g.w + (size_t) (rok ? n : 0) * g.rb;
+    f8v acc[NB] = {};
+    const int hf = lane >> 4;
+    // the next step's weights and activations are loaded into registers while this one computes
+    auto loadW = [&](int k0, uint32_t * pw, uint32_t & pws) {
+        if (g.type == T_Q8P) {
+#pragma unroll
+            for (int s = 0; s < 4; ++s) {
+                const uint2 qq = *(const uint2 *) (row + k0 + 16 * s + 8 * hf);
+                pw[2 * s] = qq.x; pw[2 * s + 1] = qq.y;
+            }
+            pws = *(const uint32_t *) (row + g.K + (k0 >> 5) * 2);
+        } else {
+            const uint8_t * blk = row + (size_t) (k0 >> 6) * 36;
+            pws = *(const uint32_t *) blk;
+#pragma unroll
+            for (int i = 0; i < 8; ++i) pw[i] = *(const uint32_t *) (blk + 4 + 4 * i);
+        }
+    };
+    auto loadX = [&](int k0, float (*v)[8]) {
+#pragma unroll
+        for (int e = 0; e < NB; ++e) {
+            const int idx = tid + e * NT, tt = idx / 8, kp = (idx % 8) * 8, t = t0 + tt;
+            float4 a = make_float4(0, 0, 0, 0), b = a;
+            if (t < T) {
+                const float * src = g.x + (size_t) (xrow ? xrow[t] : t) * xs + k0 + kp;
+                a = *(const float4 *) src; b = *(const float4 *) (src + 4);
+            }
+            v[e][0] = a.x; v[e][1] = a.y; v[e][2] = a.z; v[e][3] = a.w;
+            v[e][4] = b.x; v[e][5] = b.y; v[e][6] = b.z; v[e][7] = b.w;
+        }
+    };
+    uint32_t wr[8], sw;
+    float xv[NB][8];
+    loadW(0, wr, sw);
+    loadX(0, xv);
+    for (int k0 = 0; k0 < g.K; k0 += 64) {
+#pragma unroll
+        for (int e = 0; e < NB; ++e) {   // X: thread -> token idx/8, 8 columns
+            const int idx = tid + e * NT, tt = idx / 8, kp = (idx % 8) * 8;
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                const _Float16 h = (_Float16) xv[e][i];
+                Xh[tt][kp + i] = h;
+                Xl[tt][kp + i] = (_Float16) (xv[e][i] - (float) h);
+            }
+        }
+        __syncthreads();
+        uint32_t cw[8], cs = sw;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) cw[i] = wr[i];
+        if (k0 + 64 < g.K) { loadW(k0 + 64, wr, sw); loadX(k0 + 64, xv); }
+#pragma unroll
+        for (int s = 0; s < 4; ++s) {
+            h16v a;
+            float sc;
+            // each half of the wave decodes 8 of the row's 16 values and swaps them with the other half
+            _Float16 own[8];
+            if (g.type == T_Q8P) {
+#pragma unroll
+                for (int i = 0; i < 8; ++i) own[i] = (_Float16) (int8_t) ((cw[2 * s + (i >> 2)] >> (8 * (i & 3))) & 0xFF);
+                sc = __half2float(__builtin_bit_cast(__half, (uint16_t) (s < 2 ? (cs & 0xFFFF) : (cs >> 16))));
+            } else {
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    const uint32_t bb = (cw[2 * s + (i >> 2)] >> (8 * (i & 3))) & 0xFF;
+                    own[i] = (_Float16) sFp4[hf ? (bb >> 4) : (bb & 0xF)];
+                }
+                sc = gUe4m3[(cs >> (8 * s)) & 0xFF];
+            }
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const uint32_t pk = (uint32_t) __builtin_bit_cast(uint16_t, own[2 * i]) |
+                                    ((uint32_t) __builtin_bit_cast(uint16_t, own[2 * i + 1]) << 16);
+                const uint32_t ot = __shfl_xor(pk, 16, 32);
+                const _Float16 o0 = __builtin_bit_cast(_Float16, (uint16_t) (ot & 0xFFFF));
+                const _Float16 o1 = __builtin_bit_cast(_Float16, (uint16_t) (ot >> 16));
+                a[2 * i] = hf ? o0 : own[2 * i];
+                a[2 * i + 1] = hf ? o1 : own[2 * i + 1];
+                a[8 + 2 * i] = hf ? own[2 * i] : o0;
+                a[8 + 2 * i + 1] = hf ? own[2 * i + 1] : o1;
+            }
+            if (!rok) sc = 0.0f;
+            float scr[8];
+#pragma unroll
+            for (int i = 0; i < 8; ++i) scr[i] = __shfl(sc, 2 * i + (lane >> 4), 32);
+#pragma unroll
+            for (int b = 0; b < NB; ++b) {
+                if (b > 0 && t0 + tw + 16 * b >= T) break;   // wave-uniform: no tokens left
+                h16v bh, bl;
+                const int tb = tw + 16 * b + m;
+#pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    const h8v vh = *(const h8v *) &Xh[tb][s * 16 + 8 * i], vl = *(const h8v *) &Xl[tb][s * 16 + 8 * i];
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) { bh[8 * i + j] = vh[j]; bl[8 * i + j] = vl[j]; }
+                }
+                f8v z = {};
+                z = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, bh, z);
+                z = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, bl, z);
+#pragma unroll
+                for (int i = 0; i < 8; ++i) acc[b][i] += z[i] * scr[i];
+            }
+        }
+        __syncthreads();
+    }
+    // lane holds rows 2i + lane/16 of the wave's 16, token lane%16
+#pragma unroll
+    for (int b = 0; b < NB; ++b) {
+        const int t = t0 + tw + 16 * b + m;
+        if (t >= T) break;
+        const int yr = yrow ? yrow[t] : t;
+        const float f = yscale_fixed * (yscale_row ? yscale_row[yr] : 1.0f);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int nn = n0 + rw + 2 * i + (lane >> 4);
+            if (nn < g.N) g.y[(size_t) yr * ys + nn] = acc[b][i] * f;
+        }
+    }
+}
+// k_gemm on the matrix cores where a segment's type allows (the others as before); grid (row tiles, T / 64), 256 threads
+__global__ void k_gemm_w(GSegs S, int T) {
+    fp4_init();
+    const int tile = blockIdx.x;
+    int j = 0;
+    while (tile >= S.tstart[j + 1]) ++j;
+    __syncthreads();
+    if (wmma_ok(S.s[j])) wmma_tile<64, 2>(S.s[j], (tile - S.tstart[j]) * 64, T, blockIdx.y * 64, nullptr, nullptr, 1.0f, nullptr);
+    else
+        for (int h = 0; h < 2; ++h)
+            gemm_tile<32>(S.s[j], (tile - S.tstart[j]) * 64, T, blockIdx.y * 64 + 32 * h, nullptr, nullptr, 1.0f, nullptr);
+}
+// k_gemm_exp on the matrix cores: 128 threads, entry tiles of EXP_BT (each wave its 16 rows x all EXP_BT entries)
+__global__ void k_gemm_exp_w(const uint8_t * W, uint32_t type, size_t ebytes, size_t rb, int N, int K, const float * x,
+                             float * y, const int * offs, const int * list, int xdiv, const float * scale,
+                             const float * wts, int n_exp) {
+    fp4_init();
+    // grid (row tiles, an upper bound of the tiles)
+    if ((int) blockIdx.y >= offs[n_exp + 1]) return;
+    const int e = offs[n_exp + 2 + 2 * blockIdx.y], c0 = offs[e], cnt = offs[e + 1] - c0,
+              t0 = offs[n_exp + 3 + 2 * blockIdx.y];
+    __shared__ int xr[EXP_BT], yr[EXP_BT];
+    if (threadIdx.x < EXP_BT) {
+        const int i = t0 + threadIdx.x < cnt ? list[c0 + t0 + threadIdx.x] : 0;
+        xr[threadIdx.x] = i / xdiv;
+        yr[threadIdx.x] = i;
+    }
+    __syncthreads();
+    Seg g{W + (size_t) e * ebytes, x, y, rb, N, K, type};
+    wmma_tile<EXP_BT, EXP_BT / 16>(g, blockIdx.x * 64, cnt, t0, xr - t0, yr - t0, scale ? scale[e] : 1.0f, wts);
 }
 // y[t][c] = sum over the token's k entries of yd[t*k + j][c]
 __global__ void k_exp_sum(const float * yd, float * y, int C, int k) {
@@ -1073,7 +1338,7 @@ struct Slot {     // a layer visit's cache
 };
 
 struct Runner {
-    static constexpr int TM = 128;     // the largest prompt chunk
+    static constexpr int TM = 1024;    // the largest prompt chunk
     Model & m;
     int ctx;
     std::vector<Slot> slots;
@@ -1121,7 +1386,7 @@ struct Runner {
         relb = dalloc(T * m.H * m.ext);
         part = dalloc(T * m.H * nsplit_max * (m.D + 2));
         CK(hipMalloc(&ids, T * m.k_exp * 4));
-        CK(hipMalloc(&offs, (m.n_exp + 1) * 4));
+        CK(hipMalloc(&offs, (m.n_exp + 2 + 2 * ((T * m.k_exp + EXP_BT - 1) / EXP_BT + m.n_exp)) * 4));
         CK(hipMalloc(&list, T * m.k_exp * 4));
         CK(hipStreamCreate(&st));
         CK(hipMalloc(&dpos, 4)); CK(hipMalloc(&dtok, T * 4)); CK(hipHostMalloc(&hpos, (T + 1) * 4));
@@ -1155,7 +1420,7 @@ struct Runner {
             S.tstart[S.n + 1] = S.tstart[S.n] + (a.N + 63) / 64;
             ++S.n;
         }
-        hipLaunchKernelGGL(k_gemm, dim3(S.tstart[S.n], (T + 31) / 32), dim3(256), 0, st, S, T);
+        hipLaunchKernelGGL(k_gemm_w, dim3(S.tstart[S.n], (T + 63) / 64), dim3(256), 0, st, S, T);
     }
     // mix(blocks, cur, queries) -> out[T][nq][C], each output RMS-normed with nw.w[j] when given
     void mix(int T, const std::vector<float *> & blocks, const float * cur, const float * queries, int nq, float * out,
@@ -1270,9 +1535,22 @@ struct Runner {
                            sl.K, sl.V, sl.cap);
         const int span = l.swa ? std::min(m.swa, ctx) : ctx;
         hipLaunchKernelGGL(k_relbias, dim3(m.H, T), dim3(256), 0, st, r, l.rel_bias, m.nrel, m.ext, sinkv, relb);
-        const int splitsz = std::max(64, (span + nsplit_max - 1) / nsplit_max), nsplit = (span + splitsz - 1) / splitsz;
-        hipLaunchKernelGGL(k_attn_split<3>, dim3(m.Hkv, nsplit, T), dim3(128), 0, st, q, sl.K, sl.V, sl.cap, dpos, span,
-                           m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit);
+        int nsplit;
+        if (T == 1) {
+            const int splitsz = std::max(64, (span + nsplit_max - 1) / nsplit_max);
+            nsplit = (span + splitsz - 1) / splitsz;
+            hipLaunchKernelGGL(k_attn_split<3>, dim3(m.Hkv, nsplit, T), dim3(128), 0, st, q, sl.K, sl.V, sl.cap, dpos,
+                               span, m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit);
+        } else {
+            // the keys a 16-token tile can see: at most span + 15; split so the card has enough blocks
+            const int nk = std::min(span + 15, pos + T), tiles = (T + 15) / 16;
+            nsplit = std::min(nsplit_max, std::max(1, (nk + 511) / 512));
+            while (nsplit > 1 && m.Hkv * tiles * nsplit > 4096) --nsplit;
+            const int splitsz = ((nk + nsplit - 1) / nsplit + 31) / 32 * 32;
+            nsplit = (nk + splitsz - 1) / splitsz;
+            hipLaunchKernelGGL(k_attn_pf, dim3(m.Hkv, tiles, nsplit), dim3(256), 0, st, q, sl.K, sl.V, sl.cap, dpos,
+                               span, m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit, T);
+        }
         hipLaunchKernelGGL(k_attn_combine, dim3(m.H, T), dim3(m.D), 0, st, part, nsplit, g, att, m.D);
         mmv(T, {MV{&l.wo, att, t0, 0}});
         float * h1 = pool[pool_i++];
@@ -1308,12 +1586,12 @@ struct Runner {
         } else {
             const int ne = T * m.k_exp;
             hipLaunchKernelGGL(k_group, dim3(1), dim3(1024), 0, st, ids, ne, m.n_exp, offs, list);
-            hipLaunchKernelGGL(k_gemm_exp, dim3((2 * m.F + 63) / 64, m.n_exp, (T + 15) / 16), dim3(256), 0, st, l.gu,
+            hipLaunchKernelGGL(k_gemm_exp_w, dim3((2 * m.F + 63) / 64, (T * m.k_exp + EXP_BT - 1) / EXP_BT + m.n_exp), dim3(128), 0, st, l.gu,
                                l.gu_type, l.gu_ebytes, l.gu_rb, 2 * m.F, C, t1, gu, offs, list, m.k_exp, l.gu_scale,
-                               (const float *) nullptr);
+                               (const float *) nullptr, m.n_exp);
             hipLaunchKernelGGL(k_situ, dim3(ew(m.F * ne)), dim3(256), 0, st, gu, hh, m.F, ne, m.situ_b, m.situ_lb);
-            hipLaunchKernelGGL(k_gemm_exp, dim3((C + 63) / 64, m.n_exp, (T + 15) / 16), dim3(256), 0, st, l.down,
-                               l.down_type, l.down_ebytes, l.down_rb, C, m.F, hh, yd, offs, list, 1, l.down_scale, wts);
+            hipLaunchKernelGGL(k_gemm_exp_w, dim3((C + 63) / 64, (T * m.k_exp + EXP_BT - 1) / EXP_BT + m.n_exp), dim3(128), 0, st, l.down,
+                               l.down_type, l.down_ebytes, l.down_rb, C, m.F, hh, yd, offs, list, 1, l.down_scale, wts, m.n_exp);
             hipLaunchKernelGGL(k_exp_sum, dim3(ew(C), T), dim3(256), 0, st, yd, t2, C, m.k_exp);
         }
         hipLaunchKernelGGL(k_conv_res, dim3(ew(C)), dim3(256), 0, st, t2, l.ffn_conv, sl.hist + 6 * Ck + 3 * C, C,
@@ -1401,7 +1679,7 @@ struct Runner {
             GSegs S{};
             S.n = 1; S.tstart[0] = 0; S.tstart[1] = (m.head.N + 63) / 64;
             S.s[0] = Seg{m.head.w, t1, logits, m.head.rb, m.head.N, m.head.K, m.head.type, 0, m.vocab_pad};
-            hipLaunchKernelGGL(k_gemm, dim3(S.tstart[1], (T + 31) / 32), dim3(256), 0, st, S, T);
+            hipLaunchKernelGGL(k_gemm_w, dim3(S.tstart[1], (T + 63) / 64), dim3(256), 0, st, S, T);
         } else mv(m.head, t1 + (size_t) (T - 1) * C, logits);
         const int nl = all_logits ? T : 1;
         hipLaunchKernelGGL(k_softcap, dim3(ew(nl * m.vocab_pad)), dim3(256), 0, st, logits, nl * m.vocab_pad, m.softcap);

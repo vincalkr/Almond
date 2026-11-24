@@ -99,3 +99,32 @@ Where the time goes now (rocprofv3, 10.2 ms of GPU time a token at 1K): experts 
 24 MB) and down 1.2 ms, the projections 2.1 ms (about 575 GB/s), the head 0.53 ms (930 GB/s, at the bandwidth),
 mixes 0.9 ms, attention 0.8 ms; about 1.9 ms more between kernels. Not done yet: KV cache in F16/q8 (F32 today: 128K
 does not fit), the serve protocol, batched prompts.
+
+## Step 3, prompts (2026-11-24)
+
+`--bench-prefill N --chunk C` times a fresh N-token prompt (the text repeated) fed in chunks of C, only the last
+logits read; card 0, UD-Q4_K_XL. Correctness: the 1,024-token text in chunks against token by token, logits of the
+511 scored positions (`--dump-logits`): every row below keeps PPL 4.2009, the same top token at all 511 positions, KL
+from the token-by-token run at most 2.4e-10, and KL from Q8_0 0.00520 (128 positions). The first chunked version
+(FP32 GEMMs) differed from position 908 on (KL max 1.6e-3, a near-tie in the expert pick); the matrix-core version
+below no longer does.
+
+| Change | 4K tok/s | 32K tok/s |
+|---|---|---|
+| chunks of 128, FP32 tiled GEMM, experts grouped by expert | 331.6 | - |
+| projections, experts and head on the matrix cores (WMMA 16x16x16 F16: the weights as their exact quantized integers, the activations as two F16 parts, each 16-wide K step times its block scale in F32) | 708.6 | - |
+| chunks of 512 | 1,028.5 | 513.2 |
+| prompt attention: 16 tokens x 3 query heads a block share each key and value tile in LDS (F32, same online softmax) | 1,131.7 | 847.5 |
+| each wave reuses its decoded weights for 32 entries (experts) / 32 tokens (projections) | 1,289.2 | - |
+| chunks of 1,024 | 1,456.8 | 1,051.4 |
+| a compact list of expert tiles (no empty blocks), the next K step's weights and activations loaded while this one computes | 1,523.0 | - |
+| attention: float4 reads, the values read once for the wave's 6 rows | **1,618.4** | **1,205.2** |
+
+llama.cpp through the server, same card and file: 444.7 tok/s at 4K (ubatch 128). Decode is unchanged (84.1 tok/s
+at 1K depth). Tried without a gain: tiles of 64 entries for the experts, the half-waves sharing the weight decode
+(kept: no slower, half the decode work).
+
+Where the time goes at 4K in chunks of 1,024 (rocprofv3): the experts 43%, the attention 20%, the projections 18%.
+The experts run at about 50 TFLOPS counting both F16 parts; the two parts are what keeps the activations at F32
+precision, and are kept. At 32K the attention grows; next steps there: the scores and P . V on the matrix cores with
+the same split, and query tiles of 32.
