@@ -1,4 +1,4 @@
-# Engines and forks worth watching (swept 2026-11-22)
+# Engines and forks worth watching (swept 2026-11-22, 2026-11-24)
 
 The trees that work on the models Almond runs, on cards like ours, and what each of them carried in the last weeks.
 **Every number here is theirs, quoted as they print it** - none was measured on this machine, and the models/quantizations
@@ -166,6 +166,39 @@ weight rows on Metal, resident Qwen arithmetic when experts stream from SSD, pre
 decoding, Qwen v2 checkpoints. Nothing for ROCm/discrete AMD since our read.
 
 ---
+
+## Sweep of 2026-11-24 (commits since 11-22; their numbers, not measured here)
+
+- **mw00/project-maya v1.1.77-78.** Three same-bits HIP changes for Hy4 on RX 7900 XTX, by @Antero128:
+  #1164 replaces warp sums' `__shfl_xor` (`ds_bpermute_b32` through LDS on HIP) with DPP / `v_permlanex16` register
+  moves, same xor order and bits (`ds_bpermute` in hy4's code objects 166,904 -> 32,536). #1151 packs Hy4's short
+  attention-head rows (`k_b` Q8_0 k=192, `v_b` Q6_K k=512) 2-4 to a warp: kernel +34%, end to end +0.5%. #1150 turns on
+  weight read-ahead on gfx1100: +1.7%. #1168: under `--tp` with the CPU lane, a token window's sums on one host thread
+  (helper threads were spinning on the lane's cores): 24.8 -> 39.4 tok/s on Hy4 Maya-M. Maya-S (all experts in VRAM,
+  `--tp 2` on two 7900 XTX) reports 108 tok/s at 64K. #1154 Inkling DSpark: on an RTX 3090 at 262K, FP8 KV, new code 124
+  -> 200 tok/s, prose 123 -> 134, same tokens; drafting up to 1M with the experts that do not fit in RAM.
+  **For us:** our vendored ggml's `warp_reduce_sum` still uses `__shfl_xor_sync` on HIP (no DPP): #1164's change applies
+  to it and to `src/inkling/native`, bit for bit.
+- **Indras-Mirror/Xolotl (Inkling, RTX 4090).** Decode 113-127 tok/s, 136-140 with DSpark; prefill 3,500 at 8K and
+  4,190 at 32K served. 512K on one 24 GB card with `--kv-type k8v4` (q8_0 keys, q4_0 values with a randomised Hadamard
+  rotation of the 4-bit leg): KL from f16 3.6e-4 (q8_0) and 8e-4 (k8v4), PPL unchanged; decode 127 / 118 / 100 / 56
+  at 7K / 30K / 117K / 477K. Long context 30 -> 55 tok/s at 477K from one lane per cell in the decode attention, a
+  parallel split merge and positional masks. Fused loop controllers (BF16, 3 kernels each) 119 -> 127; per-expert
+  scales folded into the MoE finish and a BF16 router 127 -> 130. Also an Inkling LoRA trainer.
+- **freriadoc/Avalon (RX 7900 XT).** ROCm 10.2.0 (TheRock) against 7.2.4: prefill 3,225 / 3,330 against 2,888 /
+  3,112 tok/s at 32K / 131K, same decode. Experts' host memory in 4 KiB pages, not transparent huge pages: compaction
+  moved registered pages and KFD stalled the GPU (4 runs in 6 hung with 2 MiB). The MTP draft's late experts loaded
+  with O_DIRECT into anonymous memory (page-cache pages were dropped and refaulted, run hung). Captured graphs kept by
+  count, not dropped after 10 s (our vendored ggml predates that sweep, #21611, so not our problem).
+- **ggml-org/llama.cpp.** Inkling: #32855 mix() weighted sum, #32940 clip with `ggml_l2_norm`; HIP MMQ configs for
+  VEGA20 / CDNA1 (not ours); #32500 fused RMS_NORM + MUL + ROPE (CUDA); #32859 faster BPE tokenization.
+- **Niko1221/Strata v0.2.21.** Inkling CUDA: prefill MoE 64 tokens of an expert per tile (same bits, sm_80-89), L2
+  prefetch of FP4 experts on sm_120, auto prefill chunk by free memory, K/V growth into a host tail. Nothing for HIP.
+- **nace-ai/kapitsa 0.2.40.** Inkling on Metal: 1M context with KV growth, Q8_0 packing of BF16 dense projections at
+  load (fast profile), grouped MoE prefill with FlashAttention. Nothing for HIP.
+- **DevDock-AI/Speedy 0.5.5.** A coding-tuned MTP drafter for Qwen3.8-Flash-Next (+10% decode on Signal AP-Q4_K_XL,
+  +4% on UD-Q4_K_XL), on Hugging Face `DevDock-AI/Qwen3.8-Flash-Next-Speedy-MTP`.
+- No commits since 11-22: antirez/ds4, elpis-on-7900xtx, exllamav3-rocm(-moe), SILVERTHRONE32, Strata-EXL3-fork.
 
 ## What this sweep would change here, in the order it costs least
 
