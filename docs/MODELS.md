@@ -768,3 +768,19 @@ is bound by ~7,400 small kernels a token, not by bytes. Details, memory and what
 DSpark (opt-in, `local/inkling-dspark-local.json`, `./almond -m inkling-dspark`): Unsloth's drafter, 3 greedy drafts
 checked by the request's own sampler, on `almond-inkling-dspark` (llama.cpp PR #32218). Through the server, card 0,
 600-token answers, reasoning off: 41.4-46.3 tok/s at temperature 0 and 1.0 against 29.2-29.4 without it.
+
+### Qwen3.8-27B images on the card in lent memory (2026-11-24)
+
+The one-card configurations (`local/qwen27-local-vision.json`, `local/qwen27-local-dspine.json`) run the image
+encoder on card 0 only while a request's pictures are encoded, in memory the engine lends it (`VLEND` /
+`VRECLAIM`, as GLM and Inkling): each layer's FFN weights sit in their own buffer, the last layers' buffers are freed
+for the encoder (2.1 GB in 1 ms when 6 GB were asked) and allocated again and read back from the GGUF afterwards
+(183 ms); generations before and after are identical, decode speed the same (300 tokens in 2,992-2,996 ms either
+way). `QWEN35_NO_LEND=1` keeps one buffer. The encoder runs with `f32_matmul` and `no_flash_attn`: against a
+reference made from the same mmproj converted to F32 and run on the CPU without flash attention, the CPU encoder
+these configurations used (BF16 weights, which ggml's CPU path also multiplies in BF16) ended at cosine 0.970 -
+0.993, the GPU at its defaults at 0.994 - 0.998, the GPU with both settings at 0.99999 (three pictures). A picture
+now takes about 0.1 s to encode instead of 2.6 s; through the server the first token of a 321-token picture prompt
+came after 1.34 s. At 300 image tokens the encoder needs 1.70 GB, which card 0 has free, so nothing is lent unless
+the card is fuller; card 0 settles at the same use after every request. The two-card configurations (`--tp`) keep
+the CPU encoder: the split weights are not lendable yet.

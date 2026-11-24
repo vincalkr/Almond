@@ -42,8 +42,11 @@
     "exe": "build-vision/build/bin/almond-vision",
     "mmproj": "models/qwen38-27b/mmproj-Qwen3.8-27B-BF16.gguf",
     "model": "models/qwen38-27b/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
-    "gpu": false,
+    "gpu": true,
     "max_tokens": 300,
-    "threads": 12
+    "no_flash_attn": true,
+    "f32_matmul": true,
+    "cuda_device": 0,
+    "on_demand": true
   }
 }

@@ -2473,7 +2473,9 @@ def engine_args(cfg: dict) -> list[str]:
     if isinstance(cfg.get("vision"), dict) and "--vision" not in args:
         args.append("--vision")
         note = "added --vision"
-        if cfg["vision"].get("gpu") and "--vram-reserve-mib" not in args:
+        # (an on-demand encoder of an engine that lends its memory needs no reserve: it runs in the lent memory)
+        lends = cfg["vision"].get("on_demand") is True and "--glm-pack" not in args and LENDERS & set(args)
+        if cfg["vision"].get("gpu") and "--vram-reserve-mib" not in args and not lends:
             args += ["--vram-reserve-mib", "700"]
             note += " and --vram-reserve-mib 700"
         print(f'[almond] the config has a "vision" section but no --vision in its args: {note} (run setup again with '
@@ -2709,7 +2711,7 @@ def hip_env_guard(env: dict, cfg: dict) -> list[str]:
     return said
 
 
-LENDERS = {"--glm-pack", "--inkling"}   # the engines' flags whose engines answer VLEND / VRECLAIM
+LENDERS = {"--glm-pack", "--inkling", "--qwen35"}   # the engines' flags whose engines answer VLEND / VRECLAIM
 
 
 def vision_env(cfg: dict, env: dict) -> dict:
@@ -6222,7 +6224,7 @@ def main() -> int:
             on_demand = vcfg.get("on_demand") is True
             if on_demand and not LENDERS & set(cfg.get("args") or []):   # the engines that answer VLEND / VRECLAIM
                 raise SystemExit("[almond] images: \"on_demand\" needs an engine that lends its memory (VLEND / VRECLAIM: "
-                                 "GLM's, Inkling's); "
+                                 "GLM's, Inkling's, Qwen3.8-27B's on one card); "
                                  "DeepSeek's engine loads its encoder itself (--vision)")
             if on_demand:                               # the GLM engine lends the encoder its expert pool's tail
                 fp = vision_footprint(vcfg, vision_env(cfg, env),
