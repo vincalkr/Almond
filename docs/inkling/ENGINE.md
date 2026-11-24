@@ -228,8 +228,11 @@ dflash / dspark graphs (no llama.cpp code linked):
   the same distribution as without the drafter. The convolution states of the rejected tail are rebuilt from the
   state before the batch and the batch's inputs, which the verification records (`k_spec_roll`); the KV rows past
   the kept tokens are rewritten later. `--spec-test` runs a text as verify(4) / keep 2: KL from the token-by-token path
-  max 2e-11 over 511 positions. At temperature 0 the 200 and 400 generated tokens are the same, token for token, with
-  and without the drafter.
+  max 2e-11 over 511 positions. At temperature 0 with F32 KV the 300 generated tokens are the same, token for token,
+  with and without the drafter. With the served F16 KV they can part at a close pick (here at token 129, top two 0.15
+  apart): the verification batch computes K / V with another summation order (about 1e-7), a few values round to the
+  other F16 neighbour, and the model carries that on, as between prompt chunks and the decode (step 3). At that token
+  the token-by-token path picks what the drafted run picked.
 - Small batches (the verification, the drafter's block) go through a matvec that reads each row once for up to 16
   tokens (`k_mmvT`), and the experts through the decode kernels per entry; the tile GEMMs wasted most of a 64-token
   tile there (a 4-token verification went from 58.7 to about 20 ms).
@@ -261,3 +264,13 @@ Found on the way: the server does not forward `temperature=0` (serve/server.py `
 temperature is the engine's greedy default), but both Inkling engines defaulted to 1.0, so a request at temperature
 0 was sampled at 1.0. Both now default to greedy, as hy4_serve does; requests without a temperature still get the
 configuration's 1.0 from the server.
+
+## Step 7, fewer launches (2026-11-24)
+
+Fused, with each kernel's arithmetic kept (logits unchanged: KL 3.5e-13 from the token-by-token path, the same as
+before): the one-token K / V convolution and the relative bias (every query head, once R is clipped) into `k_qkvr`
+(96 launches a token fewer), the controllers' output and the RMS norm after them into `k_ctrl_apply_n` (48 fewer).
+Decode at 1K depth, 128K F16 configuration: 83.2 -> 84.1 tok/s (+1%). Tried and dropped: merging the attention splits
+in the last split's block (an atomic counter, so no `k_attn_combine` launch): 72.5 tok/s, the merge of 64 splits by
+one block per KV head is slower than its own launch. What is left of the small kernels is the mixes (120 a token,
+about 7 us each, dependent on the layer before) and the router / controller matvecs.

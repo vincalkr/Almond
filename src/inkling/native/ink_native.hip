@@ -668,6 +668,23 @@ __global__ void k_ctrl_cat(Ctl P, int C) {
         for (int i = threadIdx.x; i < C; i += blockDim.x) P.cat[j][(size_t) t * 8 * C + h * C + i] = x[i] * r;
     }
 }
+// k_ctrl_apply then the RMS norm of each output times w[j] (k_rms_n's arithmetic: 256 threads, same sums); grid (n, T)
+__global__ void k_ctrl_apply_n(Ctl P, int C, Norms W, float eps) {
+    const int j = blockIdx.x, t = blockIdx.y;
+    float * out = P.out[j] + (size_t) t * C;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < C; i += blockDim.x) {
+        const float x = P.x[j][(size_t) t * P.xs + i];
+        const size_t o4 = (size_t) t * 4 * C + i;
+        const float y = x - tanhf(P.f[j][o4]) * x + tanhf(P.g[j][o4]) * P.m[j][(size_t) t * P.ms + i];
+        out[i] = y;
+        ss += y * y;
+    }
+    ss = bsum(ss);
+    const float r = rsqrtf(ss / C + eps);
+    const float * w = W.w[j];
+    for (int i = threadIdx.x; i < C; i += blockDim.x) out[i] = out[i] * r * (w ? w[i] : 1.0f);
+}
 __global__ void k_ctrl_apply(Ctl P, int C) {
     const int j = blockIdx.y, t = blockIdx.z, i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= C) return;
@@ -737,9 +754,16 @@ __device__ __forceinline__ float4 kv_load(const void * C, size_t row, int l4, in
     }
     return *(const float4 *) ((const float *) C + row * 128 + l4 * 4);
 }
+// fused into k_qkvr (decode): the K / V short convolution of one token (k_conv2's arithmetic, T = 1), and the
+// relative bias of every query head (k_relbias's arithmetic) once its R is clipped
+struct QFuse {
+    const float * cw[2]; float * hist[2]; const float * dyn[2]; float cscale; int dyn_stride; int conv;
+    const float * table; int ext; const float * sink; float * bias;
+};
+__device__ __forceinline__ bool sc_is_q(int b, int H, int Hkv) { return b < H + 2 * Hkv; }   // not an R head
 __global__ void k_qkvr(float * q, const float * k, const float * v, float * r, const float * qs, const float * rs, int H,
                        int Hkv, int D, int nrel, float th, float rth, const int * pos, float alpha, float floor_, float eps,
-                       void * Kc, void * Vc, int cap, int q8) {
+                       void * Kc, void * Vc, int cap, int q8, QFuse fz = QFuse{}) {
     int b = blockIdx.x;
     const int tk = blockIdx.y, p = *pos + tk;
     q += (size_t) tk * H * D; k += (size_t) tk * Hkv * D; v += (size_t) tk * Hkv * D; r += (size_t) tk * H * nrel;
@@ -755,6 +779,19 @@ __global__ void k_qkvr(float * q, const float * k, const float * v, float * r, c
     else if ((b -= H) < Hkv) { x = (float *) k + (size_t) b * D; dst = Kc; drow = (size_t) (p % cap) * Hkv + b; }
     else if ((b -= Hkv) < Hkv) { x = (float *) v + (size_t) b * D; dst = Vc; drow = (size_t) (p % cap) * Hkv + b; vnorm = true; }
     else { b -= Hkv; x = r + (size_t) b * nrel; sc = rs + (size_t) b * nrel; n = nrel; t = rth; f2 = tau; }
+    if (fz.conv && dst) {   // one token: the convolution of this head's channels first (thread = channel)
+        const int j = vnorm ? 1 : 0, i = threadIdx.x, c = b * D + i, Ck = Hkv * D;
+        float * hist = fz.hist[j];
+        const float * w = fz.cw[j];
+        const float h0 = hist[c], h1 = hist[Ck + c], h2 = hist[2 * Ck + c], vin = x[i];
+        float o = w[c * 4 + 0] * h0 + w[c * 4 + 1] * h1 + w[c * 4 + 2] * h2 + w[c * 4 + 3] * vin;
+        if (fz.dyn[j]) {
+            const float * tp = fz.dyn[j] + (c / D) * 4;
+            o += tp[0] * vin + tp[1] * h2 + tp[2] * h1 + tp[3] * h0;
+        }
+        x[i] = (vin + o) * fz.cscale;
+        hist[c] = h1; hist[Ck + c] = h2; hist[2 * Ck + c] = vin;
+    }
     float a = 0.0f;
     for (int i = threadIdx.x; i < n; i += blockDim.x) { const float y = x[i] * (sc ? sc[i] : 1.0f); a += y * y; }
     a = bsum(a);
@@ -772,6 +809,18 @@ __global__ void k_qkvr(float * q, const float * k, const float * v, float * r, c
             uint8_t * rb = (uint8_t *) dst + drow * KVQ8_ROW;
             rb[i] = (uint8_t) (int8_t) roundf(y * id);
             if ((i & 31) == 0) ((__half *) (rb + 128))[i >> 5] = __float2half(d);
+        }
+    }
+    if (fz.bias && n == nrel && !sc_is_q(blockIdx.x, H, Hkv)) {   // an R head: its relative bias, as k_relbias
+        __syncthreads();
+        const int h = b, ext = fz.ext;
+        const float sk = fz.sink[(size_t) tk * H + h];
+        float * bo = fz.bias + ((size_t) tk * H + h) * ext;
+        for (int d = threadIdx.x; d < ext; d += blockDim.x) {
+            const float * tb = fz.table + (size_t) d * nrel;
+            float bb = 0.0f;
+            for (int i = 0; i < nrel; ++i) bb += x[i] * tb[i];
+            bo[d] = bb - sk;
         }
     }
 }
@@ -1943,7 +1992,7 @@ struct Runner {
     }
     // n loop controllers at once: out[j] = control(x[j], msg[j]) with the layer's controller c0 + j
     void controls(int T, const Layer & l, int c0, int n, const float * const * xs, int xstride, const float * const * ms,
-                  int mstride, float * const * outs) {
+                  int mstride, float * const * outs, const float * const * nw) {
         const int C = m.C;
         Ctl P{};
         P.xs = xstride; P.ms = mstride;
@@ -1986,7 +2035,9 @@ struct Runner {
             }
             gemm_f32(S, T);
         }
-        hipLaunchKernelGGL(k_ctrl_apply, dim3(ew(C), n, T), dim3(256), 0, st, P, C);
+        Norms W{};
+        for (int j = 0; j < n; ++j) W.w[j] = nw[j];
+        hipLaunchKernelGGL(k_ctrl_apply_n, dim3(n, T), dim3(256), 0, st, P, C, W, m.eps);   // with the norms
     }
 
     // one layer visit for T tokens: cur is replaced by the visit's output (a new pool buffer); the input stays as it
@@ -2013,13 +2064,9 @@ struct Runner {
             mix(T, blocks, cur, l.res_q, l.n_res_q, scr);
             const float * xs[3], * ms[3];
             for (int j = 0; j < 3; ++j) { xs[j] = scr + (size_t) (l.swa ? 0 : j) * C; ms[j] = messages + (size_t) j * C; }
-            controls(T, l, 0, 3, xs, l.n_res_q * C, ms, 4 * C, inp);
-            Norms R{};
-            for (int j = 0; j < 3; ++j) {
-                R.in[j] = inp[j]; R.out[j] = inp[j];
-                R.w[j] = l.swa ? l.attn_norm : (j == 0 ? l.qn : j == 1 ? l.kn : l.vn);
-            }
-            hipLaunchKernelGGL(k_rms_n, dim3(3, T), dim3(256), 0, st, R, C, m.eps);
+            const float * nw[3];
+            for (int j = 0; j < 3; ++j) nw[j] = l.swa ? l.attn_norm : (j == 0 ? l.qn : j == 1 ? l.kn : l.vn);
+            controls(T, l, 0, 3, xs, l.n_res_q * C, ms, 4 * C, inp, nw);
             for (int j = 0; j < 3; ++j) in3[j] = inp[j];
         }
         // projections, one launch
@@ -2031,16 +2078,23 @@ struct Runner {
                     MV{&l.sink, in3[0], sinkv, xs3}, MV{&l.gate, in3[0], g, xs3}, MV{&l.kproj, in3[1], dk, xs3},
                     MV{&l.vproj, in3[2], dv, xs3}});
         const float cs = 1.0f / sqrtf((float) ((l.swa ? 1 : 2) * 4 + 1));
-        hipLaunchKernelGGL(k_conv2, dim3(ew(Ck), 2), dim3(256), 0, st,
-                           Conv2{{k, v}, {l.kconv, l.vconv}, {sl.hist, sl.hist + 3 * Ck},
-                                 {l.swa ? nullptr : dk, l.swa ? nullptr : dv},
-                                 {spec_rec ? sl.spec : nullptr, spec_rec ? sl.spec + (3 + SPEC_T) * Ck : nullptr}},
-                           Ck, m.D, cs, T, 4 * m.Hkv);
+        // one token: the convolution goes into k_qkvr; the relative bias always does
+        QFuse fz{};
+        fz.table = l.rel_bias; fz.ext = m.ext; fz.sink = sinkv; fz.bias = relb;
+        if (T == 1) {
+            fz.conv = 1;
+            fz.cw[0] = l.kconv; fz.cw[1] = l.vconv; fz.hist[0] = sl.hist; fz.hist[1] = sl.hist + 3 * Ck;
+            fz.dyn[0] = l.swa ? nullptr : dk; fz.dyn[1] = l.swa ? nullptr : dv; fz.cscale = cs;
+        } else
+            hipLaunchKernelGGL(k_conv2, dim3(ew(Ck), 2), dim3(256), 0, st,
+                               Conv2{{k, v}, {l.kconv, l.vconv}, {sl.hist, sl.hist + 3 * Ck},
+                                     {l.swa ? nullptr : dk, l.swa ? nullptr : dv},
+                                     {spec_rec ? sl.spec : nullptr, spec_rec ? sl.spec + (3 + SPEC_T) * Ck : nullptr}},
+                               Ck, m.D, cs, T, 4 * m.Hkv);
         hipLaunchKernelGGL(k_qkvr, dim3(2 * m.H + 2 * m.Hkv, T), dim3(128), 0, st, q, k, v, r, l.q_clip, l.rel_clip, m.H,
                            m.Hkv, m.D, m.nrel, m.qk_clip, m.rel_clip, dpos, l.swa ? 0.0f : m.alpha, m.floor_, m.eps,
-                           sl.K, sl.V, sl.cap, kvt);
+                           sl.K, sl.V, sl.cap, kvt, fz);
         const int span = l.swa ? std::min(m.swa, ctx) : ctx;
-        hipLaunchKernelGGL(k_relbias, dim3(m.H, T), dim3(256), 0, st, r, l.rel_bias, m.nrel, m.ext, sinkv, relb);
         int nsplit;
         if (T == 1 || vmode) {
             const int splitsz = 32;   // the least a split; the kernel spreads the keys present over nsplit
@@ -2078,8 +2132,8 @@ struct Runner {
             mix(T, blocks, h1, l.ffn_res_q, 1, t2);
             const float * xs[1] = {t2}, * ms[1] = {messages + 3 * (size_t) C};
             float * os[1] = {t1};
-            controls(T, l, 3, 1, xs, C, ms, 4 * C, os);
-            hipLaunchKernelGGL(k_rms_n, dim3(1, T), dim3(256), 0, st, Norms{{t1}, {l.ffn_norm}, {t1}}, C, m.eps);
+            const float * nw[1] = {l.ffn_norm};
+            controls(T, l, 3, 1, xs, C, ms, 4 * C, os, nw);
         }
         if (T == 1) {
             Segs S{};
