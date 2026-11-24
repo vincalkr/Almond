@@ -39,7 +39,8 @@
 namespace {
 
 // ---------------------------------------------------------------- GGUF
-enum : uint32_t { T_F32 = 0, T_F16 = 1, T_Q8_0 = 8, T_BF16 = 30, T_NVFP4 = 40 };
+enum : uint32_t { T_F32 = 0, T_F16 = 1, T_Q8_0 = 8, T_BF16 = 30, T_NVFP4 = 40,
+                  T_Q8P = 1008 };   // ours: Q8_0 repacked at load, a row = its K int8 quants, then its K/32 F16 scales
 
 struct Tensor {
     std::string name;
@@ -56,6 +57,7 @@ size_t row_bytes(uint32_t type, int64_t n) {
         case T_F32: return 4 * n;
         case T_F16: case T_BF16: return 2 * n;
         case T_Q8_0: return n / 32 * 34;
+        case T_Q8P: return n + n / 32 * 2;
         case T_NVFP4: return n / 64 * 36;
     }
     std::fprintf(stderr, "unknown tensor type %u\n", type);
@@ -149,12 +151,32 @@ struct Gguf {
         return it->second;
     }
     Tensor * find(const std::string & n) { auto it = t.find(n); return it == t.end() ? nullptr : &it->second; }
-    Tensor & need(const std::string & n) {
+    // upload a tensor; Q8_0 is repacked into T_Q8P (the same values: aligned 8-byte quant loads) unless raw
+    Tensor & need(const std::string & n, bool raw = false) {
         Tensor * x = find(n);
         if (!x) { std::fprintf(stderr, "gguf: no tensor %s\n", n.c_str()); std::exit(1); }
         if (!x->dev) {
-            CK(hipMalloc(&x->dev, x->bytes));
-            CK(hipMemcpy(x->dev, x->host, x->bytes, hipMemcpyHostToDevice));
+            if (x->type == T_Q8_0 && !raw) {
+                const int64_t K = x->ne[0], rows = (int64_t) (x->bytes / row_bytes(T_Q8_0, K));
+                const size_t rb = row_bytes(T_Q8P, K);
+                std::vector<uint8_t> out((size_t) rows * rb);
+                for (int64_t r = 0; r < rows; ++r) {
+                    const uint8_t * src = x->host + (size_t) r * row_bytes(T_Q8_0, K);
+                    uint8_t * q = out.data() + (size_t) r * rb;
+                    uint8_t * d = q + K;
+                    for (int64_t b = 0; b < K / 32; ++b) {
+                        std::memcpy(d + b * 2, src + b * 34, 2);
+                        std::memcpy(q + b * 32, src + b * 34 + 2, 32);
+                    }
+                }
+                x->type = T_Q8P;
+                x->bytes = out.size();
+                CK(hipMalloc(&x->dev, x->bytes));
+                CK(hipMemcpy(x->dev, out.data(), x->bytes, hipMemcpyHostToDevice));
+            } else {
+                CK(hipMalloc(&x->dev, x->bytes));
+                CK(hipMemcpy(x->dev, x->host, x->bytes, hipMemcpyHostToDevice));
+            }
         }
         return *x;
     }
@@ -197,6 +219,8 @@ __device__ __forceinline__ float ue4m3(uint8_t x) {
 // E2M1, doubled as ggml's kvalues_fp4 (0 1 2 3 4 6 8 12, then negated); the kernels that read NVFP4 copy it to LDS
 __constant__ float kFp4c[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
 __shared__ float sFp4[16];
+__device__ float gUe4m3[256];   // NVFP4's sub-block scales, decoded once at start (k_init_tables)
+__global__ void k_init_tables() { gUe4m3[threadIdx.x] = ue4m3((uint8_t) threadIdx.x); }
 __device__ __forceinline__ void fp4_init() {
     if (threadIdx.x < 16) sFp4[threadIdx.x] = kFp4c[threadIdx.x];
     __syncthreads();
@@ -226,6 +250,17 @@ __device__ float row_dot(const uint8_t * row, uint32_t type, const float * x, in
     } else if (type == T_BF16) {
         const uint16_t * w = (const uint16_t *) row;
         for (int k = l; k < K; k += WS) acc += __uint_as_float((uint32_t) w[k] << 16) * x[k];
+    } else if (type == T_Q8P) {
+        const __half * dsc = (const __half *) (row + K);
+        for (int c = l; c < K / 8; c += WS) {
+            const uint2 qq = *(const uint2 *) (row + (size_t) c * 8);
+            const float4 x0 = *(const float4 *) (x + c * 8), x1 = *(const float4 *) (x + c * 8 + 4);
+            const float dot = (float) (int8_t) (qq.x & 0xFF) * x0.x + (float) (int8_t) ((qq.x >> 8) & 0xFF) * x0.y +
+                              (float) (int8_t) ((qq.x >> 16) & 0xFF) * x0.z + (float) (int8_t) (qq.x >> 24) * x0.w +
+                              (float) (int8_t) (qq.y & 0xFF) * x1.x + (float) (int8_t) ((qq.y >> 8) & 0xFF) * x1.y +
+                              (float) (int8_t) ((qq.y >> 16) & 0xFF) * x1.z + (float) (int8_t) (qq.y >> 24) * x1.w;
+            acc += __half2float(dsc[c >> 2]) * dot;
+        }
     } else if (type == T_Q8_0) {
         const int sub = l & 3;
         for (int b = l >> 2; b < K / 32; b += WS / 4) {
@@ -237,7 +272,7 @@ __device__ float row_dot(const uint8_t * row, uint32_t type, const float * x, in
         const int sub = l & 3;
         for (int b = l >> 2; b < K / 64; b += WS / 4) {
             const uint8_t * blk = row + (size_t) b * 36;
-            const float d = ue4m3(blk[sub]);
+            const float d = gUe4m3[blk[sub]];
             const uint32_t * qv = (const uint32_t *) (blk + 4 + sub * 8);
             const uint32_t q0 = qv[0], q1 = qv[1];
             const float * xb = x + b * 64 + sub * 16;
@@ -511,13 +546,46 @@ __global__ void k_rms_n(Norms R, int n, float eps) {
     const float r = rsqrtf(s / n + eps);
     for (int i = threadIdx.x; i < n; i += blockDim.x) y[i] = x[i] * r * (w ? w[i] : 1.0f);
 }
+
+// F32 rows with few rows and long K (the loop controllers' down projections, the router): W waves share a row
+template <int W>
+__global__ void k_mmv_f32_splitk(Segs S) {
+    constexpr int RPB = 8 / W;
+    const int wv = threadIdx.x / WS, lane = threadIdx.x % WS;
+    const int row = blockIdx.x * RPB + wv / W, part = wv % W;
+    __shared__ float red[8];
+    float acc = 0.0f;
+    int j = 0, n = 0;
+    const bool live = row < S.start[S.n];
+    if (live) {
+        while (row >= S.start[j + 1]) ++j;
+        n = row - S.start[j];
+        const Seg & g = S.s[j];
+        const float4 * w = (const float4 *) (g.w + (size_t) n * g.rb);
+        const float4 * xv = (const float4 *) g.x;
+        const int K4 = g.K / 4;
+        for (int k = part * WS + lane; k < K4; k += W * WS) {
+            const float4 a = w[k], b = xv[k];
+            acc += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+        }
+    }
+    acc = wsum(acc);
+    if (lane == 0) red[wv] = acc;
+    __syncthreads();
+    if (live && part == 0 && lane == 0) {
+        float t = 0.0f;
+        for (int q = 0; q < W; ++q) t += red[wv + q];
+        S.s[j].y[n] = t;
+    }
+}
+
 // mix with an optional RMS norm of each output (its own weight per query)
 struct NormW { const float * w[4]; };
 __global__ void k_mix_n(const float * const * states, int ns, const float * queries, float * out, int C, NormW nw,
                         float eps) {
     const float * q = queries + (size_t) blockIdx.x * C;
     __shared__ float sc[16], rr[16], p[16];
-    __shared__ float red[8][32];
+    __shared__ float red[32][16];
     // every state's sum of squares and dot with the query, in one pass and one reduction (at most 8 states)
     float a[8], b[8];
 #pragma unroll
@@ -793,7 +861,7 @@ struct Model {
         vocab = (int) g.get(a + "vocab_size_unpadded");
         vocab_pad = (int) g.get(a + "vocab_size");
         const auto & pat = g.arr[a + "attention.sliding_window_pattern"];
-        embd = (const uint8_t *) g.need("token_embd.weight").dev;
+        embd = (const uint8_t *) g.need("token_embd.weight", true).dev;
         embd_norm = f32("token_embd_norm.weight");
         out_norm = f32("output_norm.weight");
         out_res_q = f32("output_res_query.weight");
@@ -930,7 +998,7 @@ struct Runner {
             CK(hipMemcpy(dd, sv.data(), sv.size() * sizeof(float *), hipMemcpyHostToDevice));
             marr.push_back(dd);
         }
-        hipLaunchKernelGGL(k_mix_n, dim3(nq), dim3(256), 0, st, marr[mix_i++], (int) sv.size(), queries, out, m.C, nw, m.eps);
+        hipLaunchKernelGGL(k_mix_n, dim3(nq), dim3(1024), 0, st, marr[mix_i++], (int) sv.size(), queries, out, m.C, nw, m.eps);
     }
     // n loop controllers at once: out[j] = control(x[j], msg[j]) with the layer's controller c0 + j
     void controls(const Layer & l, int c0, int n, const float * const * xs, const float * const * ms, float * const * outs) {
@@ -949,7 +1017,7 @@ struct Runner {
             ++S.n;
         };
         for (int j = 0; j < n; ++j) add(l.cdown[c0 + j], P.cat[j], ctrl_g + (size_t) j * m.rank);
-        hipLaunchKernelGGL(k_mmv, dim3((S.start[S.n] + 7) / 8), dim3(256), 0, st, S);
+        hipLaunchKernelGGL(k_mmv_f32_splitk<8>, dim3(S.start[S.n]), dim3(256), 0, st, S);
         S.n = 0;
         for (int j = 0; j < n; ++j) {
             add(l.cgain[c0 + j], ctrl_g + (size_t) j * m.rank, ctrl_a + (size_t) j * C);
@@ -1026,7 +1094,12 @@ struct Runner {
             controls(l, 3, 1, xs, ms, os);
             hipLaunchKernelGGL(k_rms_n, dim3(1), dim3(256), 0, st, Norms{{t1}, {l.ffn_norm}, {t1}}, C, m.eps);
         }
-        mv(l.router, t1, rl);
+        {
+            Segs S{};
+            S.n = 1; S.start[0] = 0; S.start[1] = l.router.N;
+            S.s[0] = Seg{l.router.w, t1, rl, l.router.rb, l.router.N, l.router.K, l.router.type};
+            hipLaunchKernelGGL(k_mmv_f32_splitk<4>, dim3((l.router.N + 1) / 2), dim3(256), 0, st, S);
+        }
         hipLaunchKernelGGL(k_route, dim3(1), dim3(m.n_exp), 0, st, rl, l.probs_b, m.n_exp, m.k_exp, m.wscale, ids, wts);
         hipLaunchKernelGGL(k_exp_gu, dim3((2 * m.F + 7) / 8, m.k_exp), dim3(256), 0, st, l.gu, l.gu_type, l.gu_ebytes,
                            l.gu_rb, l.gu_scale, ids, t1, gu, 2 * m.F, C);
@@ -1123,6 +1196,8 @@ int main(int argc, char ** argv) {
         return 2;
     }
     CK(hipSetDevice(gpu));
+    hipLaunchKernelGGL(k_init_tables, dim3(1), dim3(256), 0, 0);
+    CK(hipDeviceSynchronize());
     Model m;
     const auto t0 = std::chrono::steady_clock::now();
     m.load(path);

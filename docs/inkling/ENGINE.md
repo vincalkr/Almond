@@ -73,3 +73,29 @@ tokens of `local/inkling-measure/docs.txt`, card 0:
 KL between the two engines on the same file: 0.00530 (max 0.044). Ours is closer to the reference than llama.cpp's
 run of the same file: llama.cpp quantizes the activations to 8 bits for its quantized matmuls, ours keeps them in F32.
 Speed of these plain kernels, one token at a time: 26.3 tok/s (llama.cpp: 30.6).
+
+## Step 2, decode (2026-11-24)
+
+Same text and check as step 1; `--bench 300` times the decode alone (300 tokens fed after the 1,024, no logits read
+back), card 0. Every row keeps the step-1 output: logits within 2.5e-5, KL from Q8_0 0.00520, PPL 4.2009.
+
+| Change | Decode tok/s at 1K | Kernels a token |
+|---|---|---|
+| step 1 (plain) | 26.3 | 2,789 |
+| the token as one HIP graph, the position on the device | 29.2 | 2,789 |
+| vector loads in the row dots, a parallel router | 45.9 (at 78 tokens) | 2,789 |
+| several matvecs a launch; norms in the mixes; one kernel for clip/norm/cache write; convolution with the residual; controllers in groups; no copies | 36.1 (65.5 at 78) | 944 |
+| flash-decoding attention (3 query heads a KV head, splits, relative bias once a visit) | 64.3 | 1,040 |
+| NVFP4 values from an LDS table, more attention splits on the window | 75.6 | 1,048 |
+| split-K for the controllers' down projections and the router; 1,024-thread mixes | 82.6 | 1,040 |
+| NVFP4 scales from a table in global memory | **84.2** | 1,040 |
+
+llama.cpp on the same card and file: 30.6 tok/s. Tried and dropped (slower): the E2M1 values computed instead of
+looked up (the experts went from 51 to 54 us), the expert inputs copied to LDS (36 KB a block cut the occupancy),
+the scale table built in LDS by every block. The Q8_0 rows repacked at load (`T_Q8P`, aligned 8-byte loads) did not
+change the speed and are kept (simpler loads).
+
+Where the time goes now (rocprofv3, 10.2 ms of GPU time a token at 1K): experts gate_up 2.1 ms (540 GB/s of
+24 MB) and down 1.2 ms, the projections 2.1 ms (about 575 GB/s), the head 0.53 ms (930 GB/s, at the bandwidth),
+mixes 0.9 ms, attention 0.8 ms; about 1.9 ms more between kernels. Not done yet: KV cache in F16/q8 (F32 today: 128K
+does not fit), the serve protocol, batched prompts.
