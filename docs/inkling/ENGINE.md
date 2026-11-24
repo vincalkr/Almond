@@ -274,3 +274,36 @@ Decode at 1K depth, 128K F16 configuration: 83.2 -> 84.1 tok/s (+1%). Tried and 
 in the last split's block (an atomic counter, so no `k_attn_combine` launch): 72.5 tok/s, the merge of 64 splits by
 one block per KV head is slower than its own launch. What is left of the small kernels is the mixes (120 a token,
 about 7 us each, dependent on the layer before) and the router / controller matvecs.
+
+## Step 8, decode experts and the prompt's expert GEMM (2026-11-24)
+
+Profile of a decode token at 1K depth (128K, F16 KV, rocprofv3): 10.4 ms of kernels, of which the attention matvecs
+(`k_mmv`, 3 a visit) 2.7 ms at about 510 GB/s, the experts' gate/up 1.6 ms at 560 GB/s, their down 1.1 ms at 510 GB/s,
+the output head 0.53 ms at 930 GB/s; the rest is small kernels. A plain read of 400 MB runs at 956 GB/s on this card.
+
+- Kept: the decode experts' gate/up (NVFP4) in `k_exp_gu_nv<4>`: four rows a wave share each x load, and the E2M1
+  values are decoded with two byte permutes instead of 16 table reads (the same values, products in F32).
+  Logits with F32 KV: KL 4.4e-13 from the previous build. Gate/up 42.8 -> 35.3 us a launch.
+- Kept: the prompt's expert GEMM (NVFP4) folds each block's E4M3 scale into the weights before the matrix cores (a
+  doubled E2M1 value times an E4M3 scale has at most 6 significant bits, so it is exact in F16) and sums 64 values
+  on the matrix cores before adding them in F32. Carrying the matrix-core accumulator over the whole row was faster
+  (1,663 tok/s) but not exact: KL 1.4e-5 from the token-by-token path (max 1.6e-3), so it is not used. Kept version:
+  KL 2.3e-12 (the same as before).
+- Tried and dropped: a down kernel walking the 8 entries' blocks as one list (80.1 against 82.6 tok/s); prefetching
+  the next layer's attention weights into the Infinity Cache, from a second stream in the captured graph (70 tok/s:
+  the branches did not overlap) or from extra blocks of the experts' or the attention's launch (the matvecs went from
+  18.5 to 10.8 us, the launch carrying the prefetch got slower by as much: no gain); expert tiles of 64 entries
+  (1,082 tok/s); DSpark drafts of 5 tokens (89.3 against 96.7 tok/s with 4).
+
+Engine, 128K, F16 KV, 1K-token prompt (`--bench 300` after `--score`, and `--serve` with 256 tokens out):
+
+| | before | after |
+|---|---|---|
+| decode, `--bench` | 83.2 tok/s | 85.3 |
+| `--serve`, temperature 0, 1K / 3K prompt | 83.0 / 82.3 | 85.0 / 84.4 |
+| `--serve`, temperature 1 | 78.9 | 80.8 |
+| prefill 4K, chunks of 1,024 | 1,582 tok/s | 1,623 |
+
+With DSpark the greedy text of this prompt changes (the F16 KV rounds a close pick the other way), so the accepted
+share changes with it (127/251 against 104/216) and the two runs do not compare token for token: 96.7 / 102.1 before,
+94.3 / 98.8 after.

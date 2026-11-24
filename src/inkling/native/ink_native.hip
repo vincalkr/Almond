@@ -500,6 +500,52 @@ __global__ void k_exp_gu(const uint8_t * W, uint32_t type, size_t ebytes, size_t
     const float v = row_dot(W + (size_t) e * ebytes + (size_t) n * rb, type, x + (size_t) (j / kx) * K, K);
     if (threadIdx.x % WS == 0) out[(size_t) j * N + n] = v * (scale ? scale[e] : 1.0f);
 }
+// NVFP4 decode experts (one token's entries): one block of 64 values, lane part sub (16 values), x already loaded
+__device__ __forceinline__ float nv_blk(const uint8_t * blk, int sub, const float * xv) {
+    const float d = gUe4m3[blk[sub]];
+    const uint32_t * qv = (const uint32_t *) (blk + 4 + sub * 8);
+    const uint32_t q0 = qv[0], q1 = qv[1];
+    float a = 0.0f;
+    const uint32_t qs[4] = {q0 & 0x0F0F0F0Fu, q1 & 0x0F0F0F0Fu, (q0 >> 4) & 0x0F0F0F0Fu, (q1 >> 4) & 0x0F0F0F0Fu};
+#pragma unroll
+    for (int g = 0; g < 4; ++g) {   // 4 nibbles -> 4 signed int8 (the doubled E2M1 values) with two byte permutes
+        const uint32_t sel = qs[g] & 0x07070707u, m = ((qs[g] >> 3) & 0x01010101u) * 0xFFu;
+        const uint32_t v = (__builtin_amdgcn_perm(0xF4F8FAFCu, 0xFDFEFF00u, sel) & m) |
+                           (__builtin_amdgcn_perm(0x0C080604u, 0x03020100u, sel) & ~m);
+        const float * xg = xv + (g & 1) * 4 + (g >> 1) * 8;
+        a += (float) (int8_t) v * xg[0] + (float) (int8_t) (v >> 8) * xg[1] + (float) (int8_t) (v >> 16) * xg[2] +
+             (float) (int8_t) (v >> 24) * xg[3];
+    }
+    return d * a;
+}
+// gate/up: R rows a wave that share each x load
+template <int R>
+__global__ void k_exp_gu_nv(const uint8_t * W, size_t ebytes, size_t rb, const float * scale, const int * ids,
+                            const float * x, float * out, int N, int K, int kx) {
+    const int j = blockIdx.y, e = ids[j];
+    const int n0 = (blockIdx.x * (blockDim.x / WS) + threadIdx.x / WS) * R;
+    if (n0 >= N) return;
+    const int l = threadIdx.x % WS, sub = l & 3;
+    const uint8_t * w = W + (size_t) e * ebytes + (size_t) n0 * rb;
+    x += (size_t) (j / kx) * K;
+    float acc[R];
+#pragma unroll
+    for (int r = 0; r < R; ++r) acc[r] = 0.0f;
+    for (int b = l >> 2; b < K / 64; b += WS / 4) {
+        const float * xb = x + b * 64 + sub * 16;
+        float xv[16];
+        *(float4 *) xv = *(const float4 *) xb; *(float4 *) (xv + 4) = *(const float4 *) (xb + 4);
+        *(float4 *) (xv + 8) = *(const float4 *) (xb + 8); *(float4 *) (xv + 12) = *(const float4 *) (xb + 12);
+#pragma unroll
+        for (int r = 0; r < R; ++r) acc[r] += nv_blk(w + (size_t) r * rb + (size_t) b * 36, sub, xv);
+    }
+    const float s = scale ? scale[e] : 1.0f;
+#pragma unroll
+    for (int r = 0; r < R; ++r) {
+        const float v = wsum(acc[r]);
+        if (l == 0 && n0 + r < N) out[(size_t) j * N + n0 + r] = v * s;
+    }
+}
 // SITU: h = 4 tanh(g/4) sigmoid(g) * 25 tanh(u/25); gu[j][2F] -> h[j][F]
 __global__ void k_situ(const float * gu, float * h, int F, int k, float beta, float lb) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1203,7 +1249,7 @@ constexpr float LO_UP = 4096.0f, LO_DN = 1.0f / 4096.0f;
 typedef float f8v __attribute__((ext_vector_type(8)));
 typedef _Float16 h8v __attribute__((ext_vector_type(8)));
 __device__ __forceinline__ bool wmma_ok(const Seg & g) { return (g.type == T_Q8P || g.type == T_NVFP4) && g.K % 64 == 0; }
-template <int BT, int NB>   // NB: 16-token tiles a wave (the decoded weights reused NB times)
+template <int BT, int NB, bool FOLD = false>   // NB: 16-token tiles a wave (the decoded weights reused NB times)
 __device__ __forceinline__ void wmma_tile(const Seg & g, int n0, int T, int t0, const int * xrow, const int * yrow,
                                           float yscale_fixed, const float * yscale_row) {
     __shared__ _Float16 Xh[BT][64 + 8], Xl[BT][64 + 8];
@@ -1265,6 +1311,7 @@ __device__ __forceinline__ void wmma_tile(const Seg & g, int n0, int T, int t0, 
 #pragma unroll
         for (int i = 0; i < 8; ++i) cw[i] = wr[i];
         if (k0 + 64 < g.K) { loadW(k0 + 64, wr, sw); loadX(k0 + 64, xv); }
+        f8v zf[NB] = {}, zfl[NB] = {};   // FOLD: 64 values on the matrix cores, then added in F32
 #pragma unroll
         for (int s = 0; s < 4; ++s) {
             h16v a;
@@ -1275,6 +1322,16 @@ __device__ __forceinline__ void wmma_tile(const Seg & g, int n0, int T, int t0, 
 #pragma unroll
                 for (int i = 0; i < 8; ++i) own[i] = (_Float16) (int8_t) ((cw[2 * s + (i >> 2)] >> (8 * (i & 3))) & 0xFF);
                 sc = __half2float(__builtin_bit_cast(__half, (uint16_t) (s < 2 ? (cs & 0xFFFF) : (cs >> 16))));
+            } else if (FOLD) {
+                // NVFP4: the doubled E2M1 value times its E4M3 scale has at most 6 significant bits: exact in F16, so
+                // the scale goes into the weights and the matrix cores accumulate the whole row
+                const float d = rok ? gUe4m3[(cs >> (8 * s)) & 0xFF] : 0.0f;
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    const uint32_t bb = (cw[2 * s + (i >> 2)] >> (8 * (i & 3))) & 0xFF;
+                    own[i] = (_Float16) (sFp4[hf ? (bb >> 4) : (bb & 0xF)] * d);
+                }
+                sc = 1.0f;
             } else {
 #pragma unroll
                 for (int i = 0; i < 8; ++i) {
@@ -1294,6 +1351,23 @@ __device__ __forceinline__ void wmma_tile(const Seg & g, int n0, int T, int t0, 
                 a[2 * i + 1] = hf ? o1 : own[2 * i + 1];
                 a[8 + 2 * i] = hf ? own[2 * i] : o0;
                 a[8 + 2 * i + 1] = hf ? own[2 * i + 1] : o1;
+            }
+            if (FOLD) {
+#pragma unroll
+                for (int b = 0; b < NB; ++b) {
+                    if (b > 0 && t0 + tw + 16 * b >= T) break;
+                    h16v bh, bl;
+                    const int tb = tw + 16 * b + m;
+#pragma unroll
+                    for (int i = 0; i < 2; ++i) {
+                        const h8v vh = *(const h8v *) &Xh[tb][s * 16 + 8 * i], vl = *(const h8v *) &Xl[tb][s * 16 + 8 * i];
+#pragma unroll
+                        for (int j = 0; j < 8; ++j) { bh[8 * i + j] = vh[j]; bl[8 * i + j] = vl[j]; }
+                    }
+                    zf[b] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, bh, zf[b]);
+                    zfl[b] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, bl, zfl[b]);
+                }
+                continue;
             }
             if (!rok) sc = 0.0f;
             float scr[8];
@@ -1317,6 +1391,11 @@ __device__ __forceinline__ void wmma_tile(const Seg & g, int n0, int T, int t0, 
                 for (int i = 0; i < 8; ++i) acc[b][i] += (z[i] + zl[i] * LO_DN) * scr[i];
             }
         }
+        if (FOLD)
+#pragma unroll
+            for (int b = 0; b < NB; ++b)
+#pragma unroll
+                for (int i = 0; i < 8; ++i) acc[b][i] += zf[b][i] + zfl[b][i] * LO_DN;
         __syncthreads();
     }
     // lane holds rows 2i + lane/16 of the wave's 16, token lane%16
@@ -1362,7 +1441,8 @@ __global__ void k_gemm_exp_w(const uint8_t * W, uint32_t type, size_t ebytes, si
     }
     __syncthreads();
     Seg g{W + (size_t) e * ebytes, x, y, rb, N, K, type};
-    wmma_tile<EXP_BT, EXP_BT / 16>(g, blockIdx.x * 64, cnt, t0, xr - t0, yr - t0, scale ? scale[e] : 1.0f, wts);
+    if (type == T_NVFP4) wmma_tile<EXP_BT, EXP_BT / 16, true>(g, blockIdx.x * 64, cnt, t0, xr - t0, yr - t0, scale ? scale[e] : 1.0f, wts);
+    else wmma_tile<EXP_BT, EXP_BT / 16>(g, blockIdx.x * 64, cnt, t0, xr - t0, yr - t0, scale ? scale[e] : 1.0f, wts);
 }
 // 16 halves from LDS as two 16-byte reads
 __device__ __forceinline__ h16v ld16(const _Float16 * p) {
@@ -2146,6 +2226,10 @@ struct Runner {
         hipLaunchKernelGGL(k_route, dim3(T), dim3(m.n_exp), 0, st, rl, l.probs_b, m.n_exp, m.k_exp, m.wscale, ids, wts);
         float * h2 = pool[pool_i++];
         if (T <= MMV_T) {   // one token, or a few (each entry its own expert row reads, as the decode)
+            if (l.gu_type == T_NVFP4 && C % 64 == 0)   // 4 rows a wave, each x load used for all four
+                hipLaunchKernelGGL(k_exp_gu_nv<4>, dim3((2 * m.F + 31) / 32, m.k_exp * T), dim3(256), 0, st, l.gu,
+                                   l.gu_ebytes, l.gu_rb, l.gu_scale, ids, t1, gu, 2 * m.F, C, m.k_exp);
+            else
             hipLaunchKernelGGL(k_exp_gu, dim3((2 * m.F + 7) / 8, m.k_exp * T), dim3(256), 0, st, l.gu, l.gu_type,
                                l.gu_ebytes, l.gu_rb, l.gu_scale, ids, t1, gu, 2 * m.F, C, m.k_exp);
             hipLaunchKernelGGL(k_situ, dim3(ew(m.F * m.k_exp * T)), dim3(256), 0, st, gu, hh, m.F, m.k_exp * T, m.situ_b,
