@@ -7105,9 +7105,6 @@ int qwen_main(int argc, char** argv) {
                         : std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
                                       [](int n) { return n > 0; }) ? "the helper caches on other GPUs"
                         : o.vram_segment_mib < 64 ? "--vram-segment-mib is below 64" : nullptr;
-#if defined(ALMOND_USE_HIP)
-        if (why == nullptr) why = "it is NVIDIA-only for now";
-#endif
         if (why != nullptr) {
             std::fprintf(stderr, "qwen generate: --vram-elastic is off: %s\n", why);
             o.vram_elastic = false;
@@ -12380,6 +12377,7 @@ int qwen_main(int argc, char** argv) {
             p.first = (int32_t) std::max<int64_t>(0, live - part_slots(p, c));
             p.first_now = -1;   // laid out again at the next loan
         };
+        bool vis_lent = false;   // VLEND: the cache's tail is the image encoder's until VRECLAIM
         auto vram_command = [&](const std::string& cmd, std::string& e) -> bool {
             // `VRAM` alone: the reserve the engine started with (--vram-reserve-mib)
             char* end = nullptr;
@@ -13527,6 +13525,43 @@ int qwen_main(int argc, char** argv) {
                     std::fprintf(stderr, "qwen trace: BYIELD dropped, %d groups in flight\n",
                                  (int) std::count_if(pg.begin(), pg.end(), [](const PGroup& G) { return G.inflight; }));
                 continue;
+            }
+            // VLEND / VRECLAIM (between requests, as the GLM engine): the on-demand image encoder starts on this card in
+            // the expert cache's tail ("VLENT <bytes>": VRAM with the encoder's measured need kept free) and has ended
+            // ("VRECLAIMED": the tail mapped again and the experts it held read back - VRAM's own refill - or ERR while
+            // the encoder's memory is not free yet; the server asks again)
+            if (line == "VLEND" || line == "VRECLAIM") {
+                std::string verr;
+                if (batch_on()) verr = line + ": not while batch slots are decoding";
+                else if (!xcache.segmented()) verr = line + ": the expert cache is not segmented (--vram-elastic)";
+                else if (line == "VLEND") {
+                    const char* e = std::getenv("ALMOND_VISION_LEND_MB");
+                    if (!e) e = std::getenv("ALMOND_GLM_VISION_LEND_MB");
+                    const long long mb = (long long) (e ? std::atof(e) : 1024.0) + 256;
+                    const int64_t before = xcache.mapped_bytes();
+                    if (vram_command("VRAM " + std::to_string(mb), verr)) {
+                        vis_lent = true;
+                        std::printf("VLENT %lld\n", (long long) (before - xcache.mapped_bytes()));
+                    }
+                } else {
+                    if (!vis_lent || vram_command("VRAM 0", verr)) {
+                        if (xcache.mapped_bytes() < xcache.full_bytes() && vis_lent) verr = "the lent memory is not free yet";
+                        else { vis_lent = false; std::printf("VRECLAIMED\n"); }
+                    }
+                }
+                if (!verr.empty()) std::printf("ERR %s\n", verr.c_str());
+                std::fflush(stdout);
+                continue;
+            }
+            if (vis_lent && (line.rfind("GEN", 0) == 0 || line.rfind("BGEN", 0) == 0)) {   // a request takes it back first
+                std::string verr;
+                if (vram_command("VRAM 0", verr) && xcache.mapped_bytes() >= xcache.full_bytes()) vis_lent = false;
+                else {
+                    std::printf("ERR the expert cache lent to the image encoder is not back yet%s%s\n",
+                                verr.empty() ? "" : ": ", verr.c_str());
+                    std::fflush(stdout);
+                    continue;
+                }
             }
             if (line.rfind("VRAM", 0) == 0) {   // #533 (above): between requests, not a request
                 std::string verr;

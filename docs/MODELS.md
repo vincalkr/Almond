@@ -111,6 +111,13 @@ Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
   after (`local/glm-local-vision.json`, which `./almond serve --model glm` picks when the encoder is there). Text
   decode, one
   run each: 29.2, 32.2 before, 29.8, 33.3 after the first picture, 29.2 after the second (cached: no encoder start).
+- Qwen3.8-Flash-Next: the encoder (Qwen's mmproj BF16, GPU, `f32_matmul`, `no_flash_attn`) on card 0 only while a
+  request's pictures are encoded (`local/qwen-local-vision.json`, `--vram-elastic`, now built on HIP: the expert cache
+  through HIP's virtual memory). `VLEND` shrinks the expert cache by the encoder's need + 256 MB, `VRECLAIM` grows it
+  back (measured 2026-11-24 on the engine: 3.8 GB lent in 60 ms, back in 149 ms). Precision against an F32 reference:
+  the CPU BF16 encoder used before min cosine 0.563, the GPU in F32 0.995-0.9999. Through the server: the encoder
+  needs 1.59 GB at 300 image tokens; three pictures answered right (shapes, a bar chart, a house), a 297-token picture
+  prompt first token 2.06 s; card 0 used 25.41 GB at start, 25.48 GB after the pictures.
 
 ## Sessions on disk
 

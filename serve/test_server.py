@@ -4572,7 +4572,7 @@ class VisionArgs(unittest.TestCase):
 
     def test_the_lending_engines(self):
         import serve.server as server
-        self.assertEqual(server.LENDERS, {"--glm-pack", "--inkling", "--qwen35"})
+        self.assertEqual(server.LENDERS, {"--glm-pack", "--inkling", "--qwen35", "--qwen"})
 
 
 class VisionCacheEviction(unittest.TestCase):

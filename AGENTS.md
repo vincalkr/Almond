@@ -57,7 +57,8 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   temperature 0.8 are not drafted (no gain at 1.0). The llama.cpp build of it (`build-inkling/almond-inkling-dspark`,
   PR #32218 in `build-inkling/llama.cpp-dspark`) is still built but no configuration names it.
 - Qwen: `local/qwen-local.json` on card 0 (`local/qwen-local-vision.json` with its encoder,
-  `models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf`, read on the CPU): the GGUF's two shards in
+  `models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf`, on card 0 only while pictures are encoded, in the expert
+  cache's memory the engine lends it, `--vram-elastic`): the GGUF's two shards in
   `models/qwen38-iq3s`, its pack in `models/qwen38-iq3s-pack` (`tools/qwen/iq_pack.py`), the MTP block in
   `models/qwen38-mtp` (`tools/qwen/mtp_fetch.py`, `mtp_pack.py`, `mtp_rt.py`); `local/qwen-q4-local.json` Unsloth's UD-Q4_K_XL (Dynamic 3.1) on two cards
   with at most 56 GiB of experts in RAM (`./almond -m qwen-q4`, `local/fetch.sh qwen-q4`; not yet measured here).

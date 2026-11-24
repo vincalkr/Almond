@@ -38,7 +38,8 @@
     "80",
     "--adapt-decay",
     "0.97",
-    "--vision"
+    "--vision",
+    "--vram-elastic"
   ],
   "env": {
     "ALMOND_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-qwen-hipblaslt-100401-local.txt",
@@ -63,9 +64,12 @@
     "exe": "build-vision/build/bin/almond-vision",
     "mmproj": "models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
     "model": "models/qwen38-iq3s/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
-    "gpu": false,
+    "gpu": true,
     "max_tokens": 300,
-    "threads": 12
+    "no_flash_attn": true,
+    "f32_matmul": true,
+    "cuda_device": 0,
+    "on_demand": true
   },
   "conversation_dir": "local/qwen-slots",
   "conversation_dir_gib": 16
