@@ -38,7 +38,7 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   `models/hy4-iq2ah` with the tokenizer extracted by `tools/almond_tokenizer.py`; images with
   `build-vision-hy4/bin/almond-vision` (built against the PR's mtmd); docs/hy4/GGUF_NOTES.md.
 - Inkling 2 Mini: `local/inkling-local.json` (`./almond serve --model inkling`, `./almond -m inkling`): Unsloth's
-  UD-Q4_K_XL (17.6 GB) on card 0, 128K, F16 KV, on Almond's own engine `build-inkling/almond-inkling-native`
+  UD-Q4_K_XL (17.6 GB) on card 0, 256K, q8_0 KV (192K with DSpark; until 2026-11-24 128K F16, the numbers below), on Almond's own engine `build-inkling/almond-inkling-native`
   (`src/inkling/native`, HIP, no ggml; docs/inkling/ENGINE.md): through the server 1,500 tok/s prefill at 5.7K and
   1,047 at 48K, 55-64 tok/s decode, against 553 / 337 and 29 on llama.cpp, KL from Q8_0 0.00557 against 0.00573.
   The llama.cpp path (`build-inkling/almond-inkling`, `src/inkling`) is no longer served (removed as slower; its
@@ -51,7 +51,7 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   products and no flash attention, `f32_matmul` / `no_flash_attn`), then the model is back byte for byte; answers
   checked against llama.cpp's server (docs/inkling/ENGINE.md, steps 9-10); `local/inkling-dspark-local-vision.json`
   the same with DSpark.
-  `--kv-gpu 1` (opt-in, no configuration yet) puts the full attention layers' K/V and attention on card 1 for
+  `local/inkling-1m-local.json` (opt-in, 1M, q8_0) and `--kv-gpu 1` puts the full attention layers' K/V and attention on card 1 for
   contexts past 128K: logits identical, prefill 390 tok/s at 256K, decode 72 against 86 tok/s at 32K (docs/inkling/ENGINE.md, step 11).
   `local/inkling-dspark-local.json` (`./almond -m inkling-dspark`, opt-in) adds Unsloth's DSpark drafter
   (`local/fetch.sh inkling-dspark`) to the native engine (`--dspark`, docs/inkling/ENGINE.md step 6): through the

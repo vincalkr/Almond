@@ -410,3 +410,20 @@ The copies cost: every far visit of a 1,024-token chunk moves q, the gate and th
 and decode pays 16 cross-card waits a token. The 1M q8_0 and 512K F16 runners allocate and run. Not measured yet (the run was stopped at 512K): prefill at 512K and 1M,
 decode at depth, KL and needle retrieval at 256K / 1M, DSpark / images / checkpoints with `--kv-gpu`, the server
 configuration. So 128K on one card stays the default.
+
+### 256K by default, q8_0 KV (2026-11-24, the user's choice)
+
+The configurations now use q8_0 KV (`--kv-q8`, 136 bytes a row against 256 in F16: 17 KiB a token for the 8 full
+slots) and 256K on card 0 alone: `local/inkling-local.json` and `-vision` at 262,144 (0.64 GiB of VRAM left), the
+DSpark ones at 196,608 (1.33 GiB left with the drafter; at 256K only 0.02 GiB were left). F16 stays in the engine
+(`--kv-f16`) but no configuration names it. `local/inkling-1m-local.json` (router entry, opt-in): 1M, q8_0, the full
+slots on card 1 (`--kv-gpu 1`, `"gpu": "0,1"`).
+
+Measured, card 0, the repository's sources as text:
+- 256K q8_0, one card: decode at depth 32K 73.96 tok/s (128K F16: 73.79), prefill to 32K 1,172 tok/s (1,293);
+  PPL on the 32K text 4.2865 (F16 4.2943).
+- 256K, full slots on card 1, a 262,000-token text with a passphrase at token 20,000 and the question at the end:
+  the 11 answer tokens are each the top prediction, F16 and q8_0 alike; KL of q8_0 from F16 over 256 positions
+  at depth ~131K: 0.0108 (max 1.20, same top token 253 / 256); PPL 1.8365 / 1.8360.
+- Not measured: the same needle on one card (stopped), prefill filled to 512K / 1M, KL against the Q8_0 weights at
+  long context, DSpark / images / checkpoints at 256K through the server.
