@@ -51,6 +51,8 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   products and no flash attention, `f32_matmul` / `no_flash_attn`), then the model is back byte for byte; answers
   checked against llama.cpp's server (docs/inkling/ENGINE.md, steps 9-10); `local/inkling-dspark-local-vision.json`
   the same with DSpark.
+  `--kv-gpu 1` (opt-in, no configuration yet) puts the full attention layers' K/V and attention on card 1 for
+  contexts past 128K: logits identical, prefill 390 tok/s at 256K, decode 72 against 86 tok/s at 32K (docs/inkling/ENGINE.md, step 11).
   `local/inkling-dspark-local.json` (`./almond -m inkling-dspark`, opt-in) adds Unsloth's DSpark drafter
   (`local/fetch.sh inkling-dspark`) to the native engine (`--dspark`, docs/inkling/ENGINE.md step 6): through the
   server 123-144 tok/s at temperature 0 and 98-135 at 0.6 against 77-78, the same distribution; requests above

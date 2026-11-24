@@ -377,3 +377,34 @@ exact two-part product is 42% of it), removing the weights' decoding to 2,187 us
 changed nothing (1,623 tok/s); two to four row fragments a wave, 1,633 / 1,385 / 1,239 tok/s. (A first version of
 the computed scale had the exponent off by 2^7 and gave 1,817 tok/s with NaN logits - a reminder to check the
 logits before the speed.)
+
+## Step 11, the full attention K/V on the second card (2026-11-24, unfinished)
+
+`--kv-gpu N` (opt-in; the default path and `local/inkling-*.json` are unchanged). The 8 full-context K/V slots
+(layers 5, 11, 17, 23, with 11 and 17 visited 3 times by the loop) cost 8 x 8 heads x 128 x 2 (K, V) x 2 bytes =
+32 KiB a token in F16; the 40 window slots keep 2,048 rows each (320 MiB) whatever the context. With `--kv-gpu N`
+the full slots live on card N and their attention (`k_attn_split` / `k_attn_pf_w` / `k_attn_pf`, then
+`k_attn_combine` with the gate) runs there: q, the gate, the relative bias, the sinks and the position are copied
+over, the gated output comes back; card 0's `k_qkvr` writes the new rows straight into card N (peer access).
+Decode over a far slot uses 256 splits instead of 64. The decode graph is off with far slots (`INK_FAR_GRAPH=1`
+captures across both cards: same logits, 21 tok/s against 72 eager). 256K F16 is 8 GiB on card 1, 512K 16 GiB;
+1M needs q8_0 (`--kv-q8`, 16.6 GiB on card 1), since 32 GiB of F16 fits neither card.
+
+Checks, cards 0 and 1 (RX 7900 XTX), 32K context, the repository's own sources and docs as text:
+- prefill, 4,096 tokens in chunks of 1,024: logits byte-identical to the one-card path (256 rows dumped);
+- decode, 1,024 tokens one at a time: logits byte-identical too (KL 0, same top token at 256 / 256), also with the
+  graph captured.
+
+Speed (`--bench-prefill N`, F16 KV, chunks of 1,024; decode `--bench 200` at depth 1,024):
+
+| context | one card | `--kv-gpu 1` |
+|---|---|---|
+| prefill 32K | 1,293 tok/s | 750 tok/s |
+| prefill 128K | 775 tok/s | 538 tok/s |
+| prefill 256K | does not fit | 390 tok/s (673 s) |
+| decode, 32K context, depth 1K | 86.1 tok/s | 72.3 tok/s |
+
+The copies cost: every far visit of a 1,024-token chunk moves q, the gate and the output (12 MB each) over PCIe,
+and decode pays 16 cross-card waits a token. Not measured yet (the run was stopped at 512K): prefill at 512K and 1M,
+decode at depth, KL and needle retrieval at 256K / 1M, DSpark / images / checkpoints with `--kv-gpu`, the server
+configuration. So 128K on one card stays the default.

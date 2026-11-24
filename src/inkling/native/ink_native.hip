@@ -1971,6 +1971,7 @@ struct Slot {     // a layer visit's cache
     float * hist = nullptr;   // hist: [3][Ck], [3][Ck], [3][C], [3][C] for k, v, attn, ffn
     int cap = 0;
     size_t kvbytes = 0;   // each of K and V
+    bool far = false;     // --kv-gpu: a full attention slot whose K/V and attention live on the second card
     float * spec = nullptr;   // speculative verification: the convolutions' state before the batch and its inputs
 };
 
@@ -1994,6 +1995,14 @@ struct Runner {
     bool eager_done = false;
     hipGraphExec_t gexec = nullptr;
     int nsplit_max = 64;
+    // --kv-gpu N (opt-in, long contexts): the full attention slots' K/V on card N, their attention computed there;
+    // q, the gate, the relative bias and the sinks cross over, the gated output comes back
+    int dev0 = 0, kvdev = -1;
+    hipStream_t st1 = nullptr;
+    hipEvent_t ev0 = nullptr, ev1 = nullptr;
+    float *q1 = nullptr, *g1 = nullptr, *relb1 = nullptr, *sinkv1 = nullptr, *att1 = nullptr, *part1 = nullptr;
+    int * dpos1 = nullptr;
+    int nsplit_far = 256;   // decode splits over a far slot (its keys spread over more blocks)
 
     float * dalloc(size_t n) { float * p; CK(hipMalloc(&p, n * 4)); CK(hipMemset(p, 0, n * 4)); return p; }
 
@@ -2028,7 +2037,7 @@ struct Runner {
         CK(hipMemcpyAsync(dpos, hpos, 4, hipMemcpyHostToDevice, st));
         CK(hipMemcpyAsync(dtok, hpos + 1, (size_t) T * 4, hipMemcpyHostToDevice, st));
         spec_rec = vmode = true;
-        if (!vwarm[T]) { body(T, true); vwarm[T] = true; }
+        if (!vwarm[T] || (kvdev >= 0 && !far_graph)) { body(T, true); vwarm[T] = true; }
         else {
             hipGraphExec_t & ge = vgraph[T];
             if (!ge) {
@@ -2056,10 +2065,31 @@ struct Runner {
         pos -= T - keep;
     }
     bool all_cap = false;   // room for every token's logits (scoring)
-    Runner(Model & m_, int ctx_, int kvt_ = 0, int tm_ = 1024, bool all_cap_ = false)
+    bool far_graph = std::getenv("INK_FAR_GRAPH") != nullptr;   // capture decode graphs across the two cards
+    Runner(Model & m_, int ctx_, int kvt_ = 0, int tm_ = 1024, bool all_cap_ = false, int kvdev_ = -1)
         : m(m_), ctx(ctx_), kvt(kvt_), TM(std::max(tm_, SPEC_T)), all_cap(all_cap_) {
         const int C = m.C, Ck = m.Hkv * m.D;
         const size_t T = TM;
+        CK(hipGetDevice(&dev0));
+        if (kvdev_ >= 0 && kvdev_ != dev0) {
+            kvdev = kvdev_;
+            int a = 0, b = 0;
+            CK(hipDeviceCanAccessPeer(&a, dev0, kvdev)); CK(hipDeviceCanAccessPeer(&b, kvdev, dev0));
+            if (!a || !b) { std::fprintf(stderr, "almond-inkling-native: cards %d and %d cannot reach each other\n", dev0, kvdev); std::exit(1); }
+            hipError_t e = hipDeviceEnablePeerAccess(kvdev, 0);
+            if (e != hipSuccess && e != hipErrorPeerAccessAlreadyEnabled) CK(e);
+            CK(hipSetDevice(kvdev));
+            e = hipDeviceEnablePeerAccess(dev0, 0);
+            if (e != hipSuccess && e != hipErrorPeerAccessAlreadyEnabled) CK(e);
+            CK(hipStreamCreateWithFlags(&st1, hipStreamNonBlocking));
+            CK(hipEventCreateWithFlags(&ev1, hipEventDisableTiming));
+            q1 = dalloc(T * m.H * m.D); g1 = dalloc(T * m.H * m.D); att1 = dalloc(T * m.H * m.D);
+            relb1 = dalloc(T * m.H * m.ext); sinkv1 = dalloc(T * m.H);
+            part1 = dalloc((size_t) std::max<size_t>(nsplit_far, 16 * 4096 / m.Hkv) * m.H * (m.D + 2));
+            CK(hipMalloc(&dpos1, 4));
+            CK(hipSetDevice(dev0));
+            CK(hipEventCreateWithFlags(&ev0, hipEventDisableTiming));
+        }
         const int n_slots = m.n_phys + (m.passes - 1) * (m.core1 - m.core0);
         slots.resize(n_slots);
         for (int s = 0; s < n_slots; ++s) {
@@ -2067,9 +2097,12 @@ struct Runner {
             Slot & sl = slots[s];
             // a window layer keeps its window plus a chunk: a chunk's first token still sees its whole window
             sl.cap = m.L[ip].swa ? std::min(ctx, m.swa + TM) : ctx;
+            sl.far = kvdev >= 0 && !m.L[ip].swa;
             const size_t kvb = (size_t) sl.cap * m.Hkv * (kvt == 1 ? KVQ8_ROW : kvt == 2 ? m.D * 2 : m.D * 4);
+            if (sl.far) CK(hipSetDevice(kvdev));
             CK(hipMalloc(&sl.K, kvb)); CK(hipMemset(sl.K, 0, kvb));
             CK(hipMalloc(&sl.V, kvb)); CK(hipMemset(sl.V, 0, kvb));
+            if (sl.far) { CK(hipDeviceSynchronize()); CK(hipSetDevice(dev0)); }
             sl.kvbytes = kvb;
             sl.hist = dalloc((size_t) 3 * (2 * Ck + 2 * C));
         }
@@ -2264,13 +2297,29 @@ struct Runner {
         hipLaunchKernelGGL(k_qkvr, dim3(2 * m.H + 2 * m.Hkv, T), dim3(128), 0, st, q, k, v, r, l.q_clip, l.rel_clip, m.H,
                            m.Hkv, m.D, m.nrel, m.qk_clip, m.rel_clip, dpos, l.swa ? 0.0f : m.alpha, m.floor_, m.eps,
                            sl.K, sl.V, sl.cap, kvt, fz);
+        // the attention: here, or on the second card for a far slot (its inputs copied over first)
+        const float *aq = q, *ag = g, *arb = relb, *ask = sinkv;
+        const int * adp = dpos;
+        float *apt = part, *aat = att;
+        hipStream_t ast = st;
+        if (sl.far) {
+            CK(hipMemcpyAsync(q1, q, (size_t) T * m.H * m.D * 4, hipMemcpyDeviceToDevice, st));
+            CK(hipMemcpyAsync(g1, g, (size_t) T * m.H * m.D * 4, hipMemcpyDeviceToDevice, st));
+            CK(hipMemcpyAsync(relb1, relb, (size_t) T * m.H * m.ext * 4, hipMemcpyDeviceToDevice, st));
+            CK(hipMemcpyAsync(sinkv1, sinkv, (size_t) T * m.H * 4, hipMemcpyDeviceToDevice, st));
+            CK(hipMemcpyAsync(dpos1, dpos, 4, hipMemcpyDeviceToDevice, st));
+            CK(hipEventRecord(ev0, st));
+            CK(hipSetDevice(kvdev));
+            CK(hipStreamWaitEvent(st1, ev0, 0));
+            aq = q1; ag = g1; arb = relb1; ask = sinkv1; adp = dpos1; apt = part1; aat = att1; ast = st1;
+        }
         const int span = l.swa ? std::min(m.swa, ctx) : ctx;
         int nsplit;
         if (T == 1 || vmode) {
             const int splitsz = 32;   // the least a split; the kernel spreads the keys present over nsplit
-            nsplit = std::min(nsplit_max, (span + splitsz - 1) / splitsz);
-            hipLaunchKernelGGL(k_attn_split<3>, dim3(m.Hkv, nsplit, T), dim3(128), 0, st, q, sl.K, sl.V, sl.cap, dpos,
-                               span, m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit, kvt);
+            nsplit = std::min(sl.far ? nsplit_far : nsplit_max, (span + splitsz - 1) / splitsz);
+            hipLaunchKernelGGL(k_attn_split<3>, dim3(m.Hkv, nsplit, T), dim3(128), 0, ast, aq, sl.K, sl.V, sl.cap, adp,
+                               span, m.Hkv, arb, m.ext, ask, apt, splitsz, nsplit, kvt);
         } else {
             // the keys a 16-token tile can see: at most span + 15; split so the card has enough blocks
             const int nk = std::min(span + 15, pos + T), tiles = (T + 15) / 16;
@@ -2281,14 +2330,20 @@ struct Runner {
             if (kvt == 2) {   // F16 cache: the matrix cores, 16 (token, head) rows a block
                 const int sz16 = (splitsz + 15) / 16 * 16;
                 const int ns16 = (nk + sz16 - 1) / sz16;
-                hipLaunchKernelGGL(k_attn_pf_w, dim3(m.Hkv, (3 * T + 15) / 16, ns16), dim3(WS), 0, st, q, sl.K, sl.V,
-                                   sl.cap, dpos, span, m.Hkv, relb, m.ext, sinkv, part, sz16, ns16, T);
+                hipLaunchKernelGGL(k_attn_pf_w, dim3(m.Hkv, (3 * T + 15) / 16, ns16), dim3(WS), 0, ast, aq, sl.K, sl.V,
+                                   sl.cap, adp, span, m.Hkv, arb, m.ext, ask, apt, sz16, ns16, T);
                 nsplit = ns16;
             } else
-                hipLaunchKernelGGL(k_attn_pf, dim3(m.Hkv, tiles, nsplit), dim3(256), 0, st, q, sl.K, sl.V, sl.cap, dpos,
-                                   span, m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit, T, kvt);
+                hipLaunchKernelGGL(k_attn_pf, dim3(m.Hkv, tiles, nsplit), dim3(256), 0, ast, aq, sl.K, sl.V, sl.cap, adp,
+                                   span, m.Hkv, arb, m.ext, ask, apt, splitsz, nsplit, T, kvt);
         }
-        hipLaunchKernelGGL(k_attn_combine, dim3(m.H, T), dim3(m.D), 0, st, part, nsplit, g, att, m.D);
+        hipLaunchKernelGGL(k_attn_combine, dim3(m.H, T), dim3(m.D), 0, ast, apt, nsplit, ag, aat, m.D);
+        if (sl.far) {
+            CK(hipEventRecord(ev1, st1));
+            CK(hipSetDevice(dev0));
+            CK(hipStreamWaitEvent(st, ev1, 0));
+            CK(hipMemcpyAsync(att, att1, (size_t) T * m.H * m.D * 4, hipMemcpyDeviceToDevice, st));
+        }
         mmv(T, {MV{&l.wo, att, t0, 0}});
         float * h1 = pool[pool_i++];
         const bool starts = ip % m.block == 0;
@@ -2448,7 +2503,7 @@ struct Runner {
         hpos[1] = tok;
         CK(hipMemcpyAsync(dpos, hpos, 4, hipMemcpyHostToDevice, st));
         CK(hipMemcpyAsync(dtok, hpos + 1, 4, hipMemcpyHostToDevice, st));
-        if (!eager_done) {
+        if (!eager_done || (kvdev >= 0 && !far_graph)) {
             body(1, false);
             eager_done = true;
         } else {
@@ -3141,6 +3196,7 @@ int main(int argc, char ** argv) {
     bool serve_mode = false;   // --serve: the engine's line protocol on stdin / stdout
     std::vector<int> eos;
     Sampling defaults;
+    int kv_gpu = -1;   // --kv-gpu N: the full attention layers' K/V and attention on card N (long contexts)
     int kvt = 0;   // --kv-q8 / --kv-f16: the KV cache in q8_0 / F16 (default F32)
     int n_pf = 0;   // --bench-prefill N: a fresh N-token prompt (the text repeated) in chunks, only the last logits   // --chunk N: the text in chunks of N   // --bench N: N decode steps after the text, timed
     for (int i = 1; i < argc; ++i) {
@@ -3168,6 +3224,7 @@ int main(int argc, char ** argv) {
         else if (a == "--dspark-n") n_draft = std::atoi(next());
         else if (a == "--dspark-max-temp") draft_tmax = (float) std::atof(next());
         else if (a == "--kv-f16") kvt = 2;
+        else if (a == "--kv-gpu") kv_gpu = std::atoi(next());
         else { std::fprintf(stderr, "almond-inkling-native: unknown argument %s\n", a.c_str()); return 2; }
     }
     if (path.empty() || (score.empty() && !serve_mode)) {
@@ -3183,11 +3240,16 @@ int main(int argc, char ** argv) {
     std::fprintf(stderr, "loaded in %.1f s\n",
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     if (serve_mode) {
-        Runner run(m, ctx, kvt, chunk > 1 ? std::min(chunk, 1024) : 1024);
+        Runner run(m, ctx, kvt, chunk > 1 ? std::min(chunk, 1024) : 1024, false, kv_gpu);
         size_t fr = 0, tot = 0;
         CK(hipMemGetInfo(&fr, &tot));
         std::fprintf(stderr, "almond-inkling-native: context %d, KV %s, chunks of %d, %.2f GiB of VRAM free\n", ctx,
                      kvt == 1 ? "q8_0" : kvt == 2 ? "f16" : "f32", run.TM, fr / 1073741824.0);
+        if (kv_gpu >= 0) {
+            CK(hipSetDevice(kv_gpu)); CK(hipMemGetInfo(&fr, &tot)); CK(hipSetDevice(gpu));
+            std::fprintf(stderr, "almond-inkling-native: full attention K/V on card %d, %.2f GiB free there\n", kv_gpu,
+                         fr / 1073741824.0);
+        }
         if (!dspark.empty()) {
             run.dspark_load(dspark);
             n_draft = std::max(1, std::min(n_draft, run.dr->B - 1));
@@ -3201,7 +3263,7 @@ int main(int argc, char ** argv) {
     { std::ifstream f(score); int v; while (f >> v) ids.push_back(v); }
     if ((int) ids.size() > ctx) ids.resize(ctx);
     if (n_pf > 0) {
-        Runner pr(m, ctx, kvt, std::max(2, std::min(chunk, 1024)));
+        Runner pr(m, ctx, kvt, std::max(2, std::min(chunk, 1024)), false, kv_gpu);
         std::vector<int> t;
         while ((int) t.size() < n_pf) t.insert(t.end(), ids.begin(), ids.end());
         t.resize((size_t) n_pf);
@@ -3215,7 +3277,7 @@ int main(int argc, char ** argv) {
         std::printf("BENCH prefill %d tokens in chunks of %d: %.1f tok/s (%.2f s)\n", n_pf, c, n_pf / ps, ps);
         return 0;
     }
-    Runner run(m, ctx, kvt, std::max(2, std::min(chunk, 1024)), true);
+    Runner run(m, ctx, kvt, std::max(2, std::min(chunk, 1024)), true, kv_gpu);
     std::vector<float> lg;
     FILE * df = dump.empty() ? nullptr : std::fopen(dump.c_str(), "wb");
     double nll = 0;
