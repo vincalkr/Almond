@@ -5,7 +5,10 @@
 // Step 1 (this file): plain kernels, one op at a time, F32 activations, one token at a time - written to be checked
 // against llama.cpp, not to be fast.
 //
-//   almond-inkling-native -m MODEL.gguf [--gpu N] [-c N] --score IDS.txt [--dump-logits FILE N]
+//   almond-inkling-native -m MODEL.gguf [--gpu N] [-c N] [--kv-f16 | --kv-q8] [--ubatch N] --serve [--eos ID]...
+//   almond-inkling-native -m MODEL.gguf [--gpu N] [-c N] --score IDS.txt [--chunk N] [--dump-logits FILE N]
+//
+// --serve: almond-inkling's line protocol (src/inkling/inkling_serve.cpp), what ./almond -m inkling runs.
 //
 // --score: the token ids of a text (whitespace separated); every token is fed in order, and the mean negative
 // log-likelihood of the second half's next tokens gives a PPL (the same rule as almond-inkling --score).
@@ -19,6 +22,14 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <cstdarg>
+#include <deque>
+#include <mutex>
+#include <random>
+#include <thread>
+#include <unordered_map>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -35,6 +46,10 @@
 
 #define CK(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) { \
     std::fprintf(stderr, "HIP error %s at %s:%d\n", hipGetErrorString(e_), __FILE__, __LINE__); std::exit(1); } } while (0)
+
+#ifndef ALMOND_VERSION
+#define ALMOND_VERSION "dev"
+#endif
 
 namespace {
 
@@ -698,9 +713,27 @@ __global__ void k_conv_res(const float * x, const float * w, float * hist, int C
     hist[c] = h0; hist[C + c] = h1; hist[2 * C + c] = h2;
 }
 // clip q and r (times tau on full layers), clip k and RMS-norm v, and write k and v to the cache slot; one block a head
+// KV cache rows (one position, one KV head, D = 128): F32, or q8_0 (--kv-q8: 128 int8 then 4 F16 scales, 136 bytes)
+constexpr int KVQ8_ROW = 136;
+// kvt: 0 F32, 1 q8_0, 2 F16
+__device__ __forceinline__ float4 kv_load(const void * C, size_t row, int l4, int q8) {
+    if (q8 == 2) {
+        const uint2 u = *(const uint2 *) ((const uint8_t *) C + row * 256 + 8 * l4);
+        const __half2 a = __builtin_bit_cast(__half2, u.x), b = __builtin_bit_cast(__half2, u.y);
+        return make_float4(__low2float(a), __high2float(a), __low2float(b), __high2float(b));
+    }
+    if (q8) {
+        const uint8_t * b = (const uint8_t *) C + row * KVQ8_ROW;
+        const uint32_t u = *(const uint32_t *) (b + 4 * l4);
+        const float d = __half2float(((const __half *) (b + 128))[l4 >> 3]);
+        return make_float4((float) (int8_t) (u & 0xFF) * d, (float) (int8_t) ((u >> 8) & 0xFF) * d,
+                           (float) (int8_t) ((u >> 16) & 0xFF) * d, (float) (int8_t) (u >> 24) * d);
+    }
+    return *(const float4 *) ((const float *) C + row * 128 + l4 * 4);
+}
 __global__ void k_qkvr(float * q, const float * k, const float * v, float * r, const float * qs, const float * rs, int H,
                        int Hkv, int D, int nrel, float th, float rth, const int * pos, float alpha, float floor_, float eps,
-                       float * Kc, float * Vc, int cap) {
+                       void * Kc, void * Vc, int cap, int q8) {
     int b = blockIdx.x;
     const int tk = blockIdx.y, p = *pos + tk;
     q += (size_t) tk * H * D; k += (size_t) tk * Hkv * D; v += (size_t) tk * Hkv * D; r += (size_t) tk * H * nrel;
@@ -709,11 +742,12 @@ __global__ void k_qkvr(float * q, const float * k, const float * v, float * r, c
     const float * sc = nullptr;
     int n = D;
     float t = th, f2 = 1.0f;
-    float * dst = nullptr;
+    void * dst = nullptr;
+    size_t drow = 0;
     bool vnorm = false;
     if (b < H) { x = q + (size_t) b * D; sc = qs + (size_t) b * D; f2 = tau; }
-    else if ((b -= H) < Hkv) { x = (float *) k + (size_t) b * D; dst = Kc + ((size_t) (p % cap) * Hkv + b) * D; }
-    else if ((b -= Hkv) < Hkv) { x = (float *) v + (size_t) b * D; dst = Vc + ((size_t) (p % cap) * Hkv + b) * D; vnorm = true; }
+    else if ((b -= H) < Hkv) { x = (float *) k + (size_t) b * D; dst = Kc; drow = (size_t) (p % cap) * Hkv + b; }
+    else if ((b -= Hkv) < Hkv) { x = (float *) v + (size_t) b * D; dst = Vc; drow = (size_t) (p % cap) * Hkv + b; vnorm = true; }
     else { b -= Hkv; x = r + (size_t) b * nrel; sc = rs + (size_t) b * nrel; n = nrel; t = rth; f2 = tau; }
     float a = 0.0f;
     for (int i = threadIdx.x; i < n; i += blockDim.x) { const float y = x[i] * (sc ? sc[i] : 1.0f); a += y * y; }
@@ -721,7 +755,18 @@ __global__ void k_qkvr(float * q, const float * k, const float * v, float * r, c
     const float f = vnorm ? rsqrtf(a / n + eps) : fminf(fmaxf(t / (sqrtf(a) + 1e-6f), 0.0f), 1.0f) * f2;
     for (int i = threadIdx.x; i < n; i += blockDim.x) {
         const float y = x[i] * (sc ? sc[i] : 1.0f) * f;
-        if (dst) dst[i] = y; else x[i] = y;
+        if (!dst) x[i] = y;
+        else if (!q8) ((float *) dst)[drow * D + i] = y;
+        else if (q8 == 2) ((__half *) dst)[drow * D + i] = __float2half(y);
+        else {   // q8_0 as llama.cpp rounds it: d = amax / 127 per 32 values (one wave: blockDim = D = 128)
+            float am = fabsf(y);
+#pragma unroll
+            for (int o = WS / 2; o > 0; o >>= 1) am = fmaxf(am, __shfl_xor(am, o, WS));
+            const float d = am / 127.0f, id = d ? 1.0f / d : 0.0f;
+            uint8_t * rb = (uint8_t *) dst + drow * KVQ8_ROW;
+            rb[i] = (uint8_t) (int8_t) roundf(y * id);
+            if ((i & 31) == 0) ((__half *) (rb + 128))[i >> 5] = __float2half(d);
+        }
     }
 }
 
@@ -741,9 +786,9 @@ __global__ void k_relbias(const float * R, const float * table, int nrel, int ex
 // flash-decoding, D = 128, G query heads per KV head: grid (Hkv, nsplit), 4 waves; lane l holds dims 4l..4l+3.
 // part[(h * nsplit + s) * (D + 2)]: m, l, acc[D]
 template <int G>
-__global__ void k_attn_split(const float * q, const float * Kc, const float * Vc, int cap, const int * dpos, int span,
+__global__ void k_attn_split(const float * q, const void * Kc, const void * Vc, int cap, const int * dpos, int span,
                              int Hkv, const float * bias, int ext, const float * sink, float * part, int splitsz,
-                             int nsplit) {
+                             int nsplit, int q8) {
     constexpr int D = 128;
     const int kvh = blockIdx.x, sp = blockIdx.y, lane = threadIdx.x % WS, wv = threadIdx.x / WS, tk = blockIdx.z;
     const int pos = *dpos + tk, first = max(0, pos - span + 1);
@@ -761,8 +806,8 @@ __global__ void k_attn_split(const float * q, const float * Kc, const float * Vc
         m[g] = -INFINITY; ls[g] = 0.0f; acc[g] = make_float4(0, 0, 0, 0);
     }
     for (int j = j0 + wv; j <= j1; j += 4) {
-        const size_t row = ((size_t) (j % cap) * Hkv + kvh) * D + lane * 4;
-        const float4 kk = *(const float4 *) (Kc + row), vv = *(const float4 *) (Vc + row);
+        const size_t row = (size_t) (j % cap) * Hkv + kvh;
+        const float4 kk = kv_load(Kc, row, lane, q8), vv = kv_load(Vc, row, lane, q8);
         const int d = pos - j;
 #pragma unroll
         for (int g = 0; g < G; ++g) {
@@ -808,9 +853,9 @@ __global__ void k_attn_split(const float * q, const float * Kc, const float * Vc
 // of the keys, the keys and values staged in LDS 32 at a time and shared by all 48 rows (the decode kernel reads
 // them again for every token). F32 throughout, same online softmax; writes part[] like k_attn_split.
 // grid (Hkv, ceil(T / 16), nsplit), 256 threads
-__global__ void k_attn_pf(const float * q, const float * Kc, const float * Vc, int cap, const int * dpos, int span,
+__global__ void k_attn_pf(const float * q, const void * Kc, const void * Vc, int cap, const int * dpos, int span,
                           int Hkv, const float * bias, int ext, const float * sink, float * part, int splitsz,
-                          int nsplit, int T) {
+                          int nsplit, int T, int q8) {
     constexpr int D = 128, G = 3, KT = 32, R = 6;
     __shared__ float4 Ks[KT][D / 4 + 1];
     __shared__ float Vs[KT][D];
@@ -838,8 +883,8 @@ __global__ void k_attn_pf(const float * q, const float * Kc, const float * Vc, i
             const int kk = i / (D / 4), d4 = (i % (D / 4)) * 4, j = jb + kk;
             float4 a = make_float4(0, 0, 0, 0), b = a;
             if (j <= j1) {
-                const size_t row = ((size_t) (j % cap) * Hkv + kvh) * D + d4;
-                a = *(const float4 *) (Kc + row); b = *(const float4 *) (Vc + row);
+                const size_t row = (size_t) (j % cap) * Hkv + kvh;
+                a = kv_load(Kc, row, d4 / 4, q8); b = kv_load(Vc, row, d4 / 4, q8);
             }
             Ks[kk][d4 / 4] = a;
             *(float4 *) &Vs[kk][d4] = b;
@@ -1333,12 +1378,14 @@ struct Model {
 
 // ---------------------------------------------------------------- one token at a time
 struct Slot {     // a layer visit's cache
-    float *K = nullptr, *V = nullptr, *hist = nullptr;   // hist: [3][Ck], [3][Ck], [3][C], [3][C] for k, v, attn, ffn
+    void *K = nullptr, *V = nullptr;
+    float * hist = nullptr;   // hist: [3][Ck], [3][Ck], [3][C], [3][C] for k, v, attn, ffn
     int cap = 0;
+    size_t kvbytes = 0;   // each of K and V
 };
 
 struct Runner {
-    static constexpr int TM = 1024;    // the largest prompt chunk
+    int TM = 1024;    // the largest prompt chunk
     Model & m;
     int ctx;
     std::vector<Slot> slots;
@@ -1359,7 +1406,10 @@ struct Runner {
 
     float * dalloc(size_t n) { float * p; CK(hipMalloc(&p, n * 4)); CK(hipMemset(p, 0, n * 4)); return p; }
 
-    Runner(Model & m_, int ctx_) : m(m_), ctx(ctx_) {
+    int kvt = 0;   // the KV cache: 0 F32, 1 q8_0, 2 F16
+    bool all_cap = false;   // room for every token's logits (scoring)
+    Runner(Model & m_, int ctx_, int kvt_ = 0, int tm_ = 1024, bool all_cap_ = false)
+        : m(m_), ctx(ctx_), kvt(kvt_), TM(tm_), all_cap(all_cap_) {
         const int C = m.C, Ck = m.Hkv * m.D;
         const size_t T = TM;
         const int n_slots = m.n_phys + (m.passes - 1) * (m.core1 - m.core0);
@@ -1369,8 +1419,10 @@ struct Runner {
             Slot & sl = slots[s];
             // a window layer keeps its window plus a chunk: a chunk's first token still sees its whole window
             sl.cap = m.L[ip].swa ? std::min(ctx, m.swa + TM) : ctx;
-            sl.K = dalloc((size_t) sl.cap * Ck);
-            sl.V = dalloc((size_t) sl.cap * Ck);
+            const size_t kvb = (size_t) sl.cap * m.Hkv * (kvt == 1 ? KVQ8_ROW : kvt == 2 ? m.D * 2 : m.D * 4);
+            CK(hipMalloc(&sl.K, kvb)); CK(hipMemset(sl.K, 0, kvb));
+            CK(hipMalloc(&sl.V, kvb)); CK(hipMemset(sl.V, 0, kvb));
+            sl.kvbytes = kvb;
             sl.hist = dalloc((size_t) 3 * (2 * Ck + 2 * C));
         }
         x = dalloc(T * C); t0 = dalloc(T * C); t1 = dalloc(T * C); t2 = dalloc(T * C);
@@ -1378,13 +1430,13 @@ struct Runner {
         q = dalloc(T * m.H * m.D); k = dalloc(T * Ck); v = dalloc(T * Ck); r = dalloc(T * m.H * m.nrel);
         sinkv = dalloc(T * m.H); att = dalloc(T * m.H * m.D); g = dalloc(T * m.H * m.D);
         dk = dalloc(T * 4 * m.Hkv); dv = dalloc(T * 4 * m.Hkv);
-        scr = dalloc(T * 3 * C); logits = dalloc(T * m.vocab_pad); msgs = dalloc(T * 4 * C);
+        scr = dalloc(T * 3 * C); logits = dalloc((all_cap ? T : 1) * m.vocab_pad); msgs = dalloc(T * 4 * C);
         ctrl_g = dalloc(T * 4 * m.rank); ctrl_a = dalloc(T * 4 * C); ctrl_b = dalloc(T * 4 * C); cat = dalloc(T * 8 * C);
         gu = dalloc(T * m.k_exp * 2 * m.F); hh = dalloc(T * m.k_exp * m.F); wts = dalloc(T * m.k_exp);
         yd = dalloc(T * m.k_exp * C);
         rl = dalloc(T * m.n_exp);
         relb = dalloc(T * m.H * m.ext);
-        part = dalloc(T * m.H * nsplit_max * (m.D + 2));
+        part = dalloc((size_t) std::max<size_t>(nsplit_max, 16 * 4096 / m.Hkv) * m.H * (m.D + 2));   // T x nsplit <= 16 x 4096 / Hkv
         CK(hipMalloc(&ids, T * m.k_exp * 4));
         CK(hipMalloc(&offs, (m.n_exp + 2 + 2 * ((T * m.k_exp + EXP_BT - 1) / EXP_BT + m.n_exp)) * 4));
         CK(hipMalloc(&list, T * m.k_exp * 4));
@@ -1532,7 +1584,7 @@ struct Runner {
                                  {l.swa ? nullptr : dk, l.swa ? nullptr : dv}}, Ck, m.D, cs, T, 4 * m.Hkv);
         hipLaunchKernelGGL(k_qkvr, dim3(2 * m.H + 2 * m.Hkv, T), dim3(128), 0, st, q, k, v, r, l.q_clip, l.rel_clip, m.H,
                            m.Hkv, m.D, m.nrel, m.qk_clip, m.rel_clip, dpos, l.swa ? 0.0f : m.alpha, m.floor_, m.eps,
-                           sl.K, sl.V, sl.cap);
+                           sl.K, sl.V, sl.cap, kvt);
         const int span = l.swa ? std::min(m.swa, ctx) : ctx;
         hipLaunchKernelGGL(k_relbias, dim3(m.H, T), dim3(256), 0, st, r, l.rel_bias, m.nrel, m.ext, sinkv, relb);
         int nsplit;
@@ -1540,7 +1592,7 @@ struct Runner {
             const int splitsz = std::max(64, (span + nsplit_max - 1) / nsplit_max);
             nsplit = (span + splitsz - 1) / splitsz;
             hipLaunchKernelGGL(k_attn_split<3>, dim3(m.Hkv, nsplit, T), dim3(128), 0, st, q, sl.K, sl.V, sl.cap, dpos,
-                               span, m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit);
+                               span, m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit, kvt);
         } else {
             // the keys a 16-token tile can see: at most span + 15; split so the card has enough blocks
             const int nk = std::min(span + 15, pos + T), tiles = (T + 15) / 16;
@@ -1549,7 +1601,7 @@ struct Runner {
             const int splitsz = ((nk + nsplit - 1) / nsplit + 31) / 32 * 32;
             nsplit = (nk + splitsz - 1) / splitsz;
             hipLaunchKernelGGL(k_attn_pf, dim3(m.Hkv, tiles, nsplit), dim3(256), 0, st, q, sl.K, sl.V, sl.cap, dpos,
-                               span, m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit, T);
+                               span, m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit, T, kvt);
         }
         hipLaunchKernelGGL(k_attn_combine, dim3(m.H, T), dim3(m.D), 0, st, part, nsplit, g, att, m.D);
         mmv(T, {MV{&l.wo, att, t0, 0}});
@@ -1599,6 +1651,96 @@ struct Runner {
         cur = h2;
     }
 
+    // ---- the state that cannot be cut back (serve): the convolution histories and the window layers' rings. A full
+    // attention layer's rows below n are never written again, so a checkpoint at n needs none of them.
+    size_t hist_bytes() const { return (size_t) 3 * (2 * m.Hkv * m.D + 2 * m.C) * 4; }
+    bool ring(const Slot & sl) const { return sl.cap < ctx; }
+    void clear() {
+        pos = 0;
+        for (auto & sl : slots) CK(hipMemsetAsync(sl.hist, 0, hist_bytes(), st));
+        CK(hipStreamSynchronize(st));
+    }
+    struct Ckpt { int n; std::vector<uint8_t> data; };
+    void save_state(std::vector<uint8_t> & out) {
+        size_t tot = 0;
+        for (auto & sl : slots) tot += hist_bytes() + (ring(sl) ? 2 * sl.kvbytes : 0);
+        out.resize(tot);
+        uint8_t * p = out.data();
+        for (auto & sl : slots) {
+            CK(hipMemcpyAsync(p, sl.hist, hist_bytes(), hipMemcpyDeviceToHost, st)); p += hist_bytes();
+            if (ring(sl)) {
+                CK(hipMemcpyAsync(p, sl.K, sl.kvbytes, hipMemcpyDeviceToHost, st)); p += sl.kvbytes;
+                CK(hipMemcpyAsync(p, sl.V, sl.kvbytes, hipMemcpyDeviceToHost, st)); p += sl.kvbytes;
+            }
+        }
+        CK(hipStreamSynchronize(st));
+    }
+    void load_state(const std::vector<uint8_t> & in, int n) {
+        const uint8_t * p = in.data();
+        for (auto & sl : slots) {
+            CK(hipMemcpyAsync(sl.hist, p, hist_bytes(), hipMemcpyHostToDevice, st)); p += hist_bytes();
+            if (ring(sl)) {
+                CK(hipMemcpyAsync(sl.K, p, sl.kvbytes, hipMemcpyHostToDevice, st)); p += sl.kvbytes;
+                CK(hipMemcpyAsync(sl.V, p, sl.kvbytes, hipMemcpyHostToDevice, st)); p += sl.kvbytes;
+            }
+        }
+        CK(hipStreamSynchronize(st));
+        pos = n;
+    }
+    // the whole cache to a file (SAVE): the state above, then the full layers' rows below pos
+    bool save_file(const std::string & path, const std::vector<int> & toks, size_t & bytes) {
+        FILE * f = std::fopen(path.c_str(), "wb");
+        if (!f) return false;
+        std::vector<uint8_t> st_;
+        save_state(st_);
+        const uint32_t magic = 0x4B4E4931, n = (uint32_t) toks.size(), kt = (uint32_t) kvt;
+        bool ok = std::fwrite(&magic, 4, 1, f) == 1 && std::fwrite(&n, 4, 1, f) == 1 && std::fwrite(&kt, 4, 1, f) == 1 &&
+                  std::fwrite(toks.data(), 4, n, f) == n && std::fwrite(st_.data(), 1, st_.size(), f) == st_.size();
+        std::vector<uint8_t> buf;
+        for (auto & sl : slots) {
+            if (ring(sl) || !ok) continue;
+            const size_t b = sl.kvbytes / (size_t) sl.cap * n;
+            buf.resize(b);
+            for (void * src : {sl.K, sl.V}) {
+                CK(hipMemcpy(buf.data(), src, b, hipMemcpyDeviceToHost));
+                ok = ok && std::fwrite(buf.data(), 1, b, f) == b;
+            }
+        }
+        bytes = (size_t) std::ftell(f);
+        return std::fclose(f) == 0 && ok;
+    }
+    bool load_file(const std::string & path, std::vector<int> & toks, size_t & bytes) {
+        FILE * f = std::fopen(path.c_str(), "rb");
+        if (!f) return false;
+        uint32_t magic = 0, n = 0, kt = 0;
+        bool ok = std::fread(&magic, 4, 1, f) == 1 && std::fread(&n, 4, 1, f) == 1 && std::fread(&kt, 4, 1, f) == 1 &&
+                  magic == 0x4B4E4931 && kt == (uint32_t) kvt && (int) n < ctx;
+        if (ok) {
+            toks.resize(n);
+            ok = std::fread(toks.data(), 4, n, f) == n;
+        }
+        std::vector<uint8_t> st_;
+        if (ok) {
+            size_t tot = 0;
+            for (auto & sl : slots) tot += hist_bytes() + (ring(sl) ? 2 * sl.kvbytes : 0);
+            st_.resize(tot);
+            ok = std::fread(st_.data(), 1, tot, f) == tot;
+        }
+        std::vector<uint8_t> buf;
+        for (auto & sl : slots) {
+            if (ring(sl) || !ok) continue;
+            const size_t b = sl.kvbytes / (size_t) sl.cap * n;
+            buf.resize(b);
+            for (void * dst : {sl.K, sl.V}) {
+                ok = ok && std::fread(buf.data(), 1, b, f) == b;
+                if (ok) CK(hipMemcpy(dst, buf.data(), b, hipMemcpyHostToDevice));
+            }
+        }
+        bytes = (size_t) std::ftell(f);
+        std::fclose(f);
+        if (ok) load_state(st_, (int) n);
+        return ok;
+    }
     // feed one token: the first one runs eagerly (it writes the mix pointer sets), the second is captured as a graph,
     // every later one replays it
     void step(int tok, std::vector<float> * out) {
@@ -1686,11 +1828,266 @@ struct Runner {
     }
 };
 
+// ---------------------------------------------------------------- serve (the protocol of src/inkling/inkling_serve.cpp)
+struct LineQueue {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<std::string> q;
+    bool closed = false;
+    std::atomic<bool> stop{false};
+    void run() {
+        char * line = nullptr;
+        size_t cap = 0;
+        ssize_t n;
+        while ((n = getline(&line, &cap, stdin)) >= 0) {
+            std::string s(line, (size_t) n);
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+            if (s == "STOP") { stop = true; continue; }
+            std::lock_guard<std::mutex> lk(mu);
+            q.push_back(s);
+            cv.notify_one();
+        }
+        std::free(line);
+        std::lock_guard<std::mutex> lk(mu);
+        closed = true;
+        cv.notify_one();
+    }
+    bool pop(std::string & s) {
+        std::unique_lock<std::mutex> lk(mu);
+        cv.wait(lk, [&] { return closed || !q.empty(); });
+        if (q.empty()) return false;
+        s = q.front();
+        q.pop_front();
+        return true;
+    }
+};
+bool parse_ids(const std::string & s, std::vector<int> & out) {
+    out.clear();
+    const char * p = s.c_str();
+    while (*p) {
+        char * e = nullptr;
+        const long long v = std::strtoll(p, &e, 10);
+        if (e == p) return false;
+        out.push_back((int) v);
+        p = e;
+        if (*p == ',') ++p;
+        else if (*p) return false;
+    }
+    return !out.empty();
+}
+void say(const char * fmt, ...) __attribute__((format(printf, 1, 2)));
+void say(const char * fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    std::vprintf(fmt, ap);
+    va_end(ap);
+    std::fflush(stdout);
+}
+struct Sampling {
+    float temp = 1.0f, top_p = 1.0f, min_p = 0.0f, rep = 1.0f, freq = 0.0f, pres = 0.0f;
+    int top_k = 0, last_n = 64;
+    uint64_t seed = 0;
+};
+// the same sampler as almond-inkling's (and hy4_sample)
+int sample(const float * logits, int V, const Sampling & s, const std::vector<int> & hist, std::mt19937_64 & rng) {
+    std::vector<float> l(logits, logits + V);
+    if (s.rep != 1.0f || s.freq != 0.0f || s.pres != 0.0f) {
+        std::unordered_map<int, int> cnt;
+        const size_t from = s.last_n > 0 && hist.size() > (size_t) s.last_n ? hist.size() - (size_t) s.last_n : 0;
+        for (size_t i = from; i < hist.size(); ++i) ++cnt[hist[i]];
+        for (const auto & [t, c] : cnt) {
+            if (t < 0 || t >= V) continue;
+            float & x = l[(size_t) t];
+            if (s.rep != 1.0f) x = x > 0 ? x / s.rep : x * s.rep;
+            x -= s.freq * (float) c + s.pres;
+        }
+    }
+    if (s.temp <= 0.0f) return (int) (std::max_element(l.begin(), l.end()) - l.begin());
+    std::vector<int32_t> idx((size_t) V);
+    for (int i = 0; i < V; ++i) idx[(size_t) i] = i;
+    const size_t cut = std::min<size_t>(s.top_k > 0 ? (size_t) s.top_k : (size_t) V, 4096);
+    std::partial_sort(idx.begin(), idx.begin() + (ptrdiff_t) cut, idx.end(),
+                      [&](int32_t a, int32_t b) { return l[(size_t) a] > l[(size_t) b]; });
+    const size_t k = cut;
+    const float mx = l[(size_t) idx[0]];
+    std::vector<double> p(k);
+    for (size_t i = 0; i < k; ++i) p[i] = std::exp((double) (l[(size_t) idx[i]] - mx) / s.temp);
+    size_t keep = k;
+    if (s.min_p > 0.0f)
+        for (size_t i = 0; i < k; ++i) if (p[i] < s.min_p * p[0]) { keep = std::max<size_t>(1, i); break; }
+    if (s.top_p < 1.0f) {
+        double acc = 0, tot = 0;
+        for (size_t i = 0; i < keep; ++i) tot += p[i];
+        for (size_t i = 0; i < keep; ++i) {
+            acc += p[i];
+            if (acc >= s.top_p * tot) { keep = i + 1; break; }
+        }
+    }
+    double tot = 0;
+    for (size_t i = 0; i < keep; ++i) tot += p[i];
+    std::uniform_real_distribution<double> u(0.0, tot);
+    double r = u(rng), acc = 0;
+    for (size_t i = 0; i < keep; ++i) {
+        acc += p[i];
+        if (r <= acc) return idx[i];
+    }
+    return idx[0];
+}
+int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling & defaults) {
+    std::vector<int> hist;                 // the tokens in the cache
+    std::deque<Runner::Ckpt> ckpts;        // prompt-end checkpoints, the newest last
+    constexpr size_t kMaxCkpt = 4;
+    auto clear = [&] { run.clear(); hist.clear(); ckpts.clear(); };
+    auto save_ckpt = [&] {
+        if (!ckpts.empty() && ckpts.back().n == (int) hist.size()) return;
+        Runner::Ckpt c{(int) hist.size(), {}};
+        run.save_state(c.data);
+        while (ckpts.size() >= kMaxCkpt) ckpts.pop_front();
+        ckpts.push_back(std::move(c));
+    };
+    auto restore_ckpt = [&](size_t limit) -> size_t {
+        while (!ckpts.empty() && (size_t) ckpts.back().n > limit) ckpts.pop_back();
+        if (ckpts.empty() || ckpts.back().n == 0) return 0;
+        run.load_state(ckpts.back().data, ckpts.back().n);
+        hist.resize((size_t) ckpts.back().n);
+        return hist.size();
+    };
+    LineQueue lq;
+    std::thread rd([&] { lq.run(); });
+    rd.detach();
+    std::mt19937_64 rng(std::random_device{}());
+    const long long n_ctx = run.ctx;
+    say("INFO engine=%s model=inkling context=%lld mtp=0 native=1 kv=%s\n", ALMOND_VERSION, n_ctx,
+        run.kvt == 1 ? "q8_0" : run.kvt == 2 ? "f16" : "f32");
+    say("READY %lld stop\n", n_ctx);
+    std::string line;
+    std::vector<float> lg;
+    while (lq.pop(line)) {
+        if (line.empty()) continue;
+        if (line == "QUIT") break;
+        if (line == "CONVCLEAR") { clear(); say("CLEARED 0 0\n"); continue; }
+        if (line.rfind("SAVE ", 0) == 0 || line.rfind("RESTORE ", 0) == 0) {
+            const bool save = line[0] == 'S';
+            const std::string file = line.substr(save ? 5 : 8);
+            const auto t0 = std::chrono::steady_clock::now();
+            size_t bytes = 0;
+            bool ok;
+            if (save) ok = run.save_file(file, hist, bytes);
+            else {
+                clear();
+                std::vector<int> t;
+                ok = run.load_file(file, t, bytes);
+                if (ok) hist = t; else clear();
+            }
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            if (ok) say("%s %zu %zu %.1f\n", save ? "SAVED" : "RESTORED", hist.size(), bytes, ms);
+            else say("SERR %s 0 the cache file could not be %s\n", save ? "write" : "read", save ? "written" : "read");
+            continue;
+        }
+        if (line.rfind("GENI ", 0) == 0) { say("ERR images are not wired for Inkling yet\n"); continue; }
+        if (line.rfind("GEN ", 0) != 0) { say("ERR unknown command\n"); continue; }
+        std::vector<std::string> f;
+        for (size_t i = 4; i < line.size();) {
+            size_t j = line.find(' ', i);
+            if (j == std::string::npos) j = line.size();
+            if (j > i) f.push_back(line.substr(i, j - i));
+            i = j + 1;
+        }
+        std::vector<int> ids;
+        if (f.size() < 2 || !parse_ids(f.back(), ids)) { say("ERR bad GEN line\n"); continue; }
+        const int max_new = std::max(1, std::atoi(f[0].c_str()));
+        Sampling s = defaults;
+        for (size_t i = 1; i + 1 < f.size(); ++i) {
+            const size_t eq = f[i].find('=');
+            if (eq == std::string::npos) continue;
+            const std::string k = f[i].substr(0, eq);
+            const double x = std::atof(f[i].c_str() + eq + 1);
+            if (k == "temperature") s.temp = (float) x;
+            else if (k == "top_p") s.top_p = (float) x;
+            else if (k == "top_k") s.top_k = (int) x;
+            else if (k == "min_p") s.min_p = (float) x;
+            else if (k == "penalty_repeat") s.rep = (float) x;
+            else if (k == "penalty_freq") s.freq = (float) x;
+            else if (k == "penalty_present") s.pres = (float) x;
+            else if (k == "penalty_last_n") s.last_n = (int) x;
+            else if (k == "seed") s.seed = (uint64_t) x;
+        }
+        if (s.seed) rng.seed(s.seed);
+        bool bad = false;
+        for (int t : ids) if (t < 0 || t >= m.vocab) bad = true;
+        if (bad) { say("ERR a token id is outside the vocabulary\n"); continue; }
+        if ((long long) ids.size() + 1 > n_ctx) {
+            say("ERR the prompt (%zu tokens) does not fit the context (%lld)\n", ids.size(), n_ctx);
+            continue;
+        }
+        lq.stop = false;
+        // the cache is kept only when the prompt extends it (the convolution state cannot be cut back)
+        size_t keep = 0;
+        if (!hist.empty() && hist.size() < ids.size() && std::equal(hist.begin(), hist.end(), ids.begin())) keep = hist.size();
+        else {
+            size_t same = 0;
+            while (same < hist.size() && same < ids.size() && hist[same] == ids[same]) ++same;
+            keep = restore_ckpt(std::min(same, ids.size() - 1));
+            if (keep == 0) clear();
+            else say("INFO checkpoint restored at %zu (shared prefix %zu)\n", keep, same);
+        }
+        if (keep > 0) say("RESUME %zu\n", keep);
+        const auto t0 = std::chrono::steady_clock::now();
+        bool cancelled = false;
+        for (size_t at = keep; at < ids.size();) {
+            const size_t n = std::min((size_t) run.TM, ids.size() - at);
+            if (n == 1) run.step(ids[at], &lg);
+            else run.chunk(ids.data() + at, (int) n, false, &lg);
+            hist.insert(hist.end(), ids.begin() + (ptrdiff_t) at, ids.begin() + (ptrdiff_t) (at + n));
+            at += n;
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            say("PP %zu %zu %.0f %.1f\n", at, ids.size(), ms, (double) (at - keep) / std::max(ms, 1e-3) * 1000.0);
+            if (lq.stop && at < ids.size()) { cancelled = true; break; }
+        }
+        const double pp_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (cancelled || lq.stop) {
+            clear();
+            say("DONE 0 %zu %.1f 0.0 cancel 0 0 %zu\n", ids.size(), pp_ms, keep);
+            continue;
+        }
+        save_ckpt();   // the prompt's end: where the next prompt of this conversation will part from the cache
+        const auto t1 = std::chrono::steady_clock::now();
+        int produced = 0;
+        std::string finish = "length";
+        std::vector<int> h(hist);
+        auto emit = [&](int y) {
+            say("T %d\n", y);
+            ++produced;
+            h.push_back(y);
+            if (std::find(eos.begin(), eos.end(), y) != eos.end()) { finish = "stop"; return false; }
+            if (produced >= max_new) return false;
+            if (lq.stop) { finish = "cancel"; return false; }
+            return true;
+        };
+        int y = sample(lg.data(), m.vocab, s, h, rng);
+        bool more = emit(y);
+        while (more) {
+            if ((long long) hist.size() + 1 > n_ctx) break;
+            run.step(y, &lg);
+            hist.push_back(y);
+            y = sample(lg.data(), m.vocab, s, h, rng);
+            more = emit(y);
+        }
+        const double gen_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+        say("DONE %d %zu %.1f %.1f %s 0 0 %zu\n", produced, ids.size(), pp_ms, gen_ms, finish.c_str(), keep);
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
     std::string path, score, dump;
     int gpu = 0, ctx = 4096, n_dump = 0, n_bench = 0, chunk = 1;
+    bool serve_mode = false;   // --serve: the engine's line protocol on stdin / stdout
+    std::vector<int> eos;
+    Sampling defaults;
+    int kvt = 0;   // --kv-q8 / --kv-f16: the KV cache in q8_0 / F16 (default F32)
     int n_pf = 0;   // --bench-prefill N: a fresh N-token prompt (the text repeated) in chunks, only the last logits   // --chunk N: the text in chunks of N   // --bench N: N decode steps after the text, timed
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -1703,9 +2100,17 @@ int main(int argc, char ** argv) {
         else if (a == "--bench") n_bench = std::atoi(next());
         else if (a == "--chunk") chunk = std::atoi(next());
         else if (a == "--bench-prefill") n_pf = std::atoi(next());
+        else if (a == "--kv-q8") kvt = 1;
+        else if (a == "--serve") serve_mode = true;
+        else if (a == "--inkling") {}
+        else if (a == "--ubatch") chunk = std::atoi(next());
+        else if (a == "--eos") eos.push_back(std::atoi(next()));
+        else if (a == "--temp") defaults.temp = (float) std::atof(next());
+        else if (a == "--top-p") defaults.top_p = (float) std::atof(next());
+        else if (a == "--kv-f16") kvt = 2;
         else { std::fprintf(stderr, "almond-inkling-native: unknown argument %s\n", a.c_str()); return 2; }
     }
-    if (path.empty() || score.empty()) {
+    if (path.empty() || (score.empty() && !serve_mode)) {
         std::fprintf(stderr, "usage: almond-inkling-native -m MODEL.gguf [--gpu N] [-c N] --score IDS.txt [--dump-logits FILE N]\n");
         return 2;
     }
@@ -1717,15 +2122,23 @@ int main(int argc, char ** argv) {
     m.load(path);
     std::fprintf(stderr, "loaded in %.1f s\n",
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    if (serve_mode) {
+        Runner run(m, ctx, kvt, chunk > 1 ? std::min(chunk, 1024) : 1024);
+        size_t fr = 0, tot = 0;
+        CK(hipMemGetInfo(&fr, &tot));
+        std::fprintf(stderr, "almond-inkling-native: context %d, KV %s, chunks of %d, %.2f GiB of VRAM free\n", ctx,
+                     kvt == 1 ? "q8_0" : kvt == 2 ? "f16" : "f32", run.TM, fr / 1073741824.0);
+        return serve(m, run, eos, defaults);
+    }
     std::vector<int> ids;
     { std::ifstream f(score); int v; while (f >> v) ids.push_back(v); }
     if ((int) ids.size() > ctx) ids.resize(ctx);
     if (n_pf > 0) {
-        Runner pr(m, ctx);
+        Runner pr(m, ctx, kvt, std::max(2, std::min(chunk, 1024)));
         std::vector<int> t;
         while ((int) t.size() < n_pf) t.insert(t.end(), ids.begin(), ids.end());
         t.resize((size_t) n_pf);
-        const int c = std::max(2, std::min(chunk, Runner::TM));
+        const int c = std::max(2, std::min(chunk, 1024));
         pr.chunk(t.data(), c, false, nullptr);   // warm-up chunk (pointer sets, kernels)
         pr.pos = 0;
         for (auto & sl : pr.slots) CK(hipMemset(sl.hist, 0, (size_t) 3 * (2 * m.Hkv * m.D + 2 * m.C) * 4));
@@ -1735,7 +2148,7 @@ int main(int argc, char ** argv) {
         std::printf("BENCH prefill %d tokens in chunks of %d: %.1f tok/s (%.2f s)\n", n_pf, c, n_pf / ps, ps);
         return 0;
     }
-    Runner run(m, ctx);
+    Runner run(m, ctx, kvt, std::max(2, std::min(chunk, 1024)), true);
     std::vector<float> lg;
     FILE * df = dump.empty() ? nullptr : std::fopen(dump.c_str(), "wb");
     double nll = 0;
@@ -1752,7 +2165,7 @@ int main(int argc, char ** argv) {
         if ((int) i >= first) { nll -= lp; ++n_scored; }
         if (df && (int) i >= first && dumped < n_dump) { std::fwrite(l, 4, (size_t) m.vocab, df); ++dumped; }
     };
-    chunk = std::max(1, std::min(chunk, Runner::TM));
+    chunk = std::max(1, std::min(chunk, 1024));
     for (size_t i = 0; i + 1 < ids.size();) {
         const int T = (int) std::min<size_t>((size_t) chunk, ids.size() - 1 - i);
         if (T == 1) { run.step(ids[i], &lg); score_one(i, lg.data()); }

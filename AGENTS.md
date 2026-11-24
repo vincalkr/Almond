@@ -38,10 +38,13 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   `models/hy4-iq2ah` with the tokenizer extracted by `tools/almond_tokenizer.py`; images with
   `build-vision-hy4/bin/almond-vision` (built against the PR's mtmd); docs/hy4/GGUF_NOTES.md.
 - Inkling 2 Mini: `local/inkling-local.json` (`./almond serve --model inkling`, `./almond -m inkling`): Unsloth's
-  UD-Q4_K_XL (17.6 GB) on card 0, 128K, q8_0 KV. Runs on
-  `build-inkling/almond-inkling` (`src/inkling`), llama.cpp's own `inkling2_loop` graph at the commit `build.sh` pins
-  (with its own ggml, so a separate executable) behind the engine's serve protocol; files in `models/inkling2-mini`
-  (`local/fetch.sh inkling`), measurements in `local/inkling-measure.sh` and docs/inkling/.
+  UD-Q4_K_XL (17.6 GB) on card 0, 128K, F16 KV, on Almond's own engine `build-inkling/almond-inkling-native`
+  (`src/inkling/native`, HIP, no ggml; docs/inkling/ENGINE.md): through the server 1,500 tok/s prefill at 5.7K and
+  1,047 at 48K, 55-64 tok/s decode, against 553 / 337 and 29 on llama.cpp, KL from Q8_0 0.00557 against 0.00573.
+  `local/inkling-llama-local.json` (`./almond -m inkling-llama`) keeps llama.cpp's own `inkling2_loop` graph on
+  `build-inkling/almond-inkling` (`src/inkling`, the commit `build.sh` pins, its own ggml, so a separate executable)
+  with q8_0 KV; files in `models/inkling2-mini` (`local/fetch.sh inkling`), measurements in `local/inkling-measure.sh`
+  and docs/inkling/.
   `local/inkling-dspark-local.json` (`./almond -m inkling-dspark`, opt-in) adds Unsloth's DSpark drafter
   (`local/fetch.sh inkling-dspark`) on `build-inkling/almond-inkling-dspark`, built on llama.cpp PR #32218 in
   `build-inkling/llama.cpp-dspark`: 41-46 tok/s against 29.3 through the server, same distribution.

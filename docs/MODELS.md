@@ -754,6 +754,10 @@ chat prompts. Images through its encoder
 
 ## Inkling 2 Mini (Unsloth UD-Q4_K_XL, `almond-inkling`, 2026-11-23)
 
+Since 2026-11-24 the default configuration runs Almond's own engine (`almond-inkling-native`, docs/inkling/ENGINE.md,
+"Step 4"): F16 KV, prefill about 3x and decode about 2x the numbers below through the server, KL from Q8_0 0.00557
+against 0.00573. What follows is the llama.cpp path, now `local/inkling-llama-local.json`.
+
 Card 0 alone, 128K context, q8_0 KV. It runs on llama.cpp's own `inkling2_loop` graph behind the engine's serve
 protocol (`src/inkling`, built into `build-inkling/`). Quality against ggml-org's Q8_0 on 43,709 tokens of this
 repository's docs: KL 0.00728, same top token 95.90%, PPL +0.13%. ggml-org's IQ4_NL of the same size: KL 0.01416,

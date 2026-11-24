@@ -128,3 +128,40 @@ Where the time goes at 4K in chunks of 1,024 (rocprofv3): the experts 43%, the a
 The experts run at about 50 TFLOPS counting both F16 parts; the two parts are what keeps the activations at F32
 precision, and are kept. At 32K the attention grows; next steps there: the scores and P . V on the matrix cores with
 the same split, and query tiles of 32.
+
+## Step 4, behind the server (2026-11-24)
+
+`almond-inkling-native --serve` speaks almond-inkling's protocol (GEN / PP / T / DONE, RESUME, STOP, CONVCLEAR,
+SAVE / RESTORE) with the same sampler; the chat template, tool calls and effort levels stay in
+`tools/inkling/serve/serve_inkling.py`, unchanged. A prompt that extends the cache keeps it; otherwise the newest of 4
+prompt-end checkpoints inside the shared prefix is restored (the convolution histories and the window layers' rings,
+about 360 MB in RAM each at 128K with chunks of 1,024: a full attention layer's rows below the checkpoint are never
+written again). SAVE writes that state plus the full layers' rows below the cache's end. Checked: after
+SAVE / CONVCLEAR / RESTORE a greedy continuation is the same as the whole prompt read from scratch; an agent's turns
+reuse the previous prompt (115 -> 2,499 -> 4,883 tokens, the earlier ones cached).
+
+KV cache. The model is sensitive to it: on the 1,024-token text, KL from the same engine with F32 KV is 0.00481 with
+q8_0 KV (`--kv-q8`) and 0.00191 with F16 (`--kv-f16`); llama.cpp's own q8_0 KV against its F16 KV: 0.00464, the same
+loss. At 128K, F32 does not fit one card; F16 does (0.91 GiB free with chunks of 1,024), so the configuration uses F16.
+
+Against Q8_0 (128 positions of the text, full logits), as each path is served:
+
+| | KV | KL from Q8_0 | same top token |
+|---|---|---|---|
+| llama.cpp (`local/inkling-llama-local.json`) | q8_0 | 0.00573 | 122 / 128 |
+| ours (`local/inkling-local.json`) | F16 | **0.00557** | **125 / 128** |
+| ours, F32 KV (not servable at 128K) | F32 | 0.00520 | 123 / 128 |
+
+Speed through the server (`/v1/chat/completions`, streamed, temperature 1.0, top_p 1.0, card 0, 128K configuration,
+256 tokens out; prefill = prompt tokens / time to the first token, decode = the rest):
+
+| prompt | llama.cpp prefill | ours prefill | llama.cpp decode | ours decode |
+|---|---|---|---|---|
+| 772 tokens | 461 tok/s | 1,320 tok/s | 29.2 tok/s | 64.3 tok/s |
+| 5,658 | 553 | 1,502 | 29.1 | 55.2 |
+| 47,659 | 337 | 1,047 | 27.2 | 54.2 |
+
+The decode through the server is below `--bench`'s 84 tok/s: every token copies the 200K logits back and sorts them on
+the CPU (the same sampler as llama.cpp's path), and the decode at depth reads more keys. Chat, a tool call and a
+four-turn agent run answered correctly. Quality is the same or better and every speed is higher, so this is the
+default; `./almond -m inkling-llama` keeps the llama.cpp path.
