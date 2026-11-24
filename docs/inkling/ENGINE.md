@@ -208,3 +208,56 @@ Where it stands against project-maya's reported 109 tok/s decode / 2,267 tok/s p
 at 4K on the engine. Decode is bound by the matvecs' bandwidth and ~1,000 launches; prefill by the experts' GEMM at
 about 50 TFLOPS with the two activation parts, and at 32K by the attention's softmax work per 16 keys. Not done yet:
 DSpark in this engine, fewer launches per decode token, larger key blocks in the prompt attention.
+
+## Step 6, DSpark in this engine (2026-11-24)
+
+`--dspark FILE [--dspark-n N] [--dspark-max-temp T]` (opt-in, `local/inkling-dspark-local.json`,
+`./almond -m inkling-dspark`): Unsloth's DSpark drafter for this model, written here from llama.cpp PR #32218's
+dflash / dspark graphs (no llama.cpp code linked):
+- Context: after every target pass the drafter reads the target's residual stream at the inputs of visits 5, 23 and
+  41 and the final norm's output (the GGUF's `dflash.target_layers` 5, 23, 41, 48), mixes them per layer
+  (`ctx_mix`, RMS norm), and keeps K (normed, NeoX rope, base 1e6) and V of every committed token in its own F16 cache
+  (layers 0 and 2: a 1,025-token window ring; layer 1: the whole context). The same mix with `markov_ctx_*` is the
+  Markov head's context state of the last committed token.
+- Draft: the block [last token, 7 mask rows] through the 3 dense layers (Q/K norms, rope, attention with no causal
+  mask over the context and the block, SiLU FFN), the target's head on rows 1..n, then the recurrent Markov head
+  (`joint_proj`: state, `markov_w1[prev]`, the row's hidden, the context state -> gate / candidate / output;
+  `markov_w2` adds its bias; the argmax is the draft token and the next `prev`). Greedy drafts.
+- Check: the target feeds [y, drafts] as one batch (a captured HIP graph per batch size), samples every position with
+  the request's own sampler and keeps the drafts up to the first token it did not sample itself; the output follows
+  the same distribution as without the drafter. The convolution states of the rejected tail are rebuilt from the
+  state before the batch and the batch's inputs, which the verification records (`k_spec_roll`); the KV rows past
+  the kept tokens are rewritten later. `--spec-test` runs a text as verify(4) / keep 2: KL from the token-by-token path
+  max 2e-11 over 511 positions. At temperature 0 the 200 and 400 generated tokens are the same, token for token, with
+  and without the drafter.
+- Small batches (the verification, the drafter's block) go through a matvec that reads each row once for up to 16
+  tokens (`k_mmvT`), and the experts through the decode kernels per entry; the tile GEMMs wasted most of a 64-token
+  tile there (a 4-token verification went from 58.7 to about 20 ms).
+
+Engine (`--serve`, card 0, 128K, F16 KV, chunks of 512, 600-token prompt of the measurement text, 400 tokens out):
+
+| temperature | without | `--dspark-n 2` | 3 | 4 |
+|---|---|---|---|---|
+| 0 | 82.6 tok/s | 109.5 (206/258 accepted) | 115.3 (213/270) | **117.8** (227/303) |
+| 1.0 (drafting forced on) | 78.7 | 75.8 (41/140) | 75.2 (57/210) | 73.3 (53/240) |
+
+A verification of 4 tokens costs about 1.8 single steps (each token reads its own 8 experts; grouping the batch's
+experts was slower: few are shared), so drafting pays above roughly 40% accepted. At temperature 1.0 about 20% of
+the greedy drafts hold, so `--dspark-max-temp` (0.8) leaves those requests undrafted, and within a request a moving
+average of the accepted share under 25% turns drafting off for 32 tokens.
+
+Through the server (`/v1/chat/completions`, streamed, a 786 / 5,672-token prompt asking for code, 512 tokens out):
+
+| temperature | without | DSpark |
+|---|---|---|
+| 0 | 78.5 / 77.0 tok/s | **123.0 / 144.3** |
+| 0.6 | 78.5 / 77.0 | 97.5 / 134.9 |
+| 1.0 | 78.6 / 77.0 | 78.1 / 76.5 (not drafting) |
+
+Prefill with the drafter: 1,152-1,366 tok/s (chunks of 512, the drafter's 0.5 GB and its cache leave 0.61 GiB free)
+against 1,287-1,520.
+
+Found on the way: the server does not forward `temperature=0` (serve/server.py `sampling_keys`: an absent
+temperature is the engine's greedy default), but both Inkling engines defaulted to 1.0, so a request at temperature
+0 was sampled at 1.0. Both now default to greedy, as hy4_serve does; requests without a temperature still get the
+configuration's 1.0 from the server.

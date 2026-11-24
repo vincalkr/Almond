@@ -1,5 +1,5 @@
 {
-  "exe": "build-inkling/almond-inkling-dspark",
+  "exe": "build-inkling/almond-inkling-native",
   "args": [
     "--inkling",
     "-m",
@@ -8,13 +8,13 @@
     "0",
     "-c",
     "131072",
-    "--kv-q8",
+    "--kv-f16",
     "--ubatch",
-    "128",
+    "512",
     "--dspark",
     "models/inkling2-mini/unsloth/dspark-Inkling-2-Mini-Q8_0.gguf",
     "--dspark-n",
-    "3"
+    "4"
   ],
   "cwd": ".",
   "tokenizer": "models/inkling2-mini/tokenizer",

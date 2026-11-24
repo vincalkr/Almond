@@ -492,12 +492,12 @@ __global__ void k_route(const float * logits, const float * bias, int n_exp, int
 }
 // experts gate_up: out[j][2*F] = (W[id_j] . x) * scale[id_j]; grid (rows/8, k)
 __global__ void k_exp_gu(const uint8_t * W, uint32_t type, size_t ebytes, size_t rb, const float * scale, const int * ids,
-                         const float * x, float * out, int N, int K) {
+                         const float * x, float * out, int N, int K, int kx = 1 << 30) {
     fp4_init();
-    const int j = blockIdx.y, e = ids[j];
+    const int j = blockIdx.y, e = ids[j];   // entry j (token j / kx)
     const int n = blockIdx.x * (blockDim.x / WS) + threadIdx.x / WS;
     if (n >= N) return;
-    const float v = row_dot(W + (size_t) e * ebytes + (size_t) n * rb, type, x, K);
+    const float v = row_dot(W + (size_t) e * ebytes + (size_t) n * rb, type, x + (size_t) (j / kx) * K, K);
     if (threadIdx.x % WS == 0) out[(size_t) j * N + n] = v * (scale ? scale[e] : 1.0f);
 }
 // SITU: h = 4 tanh(g/4) sigmoid(g) * 25 tanh(u/25); gu[j][2F] -> h[j][F]
@@ -512,8 +512,9 @@ __global__ void k_situ(const float * gu, float * h, int F, int k, float beta, fl
 __global__ void k_exp_down(const uint8_t * W, uint32_t type, size_t ebytes, size_t rb, const float * scale, const int * ids,
                            const float * wts, const float * h, float * y, int N, int K, int k) {
     fp4_init();
-    const int n = blockIdx.x * (blockDim.x / WS) + threadIdx.x / WS;
+    const int n = blockIdx.x * (blockDim.x / WS) + threadIdx.x / WS, tk = blockIdx.y;   // token tk's k entries
     if (n >= N) return;
+    ids += tk * k; wts += tk * k; h += (size_t) tk * k * K; y += (size_t) tk * N;
     float acc = 0.0f;
     for (int j = 0; j < k; ++j) {
         const int e = ids[j];
@@ -675,7 +676,7 @@ __global__ void k_ctrl_apply(Ctl P, int C) {
     P.out[j][(size_t) t * C + i] = x - tanhf(P.f[j][o4]) * x + tanhf(P.g[j][o4]) * P.m[j][(size_t) t * P.ms + i];
 }
 // K and V convolutions in one launch (blockIdx.y)
-struct Conv2 { float * x[2]; const float * w[2]; float * hist[2]; const float * dyn[2]; };
+struct Conv2 { float * x[2]; const float * w[2]; float * hist[2]; const float * dyn[2]; float * sv[2] = {nullptr, nullptr}; };
 __global__ void k_conv2(Conv2 P, int C, int head_dim, float scale, int T, int dyn_stride) {
     const int j = blockIdx.y, c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C) return;
@@ -683,9 +684,12 @@ __global__ void k_conv2(Conv2 P, int C, int head_dim, float scale, int T, int dy
     const float * w = P.w[j];
     const float w0 = w[c * 4 + 0], w1 = w[c * 4 + 1], w2 = w[c * 4 + 2], w3 = w[c * 4 + 3];
     float h0 = hist[c], h1 = hist[C + c], h2 = hist[2 * C + c];
+    float * sv = P.sv[j];   // speculative verification: the state before the batch, then every input
+    if (sv) { sv[c] = h0; sv[C + c] = h1; sv[2 * C + c] = h2; }
     for (int t = 0; t < T; ++t) {
         float * xp = P.x[j] + (size_t) t * C + c;
         const float v = *xp;
+        if (sv) sv[(size_t) (3 + t) * C + c] = v;
         float o = w0 * h0 + w1 * h1 + w2 * h2 + w3 * v;
         if (P.dyn[j]) {
             const float * tp = P.dyn[j] + (size_t) t * dyn_stride + (c / head_dim) * 4;
@@ -698,14 +702,16 @@ __global__ void k_conv2(Conv2 P, int C, int head_dim, float scale, int T, int dy
 }
 // conv of x (no dynamic taps) plus an optional residual, into dst
 __global__ void k_conv_res(const float * x, const float * w, float * hist, int C, const float * res, float * dst, float scale,
-                           int T) {
+                           int T, float * sv = nullptr) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C) return;
     const float w0 = w[c * 4 + 0], w1 = w[c * 4 + 1], w2 = w[c * 4 + 2], w3 = w[c * 4 + 3];
     float h0 = hist[c], h1 = hist[C + c], h2 = hist[2 * C + c];
+    if (sv) { sv[c] = h0; sv[C + c] = h1; sv[2 * C + c] = h2; }
     for (int t = 0; t < T; ++t) {
         const size_t i = (size_t) t * C + c;
         const float v = x[i];
+        if (sv) sv[(size_t) (3 + t) * C + c] = v;
         const float o = w0 * h0 + w1 * h1 + w2 * h2 + w3 * v;
         dst[i] = (v + o) * scale + (res ? res[i] : 0.0f);
         h0 = h1; h1 = h2; h2 = v;
@@ -963,7 +969,61 @@ __global__ void k_attn_combine(const float * part, int nsplit, const float * gat
 }
 
 
+// speculative rollback: every slot's convolution state after the first `keep` tokens of the verified batch, from the
+// state before it and its inputs (k_conv2 / k_conv_res with sv). grid (ceil((2Ck + 2C) / 256), slots)
+constexpr int SPEC_T = 16;   // the longest verification batch
+__global__ void k_spec_roll(float * const * hists, float * const * specs, int keep, int Ck, int C) {
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= 2 * Ck + 2 * C) return;
+    float * h = hists[blockIdx.y];
+    const float * sp = specs[blockIdx.y];
+    int W, c, hoff, soff;
+    constexpr int R = 3 + SPEC_T;
+    if (e < Ck)                { W = Ck; c = e;              hoff = 0;               soff = 0; }
+    else if (e < 2 * Ck)       { W = Ck; c = e - Ck;         hoff = 3 * Ck;          soff = R * Ck; }
+    else if (e < 2 * Ck + C)   { W = C;  c = e - 2 * Ck;     hoff = 6 * Ck;          soff = 2 * R * Ck; }
+    else                       { W = C;  c = e - 2 * Ck - C; hoff = 6 * Ck + 3 * C;  soff = 2 * R * Ck + R * C; }
+#pragma unroll
+    for (int i = 0; i < 3; ++i) h[hoff + i * W + c] = sp[soff + (size_t) (keep + i) * W + c];
+}
+
 // ---------------------------------------------------------------- batched kernels (prompts)
+// 8 values of a row from column k (a multiple of 8), dequantized
+__device__ __forceinline__ void load8(const uint8_t * row, uint32_t type, int K, int k, float * o);
+// a few tokens (T <= SPEC_T: verification batches, the drafter's block): one wave a row, the row read once for all
+// T tokens. grid (rows / 8), 256 threads; Seg xs / ys: the per-token strides
+constexpr int MMV_T = 16;
+__global__ void k_mmvT(Segs S, int T) {
+    fp4_init();
+    const int row = blockIdx.x * (blockDim.x / WS) + threadIdx.x / WS, lane = threadIdx.x % WS;
+    if (row >= S.start[S.n]) return;
+    int j = 0;
+    while (row >= S.start[j + 1]) ++j;
+    const Seg & g = S.s[j];
+    const int n = row - S.start[j], xs = g.xs ? g.xs : g.K, ys = g.ys ? g.ys : g.N;
+    const uint8_t * w = g.w + (size_t) n * g.rb;
+    float acc[MMV_T];
+#pragma unroll
+    for (int t = 0; t < MMV_T; ++t) acc[t] = 0.0f;
+    for (int c = lane; c < g.K / 8; c += WS) {
+        float wv[8];
+        load8(w, g.type, g.K, c * 8, wv);
+#pragma unroll
+        for (int t = 0; t < MMV_T; ++t) {
+            if (t >= T) break;
+            const float * xp = g.x + (size_t) t * xs + c * 8;
+            const float4 a = *(const float4 *) xp, b = *(const float4 *) (xp + 4);
+            acc[t] += wv[0] * a.x + wv[1] * a.y + wv[2] * a.z + wv[3] * a.w + wv[4] * b.x + wv[5] * b.y + wv[6] * b.z +
+                      wv[7] * b.w;
+        }
+    }
+#pragma unroll
+    for (int t = 0; t < MMV_T; ++t) {
+        if (t >= T) break;
+        const float v = wsum(acc[t]);
+        if (lane == 0) g.y[(size_t) t * ys + n] = v;
+    }
+}
 // 8 values of a row from column k (a multiple of 8), dequantized
 __device__ __forceinline__ void load8(const uint8_t * row, uint32_t type, int K, int k, float * o) {
     if (type == T_Q8P) {
@@ -1389,6 +1449,186 @@ __global__ void k_exp_sum(const float * yd, float * y, int C, int k) {
     y[(size_t) t * C + c] = a;
 }
 
+// ---------------------------------------------------------------- DSpark drafter kernels (Unsloth's Inkling 2 Mini
+// drafter, llama.cpp PR #32218's dflash/dspark graphs: 3 dense layers over context K/V made from the target's
+// features, a block [last token, 7 masks] read without a causal mask, a recurrent Markov head that biases the draft
+// logits and picks the tokens one after another). Its numbers only change which tokens are proposed; the target
+// checks every one with the request's own sampler.
+// out[o][t] = rms(sum_k mix_o[k] * f_k[t]) * norm_o, for the 4 mixes (the 3 layers' context and the Markov state)
+struct DMix { const float * f[4]; const float * mix[4]; const float * norm[4]; float * out[4]; };
+__global__ void k_dmix(DMix P, int C, float eps) {
+    const int t = blockIdx.x, o = blockIdx.y;
+    const float * w = P.mix[o];
+    float * y = P.out[o] + (size_t) t * C;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < C; i += blockDim.x) {
+        float v = 0.0f;
+#pragma unroll
+        for (int k = 0; k < 4; ++k) v += w[k] * P.f[k][(size_t) t * C + i];
+        y[i] = v;
+        ss += v * v;
+    }
+    const float r = rsqrtf(bsum(ss) / C + eps);
+    for (int i = threadIdx.x; i < C; i += blockDim.x) y[i] = y[i] * r * P.norm[o][i];
+}
+// RMS norm of one head (128 values, blockDim 128) times w, then NeoX rope at position pos (pairs i, i + 64)
+__device__ __forceinline__ float head_norm_rope(float v, const float * w, int pos, float theta, float eps, bool rope) {
+    __shared__ float sh[128];
+    const int i = threadIdx.x;
+    const float r = rsqrtf(bsum(v * v) / 128.0f + eps);
+    v = v * r * w[i];
+    if (!rope) return v;
+    sh[i] = v;
+    __syncthreads();
+    const int j = i & 63;
+    const float ang = (float) pos * powf(theta, -2.0f * (float) j / 128.0f);
+    const float cs = cosf(ang), sn = sinf(ang);
+    const float a = sh[j], b = sh[j + 64];
+    __syncthreads();
+    return i < 64 ? a * cs - b * sn : b * cs + a * sn;
+}
+// context K / V of T committed tokens at positions p0..: K normed (k_ctx_norm) and roped, both stored as F16.
+// grid (Hkv, T, layers), 128 threads
+struct DKV { const float * k[3]; const float * v[3]; const float * kn[3]; __half * Kc[3]; __half * Vc[3]; int cap[3]; };
+__global__ void k_dkv(DKV P, int Hkv, int p0, float theta, float eps) {
+    const int h = blockIdx.x, t = blockIdx.y, l = blockIdx.z, i = threadIdx.x, p = p0 + t;
+    const size_t src = ((size_t) t * Hkv + h) * 128 + i, dst = ((size_t) (p % P.cap[l]) * Hkv + h) * 128 + i;
+    const float kv = head_norm_rope(P.k[l][src], P.kn[l], p, theta, eps, true);
+    P.Kc[l][dst] = __float2half(kv);
+    P.Vc[l][dst] = __float2half(P.v[l][src]);
+}
+// the block's Q (normed, roped, in place) and K / V (normed and roped K, raw V, into the cache) at positions n0 + t.
+// grid (H + Hkv, B), 128 threads
+__global__ void k_dqkv(float * q, const float * k, const float * v, const float * qn, const float * kn, int H, int Hkv,
+                       const int * dn0, float theta, float eps, __half * Kc, __half * Vc, int cap) {
+    const int b = blockIdx.x, t = blockIdx.y, i = threadIdx.x, p = *dn0 + t;
+    if (b < H) {
+        float * x = q + ((size_t) t * H + b) * 128;
+        x[i] = head_norm_rope(x[i], qn, p, theta, eps, true);
+    } else {
+        const int h = b - H;
+        const size_t src = ((size_t) t * Hkv + h) * 128 + i, dst = ((size_t) (p % cap) * Hkv + h) * 128 + i;
+        Kc[dst] = __float2half(head_norm_rope(k[src], kn, p, theta, eps, true));
+        Vc[dst] = __float2half(v[src]);
+    }
+}
+// the block's attention, non-causal: every row sees the keys [first, n0 + B - 1], first = n0 - win + 1 on a window
+// layer (the anchor's mask row for the whole block), else 0. grid (H, B, nsplit), 128 threads; part like k_attn_split
+__global__ void k_dattn(const float * q, const __half * Kc, const __half * Vc, int cap, const int * dn0, int B, int win,
+                        int Hkv, float * part, int nsplit) {
+    constexpr int D = 128;
+    const int h = blockIdx.x, t = blockIdx.y, sp = blockIdx.z, H = gridDim.x, kvh = h / (H / Hkv);
+    const int lane = threadIdx.x % WS, wv = threadIdx.x / WS;
+    const int n0 = *dn0, last = n0 + B - 1, first = win > 0 ? max(0, n0 - win + 1) : 0;
+    const int nk = last - first + 1, ssz = (nk + nsplit - 1) / nsplit;
+    const int j0 = first + sp * ssz, j1 = min(last, j0 + ssz - 1);
+    const float4 qv0 = *(const float4 *) (q + ((size_t) t * H + h) * D + lane * 4);
+    const float qs = rsqrtf((float) D);
+    const float4 qv = make_float4(qv0.x * qs, qv0.y * qs, qv0.z * qs, qv0.w * qs);
+    float m = -INFINITY, ls = 0.0f;
+    float4 acc = make_float4(0, 0, 0, 0);
+    for (int j = j0 + wv; j <= j1; j += 4) {
+        const size_t row = (size_t) (j % cap) * Hkv + kvh;
+        const float4 kk = kv_load(Kc, row, lane, 2), vv = kv_load(Vc, row, lane, 2);
+        const float sc = wsum(qv.x * kk.x + qv.y * kk.y + qv.z * kk.z + qv.w * kk.w);
+        const float mn = fmaxf(m, sc), f = expf(m - mn), p = expf(sc - mn);
+        ls = ls * f + p;
+        acc = make_float4(acc.x * f + p * vv.x, acc.y * f + p * vv.y, acc.z * f + p * vv.z, acc.w * f + p * vv.w);
+        m = mn;
+    }
+    __shared__ float sm[4], sl[4];
+    __shared__ float4 sa[4][WS];
+    if (lane == 0) { sm[wv] = m; sl[wv] = ls; }
+    sa[wv][lane] = acc;
+    __syncthreads();
+    if (wv == 0) {
+        float M = -INFINITY;
+        for (int w = 0; w < 4; ++w) M = fmaxf(M, sm[w]);
+        float L = 0.0f;
+        float4 A = make_float4(0, 0, 0, 0);
+        for (int w = 0; w < 4; ++w) {
+            const float f = sm[w] == -INFINITY ? 0.0f : expf(sm[w] - M);
+            L += sl[w] * f;
+            const float4 x = sa[w][lane];
+            A = make_float4(A.x + x.x * f, A.y + x.y * f, A.z + x.z * f, A.w + x.w * f);
+        }
+        float * o = part + (((size_t) t * H + h) * nsplit + sp) * (D + 2);
+        if (lane == 0) { o[0] = M; o[1] = L; }
+        *(float4 *) (o + 2 + lane * 4) = A;
+    }
+}
+// merge the splits (no sink): grid (H, B), D threads
+__global__ void k_dcomb(const float * part, int nsplit, float * out, int D) {
+    const int h = blockIdx.x, H = gridDim.x, t = blockIdx.y, i = threadIdx.x;
+    const float * ph = part + ((size_t) t * H + h) * nsplit * (D + 2);
+    float M = -INFINITY;
+    for (int s = 0; s < nsplit; ++s) M = fmaxf(M, ph[(size_t) s * (D + 2)]);
+    float L = 0.0f, A = 0.0f;
+    for (int s = 0; s < nsplit; ++s) {
+        const float ms = ph[(size_t) s * (D + 2)];
+        if (ms == -INFINITY) continue;
+        const float f = expf(ms - M);
+        L += ph[(size_t) s * (D + 2) + 1] * f;
+        A += ph[(size_t) s * (D + 2) + 2 + i] * f;
+    }
+    out[((size_t) t * H + h) * D + i] = A / L;
+}
+__global__ void k_silu_mul(const float * g, const float * u, float * y, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) { const float a = g[i]; y[i] = a / (1.0f + expf(-a)) * u[i]; }
+}
+// block input: row 0 the anchor's embedding (normed by the caller), rows 1.. the mask rows
+__global__ void k_dmask(const float * mask, float * x, int C, int B) {
+    const int t = blockIdx.y + 1, i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t < B && i < C) x[(size_t) t * C + i] = mask[(size_t) (t - 1) * C + i];
+}
+// Markov step input [state, w1[prev], hidden_i, f_rnn] (5,120 values), w1 BF16 rows of R
+__global__ void k_mk_joint(const float * state, const uint16_t * w1, const int * prev, const float * hid,
+                           const float * frnn, float * joint, int R, int C) {
+    const uint16_t * wr = w1 + (size_t) *prev * R;
+    for (int i = threadIdx.x; i < 2 * R + 2 * C; i += blockDim.x) {
+        float v;
+        if (i < R) v = state[i];
+        else if (i < 2 * R) v = __uint_as_float((uint32_t) wr[i - R] << 16);
+        else if (i < 2 * R + C) v = hid[i - 2 * R];
+        else v = frnn[i - 2 * R - C];
+        joint[i] = v;
+    }
+}
+// gate = sigmoid, cand = tanh, state = cand + gate * (state - cand), markov = tanh (the three chunks of jo + bias)
+__global__ void k_mk_upd(const float * jo, const float * jb, float * state, float * mk, int R) {
+    const int i = threadIdx.x;
+    if (i >= R) return;
+    const float g = 1.0f / (1.0f + expf(-(jo[i] + jb[i]))), c = tanhf(jo[R + i] + jb[R + i]);
+    state[i] = c + g * (state[i] - c);
+    mk[i] = tanhf(jo[2 * R + i] + jb[2 * R + i]);
+}
+// the draft token: argmax of base + bias + b2 (the softcap after the bias does not move the argmax; ties: the lower
+// id, as ggml_argmax). One block of 1024 threads
+__global__ void k_mk_pick(const float * base, const float * bias, const float * b2, int V, int * out, int * prev) {
+    __shared__ float bv[32];
+    __shared__ int bi[32];
+    float v = -INFINITY;
+    int idx = 0x7fffffff;
+    for (int i = threadIdx.x; i < V; i += blockDim.x) {
+        const float x = base[i] + bias[i] + b2[i];
+        if (x > v) { v = x; idx = i; }
+    }
+    for (int o = WS / 2; o > 0; o >>= 1) {
+        const float v2 = __shfl_xor(v, o);
+        const int i2 = __shfl_xor(idx, o);
+        if (v2 > v || (v2 == v && i2 < idx)) { v = v2; idx = i2; }
+    }
+    if (threadIdx.x % WS == 0) { bv[threadIdx.x / WS] = v; bi[threadIdx.x / WS] = idx; }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        for (int w = 1; w < (int) blockDim.x / WS; ++w)
+            if (bv[w] > v || (bv[w] == v && bi[w] < idx)) { v = bv[w]; idx = bi[w]; }
+        *out = idx;
+        *prev = idx;
+    }
+}
+
 // ---------------------------------------------------------------- model
 struct Mat { const uint8_t * w; uint32_t type; int N, K; size_t rb; };
 
@@ -1513,6 +1753,7 @@ struct Slot {     // a layer visit's cache
     float * hist = nullptr;   // hist: [3][Ck], [3][Ck], [3][C], [3][C] for k, v, attn, ffn
     int cap = 0;
     size_t kvbytes = 0;   // each of K and V
+    float * spec = nullptr;   // speculative verification: the convolutions' state before the batch and its inputs
 };
 
 struct Runner {
@@ -1538,9 +1779,66 @@ struct Runner {
     float * dalloc(size_t n) { float * p; CK(hipMalloc(&p, n * 4)); CK(hipMemset(p, 0, n * 4)); return p; }
 
     int kvt = 0;   // the KV cache: 0 F32, 1 q8_0, 2 F16
+    // speculative decoding (DSpark): verification batches record the convolutions' inputs (spec_rec) and take the
+    // decode attention (vmode); the target features of the last body() (feat: the inputs of visits fvisit[], then
+    // the final norm's output)
+    bool spec_rec = false, vmode = false;
+    int fvisit[3] = {-1, -1, -1};
+    const float * feat[4] = {nullptr, nullptr, nullptr, nullptr};
+    std::map<int, hipGraphExec_t> vgraph;
+    std::map<int, bool> vwarm;
+    float * hlogT = nullptr;               // pinned, SPEC_T rows of logits
+    float **dhists = nullptr, **dspecs = nullptr;
+    void enable_spec() {
+        const int Ck = m.Hkv * m.D;
+        std::vector<float *> hs, ss;
+        for (auto & sl : slots) {
+            sl.spec = dalloc((size_t) (3 + SPEC_T) * (2 * Ck + 2 * m.C));
+            hs.push_back(sl.hist); ss.push_back(sl.spec);
+        }
+        CK(hipMalloc(&dhists, hs.size() * sizeof(float *)));
+        CK(hipMalloc(&dspecs, ss.size() * sizeof(float *)));
+        CK(hipMemcpy(dhists, hs.data(), hs.size() * sizeof(float *), hipMemcpyHostToDevice));
+        CK(hipMemcpy(dspecs, ss.data(), ss.size() * sizeof(float *), hipMemcpyHostToDevice));
+        CK(hipHostMalloc(&hlogT, (size_t) SPEC_T * m.vocab * 4));
+    }
+    // feed T <= SPEC_T tokens and keep every one's logits (in hlogT); the batch can then be cut back with rollback()
+    const float * verify(const int * toks, int T) {
+        hpos[0] = pos;
+        std::memcpy(hpos + 1, toks, (size_t) T * 4);
+        CK(hipMemcpyAsync(dpos, hpos, 4, hipMemcpyHostToDevice, st));
+        CK(hipMemcpyAsync(dtok, hpos + 1, (size_t) T * 4, hipMemcpyHostToDevice, st));
+        spec_rec = vmode = true;
+        if (!vwarm[T]) { body(T, true); vwarm[T] = true; }
+        else {
+            hipGraphExec_t & ge = vgraph[T];
+            if (!ge) {
+                hipGraph_t gr;
+                CK(hipStreamBeginCapture(st, hipStreamCaptureModeGlobal));
+                body(T, true);
+                CK(hipStreamEndCapture(st, &gr));
+                CK(hipGraphInstantiate(&ge, gr, nullptr, nullptr, 0));
+            }
+            CK(hipGraphLaunch(ge, st));
+        }
+        spec_rec = vmode = false;
+        pos += T;
+        for (int i = 0; i < T; ++i)
+            CK(hipMemcpyAsync(hlogT + (size_t) i * m.vocab, logits + (size_t) i * m.vocab_pad, (size_t) m.vocab * 4,
+                              hipMemcpyDeviceToHost, st));
+        CK(hipStreamSynchronize(st));
+        return hlogT;
+    }
+    // keep the first `keep` tokens of the last verify(T)
+    void rollback(int T, int keep) {
+        if (keep == T) return;
+        hipLaunchKernelGGL(k_spec_roll, dim3(ew(2 * m.Hkv * m.D + 2 * m.C), (int) slots.size()), dim3(256), 0, st,
+                           dhists, dspecs, keep, m.Hkv * m.D, m.C);
+        pos -= T - keep;
+    }
     bool all_cap = false;   // room for every token's logits (scoring)
     Runner(Model & m_, int ctx_, int kvt_ = 0, int tm_ = 1024, bool all_cap_ = false)
-        : m(m_), ctx(ctx_), kvt(kvt_), TM(tm_), all_cap(all_cap_) {
+        : m(m_), ctx(ctx_), kvt(kvt_), TM(std::max(tm_, SPEC_T)), all_cap(all_cap_) {
         const int C = m.C, Ck = m.Hkv * m.D;
         const size_t T = TM;
         const int n_slots = m.n_phys + (m.passes - 1) * (m.core1 - m.core0);
@@ -1561,7 +1859,7 @@ struct Runner {
         q = dalloc(T * m.H * m.D); k = dalloc(T * Ck); v = dalloc(T * Ck); r = dalloc(T * m.H * m.nrel);
         sinkv = dalloc(T * m.H); att = dalloc(T * m.H * m.D); g = dalloc(T * m.H * m.D);
         dk = dalloc(T * 4 * m.Hkv); dv = dalloc(T * 4 * m.Hkv);
-        scr = dalloc(T * 3 * C); logits = dalloc((all_cap ? T : 1) * m.vocab_pad); msgs = dalloc(T * 4 * C);
+        scr = dalloc(T * 3 * C); logits = dalloc((all_cap ? std::max<size_t>(T, SPEC_T) : SPEC_T) * m.vocab_pad); msgs = dalloc(T * 4 * C);
         ctrl_g = dalloc(T * 4 * m.rank); ctrl_a = dalloc(T * 4 * C); ctrl_b = dalloc(T * 4 * C); cat = dalloc(T * 8 * C);
         gu = dalloc(T * m.k_exp * 2 * m.F); hh = dalloc(T * m.k_exp * m.F); wts = dalloc(T * m.k_exp);
         yd = dalloc(T * m.k_exp * C);
@@ -1595,6 +1893,18 @@ struct Runner {
             hipLaunchKernelGGL(k_mmv, dim3((S.start[S.n] + 7) / 8), dim3(256), 0, st, S);
             return;
         }
+        if (T <= MMV_T) {
+            Segs S{};
+            S.n = 0; S.start[0] = 0;
+            for (const auto & e : list) {
+                const Mat & a = *std::get<0>(e);
+                S.s[S.n] = Seg{a.w, std::get<1>(e), std::get<2>(e), a.rb, a.N, a.K, a.type, std::get<3>(e), 0};
+                S.start[S.n + 1] = S.start[S.n] + a.N;
+                ++S.n;
+            }
+            hipLaunchKernelGGL(k_mmvT, dim3((S.start[S.n] + 7) / 8), dim3(256), 0, st, S, T);
+            return;
+        }
         GSegs S{};
         S.n = 0; S.tstart[0] = 0;
         for (const auto & e : list) {
@@ -1604,6 +1914,17 @@ struct Runner {
             ++S.n;
         }
         hipLaunchKernelGGL(k_gemm_w, dim3(S.tstart[S.n], (T + 63) / 64), dim3(256), 0, st, S, T);
+    }
+    // the F32 GEMM of several segments; a few tokens go through k_mmvT
+    void gemm_f32(const GSegs & G, int T) {
+        if (T <= MMV_T) {
+            Segs S{};
+            S.n = G.n; S.start[0] = 0;
+            for (int i = 0; i < G.n; ++i) { S.s[i] = G.s[i]; S.start[i + 1] = S.start[i] + G.s[i].N; }
+            hipLaunchKernelGGL(k_mmvT, dim3((S.start[S.n] + 7) / 8), dim3(256), 0, st, S, T);
+            return;
+        }
+        hipLaunchKernelGGL(k_gemm, dim3(G.tstart[G.n], (T + 31) / 32), dim3(256), 0, st, G, T);
     }
     // mix(blocks, cur, queries) -> out[T][nq][C], each output RMS-normed with nw.w[j] when given
     void mix(int T, const std::vector<float *> & blocks, const float * cur, const float * queries, int nq, float * out,
@@ -1657,13 +1978,13 @@ struct Runner {
                 ++S.n;
             };
             for (int j = 0; j < n; ++j) add(l.cdown[c0 + j], P.cat[j], ctrl_g + (size_t) j * m.rank, 8 * C, 4 * m.rank);
-            hipLaunchKernelGGL(k_gemm, dim3(S.tstart[S.n], (T + 31) / 32), dim3(256), 0, st, S, T);
+            gemm_f32(S, T);
             S.n = 0;
             for (int j = 0; j < n; ++j) {
                 add(l.cgain[c0 + j], ctrl_g + (size_t) j * m.rank, ctrl_a + (size_t) j * C, 4 * m.rank, 4 * C);
                 add(l.cforget[c0 + j], ctrl_g + (size_t) j * m.rank, ctrl_b + (size_t) j * C, 4 * m.rank, 4 * C);
             }
-            hipLaunchKernelGGL(k_gemm, dim3(S.tstart[S.n], (T + 31) / 32), dim3(256), 0, st, S, T);
+            gemm_f32(S, T);
         }
         hipLaunchKernelGGL(k_ctrl_apply, dim3(ew(C), n, T), dim3(256), 0, st, P, C);
     }
@@ -1712,14 +2033,16 @@ struct Runner {
         const float cs = 1.0f / sqrtf((float) ((l.swa ? 1 : 2) * 4 + 1));
         hipLaunchKernelGGL(k_conv2, dim3(ew(Ck), 2), dim3(256), 0, st,
                            Conv2{{k, v}, {l.kconv, l.vconv}, {sl.hist, sl.hist + 3 * Ck},
-                                 {l.swa ? nullptr : dk, l.swa ? nullptr : dv}}, Ck, m.D, cs, T, 4 * m.Hkv);
+                                 {l.swa ? nullptr : dk, l.swa ? nullptr : dv},
+                                 {spec_rec ? sl.spec : nullptr, spec_rec ? sl.spec + (3 + SPEC_T) * Ck : nullptr}},
+                           Ck, m.D, cs, T, 4 * m.Hkv);
         hipLaunchKernelGGL(k_qkvr, dim3(2 * m.H + 2 * m.Hkv, T), dim3(128), 0, st, q, k, v, r, l.q_clip, l.rel_clip, m.H,
                            m.Hkv, m.D, m.nrel, m.qk_clip, m.rel_clip, dpos, l.swa ? 0.0f : m.alpha, m.floor_, m.eps,
                            sl.K, sl.V, sl.cap, kvt);
         const int span = l.swa ? std::min(m.swa, ctx) : ctx;
         hipLaunchKernelGGL(k_relbias, dim3(m.H, T), dim3(256), 0, st, r, l.rel_bias, m.nrel, m.ext, sinkv, relb);
         int nsplit;
-        if (T == 1) {
+        if (T == 1 || vmode) {
             const int splitsz = 32;   // the least a split; the kernel spreads the keys present over nsplit
             nsplit = std::min(nsplit_max, (span + splitsz - 1) / splitsz);
             hipLaunchKernelGGL(k_attn_split<3>, dim3(m.Hkv, nsplit, T), dim3(128), 0, st, q, sl.K, sl.V, sl.cap, dpos,
@@ -1747,7 +2070,8 @@ struct Runner {
         const bool starts = ip % m.block == 0;
         if (starts) blocks.push_back(inpSA);
         hipLaunchKernelGGL(k_conv_res, dim3(ew(C)), dim3(256), 0, st, t0, l.post_conv, sl.hist + 6 * Ck, C,
-                           starts ? (const float *) nullptr : inpSA, h1, 1.0f / sqrtf(5.0f), T);
+                           starts ? (const float *) nullptr : inpSA, h1, 1.0f / sqrtf(5.0f), T,
+                           spec_rec ? sl.spec + 2 * (3 + SPEC_T) * Ck : nullptr);
         // MoE
         if (!messages) mix(T, blocks, h1, l.ffn_res_q, 1, t1, NormW{{l.ffn_norm, nullptr, nullptr, nullptr}});
         else {
@@ -1767,11 +2091,12 @@ struct Runner {
         }
         hipLaunchKernelGGL(k_route, dim3(T), dim3(m.n_exp), 0, st, rl, l.probs_b, m.n_exp, m.k_exp, m.wscale, ids, wts);
         float * h2 = pool[pool_i++];
-        if (T == 1) {
-            hipLaunchKernelGGL(k_exp_gu, dim3((2 * m.F + 7) / 8, m.k_exp), dim3(256), 0, st, l.gu, l.gu_type, l.gu_ebytes,
-                               l.gu_rb, l.gu_scale, ids, t1, gu, 2 * m.F, C);
-            hipLaunchKernelGGL(k_situ, dim3(ew(m.F * m.k_exp)), dim3(256), 0, st, gu, hh, m.F, m.k_exp, m.situ_b, m.situ_lb);
-            hipLaunchKernelGGL(k_exp_down, dim3((C + 7) / 8), dim3(256), 0, st, l.down, l.down_type, l.down_ebytes,
+        if (T <= MMV_T) {   // one token, or a few (each entry its own expert row reads, as the decode)
+            hipLaunchKernelGGL(k_exp_gu, dim3((2 * m.F + 7) / 8, m.k_exp * T), dim3(256), 0, st, l.gu, l.gu_type,
+                               l.gu_ebytes, l.gu_rb, l.gu_scale, ids, t1, gu, 2 * m.F, C, m.k_exp);
+            hipLaunchKernelGGL(k_situ, dim3(ew(m.F * m.k_exp * T)), dim3(256), 0, st, gu, hh, m.F, m.k_exp * T, m.situ_b,
+                               m.situ_lb);
+            hipLaunchKernelGGL(k_exp_down, dim3((C + 7) / 8, T), dim3(256), 0, st, l.down, l.down_type, l.down_ebytes,
                                l.down_rb, l.down_scale, ids, wts, hh, t2, C, m.F, m.k_exp);
         } else {
             const int ne = T * m.k_exp;
@@ -1785,7 +2110,8 @@ struct Runner {
             hipLaunchKernelGGL(k_exp_sum, dim3(ew(C), T), dim3(256), 0, st, yd, t2, C, m.k_exp);
         }
         hipLaunchKernelGGL(k_conv_res, dim3(ew(C)), dim3(256), 0, st, t2, l.ffn_conv, sl.hist + 6 * Ck + 3 * C, C,
-                           h1, h2, 1.0f / sqrtf(5.0f), T);
+                           h1, h2, 1.0f / sqrtf(5.0f), T,
+                           spec_rec ? sl.spec + 2 * (3 + SPEC_T) * Ck + (3 + SPEC_T) * C : nullptr);
         cur = h2;
     }
 
@@ -1914,6 +2240,173 @@ struct Runner {
         }
         CK(hipStreamSynchronize(st));
     }
+    // ---- DSpark drafter (opt-in, --dspark FILE)
+    struct DLayer {
+        Mat wq, wk, wv, wo, wk_ctx, wv_ctx, gate, up, down;
+        const float *attn_norm, *qn, *kn, *kn_ctx, *ctx_mix, *ctx_norm, *ffn_norm;
+        __half *Kc = nullptr, *Vc = nullptr;
+        int cap = 0, win = 0;   // win: the sliding window (0: full)
+    };
+    struct Draft {
+        Gguf g;
+        int B = 8, n_layer = 3, R = 256, F = 9216, Hd = 24, Hkvd = 8;
+        float theta = 1e6f, eps = 1e-6f;
+        std::vector<DLayer> L;
+        const float *tok_norm, *mask, *out_norm, *mk_mix, *mk_norm, *jb, *b2;
+        const uint16_t * w1;
+        Mat jp, w2;
+        // buffers
+        float *mixo[4], *kc, *vc, *x, *h, *q, *k, *v, *att, *t0, *gg, *uu, *hn, *dlog, *part, *state, *joint, *jo, *mk,
+            *bias;
+        int *dn0, *dtoks, *dprev, *hn0;
+        const float * frnn = nullptr;   // the Markov context state of the last injected token
+        int frnn_pos = -1;
+        int TI = 0;                     // the largest injection
+    };
+    Draft * dr = nullptr;
+    Mat dmat(Gguf & g, const std::string & n) {
+        Tensor & t = g.need(n);
+        return Mat{(const uint8_t *) t.dev, t.type, (int) t.ne[1], (int) t.ne[0], row_bytes(t.type, t.ne[0])};
+    }
+    void dspark_load(const std::string & path) {
+        dr = new Draft;
+        Draft & d = *dr;
+        d.g.open(path);
+        Gguf & g = d.g;
+        const std::string a = "dflash.";
+        d.n_layer = (int) g.get(a + "block_count");
+        d.B = (int) g.get(a + "block_size");
+        d.F = (int) g.get(a + "feed_forward_length");
+        d.Hd = (int) g.get(a + "attention.head_count");
+        d.Hkvd = (int) g.get(a + "attention.head_count_kv");
+        d.theta = (float) g.get(a + "rope.freq_base");
+        d.eps = (float) g.get(a + "attention.layer_norm_rms_epsilon");
+        const int win = (int) g.get(a + "attention.sliding_window");
+        const auto & pat = g.arr[a + "attention.sliding_window_pattern"];
+        const auto & tl = g.arr[a + "target_layers"];
+        for (int k = 0; k < 3; ++k) fvisit[k] = (int) tl[k];   // the 4th is the final norm's output
+        if (d.B > SPEC_T || d.Hd != m.H || d.Hkvd != m.Hkv || tl.size() != 4 || (int) tl[3] != m.n_phys + (m.passes - 1) * (m.core1 - m.core0)) {
+            std::fprintf(stderr, "dspark: unexpected drafter shape\n");
+            std::exit(1);
+        }
+        auto f = [&](const std::string & n) { return (const float *) g.need(n).dev; };
+        d.tok_norm = f("token_embd_norm.weight");
+        d.mask = f("mask_embd.weight");
+        d.out_norm = f("output_norm.weight");
+        d.mk_mix = f("markov_ctx_mix.weight");
+        d.mk_norm = f("markov_ctx_norm.weight");
+        d.jb = f("joint_proj.bias");
+        d.b2 = f("markov_w2.bias");
+        d.w1 = (const uint16_t *) g.need("markov_w1.weight").dev;
+        d.R = (int) g.find("markov_w1.weight")->ne[0];
+        d.jp = dmat(g, "joint_proj.weight");
+        d.w2 = dmat(g, "markov_w2.weight");
+        const int Ck = m.Hkv * m.D;
+        for (int il = 0; il < d.n_layer; ++il) {
+            const std::string b = "blk." + std::to_string(il) + ".";
+            DLayer l;
+            l.wq = dmat(g, b + "attn_q.weight"); l.wk = dmat(g, b + "attn_k.weight"); l.wv = dmat(g, b + "attn_v.weight");
+            l.wo = dmat(g, b + "attn_output.weight");
+            l.wk_ctx = dmat(g, b + "attn_k_ctx.weight"); l.wv_ctx = dmat(g, b + "attn_v_ctx.weight");
+            l.gate = dmat(g, b + "ffn_gate.weight"); l.up = dmat(g, b + "ffn_up.weight"); l.down = dmat(g, b + "ffn_down.weight");
+            l.attn_norm = f(b + "attn_norm.weight"); l.qn = f(b + "attn_q_norm.weight"); l.kn = f(b + "attn_k_norm.weight");
+            l.kn_ctx = f(b + "attn_k_ctx_norm.weight"); l.ctx_mix = f(b + "ctx_mix.weight"); l.ctx_norm = f(b + "ctx_norm.weight");
+            l.ffn_norm = f(b + "ffn_norm.weight");
+            l.win = il < (int) pat.size() && pat[il] != 0 ? win : 0;
+            // a window layer keeps a ring: the window, the block and an injected chunk
+            l.cap = l.win ? win + d.B + TM : ctx + d.B;
+            const size_t kvb = (size_t) l.cap * Ck * 2;
+            CK(hipMalloc(&l.Kc, kvb)); CK(hipMemset(l.Kc, 0, kvb));
+            CK(hipMalloc(&l.Vc, kvb)); CK(hipMemset(l.Vc, 0, kvb));
+            d.L.push_back(l);
+        }
+        d.TI = TM;
+        const size_t T = (size_t) std::max(TM, d.B);
+        for (auto & o : d.mixo) o = dalloc(T * m.C);
+        d.kc = dalloc(T * 3 * Ck); d.vc = dalloc(T * 3 * Ck);
+        d.x = dalloc(d.B * m.C); d.h = dalloc(d.B * m.C); d.q = dalloc(d.B * m.H * m.D); d.k = dalloc(d.B * Ck);
+        d.v = dalloc(d.B * Ck); d.att = dalloc(d.B * m.H * m.D); d.t0 = dalloc(d.B * m.C);
+        d.gg = dalloc((size_t) d.B * d.F); d.uu = dalloc((size_t) d.B * d.F); d.hn = dalloc(d.B * m.C);
+        d.dlog = dalloc((size_t) d.B * m.vocab_pad);
+        d.part = dalloc((size_t) d.B * m.H * 64 * (m.D + 2));
+        d.state = dalloc(d.R); d.joint = dalloc(2 * d.R + 2 * m.C); d.jo = dalloc(3 * d.R); d.mk = dalloc(d.R);
+        d.bias = dalloc(m.vocab_pad);
+        CK(hipMalloc(&d.dn0, 4)); CK(hipMalloc(&d.dtoks, (d.B + 1) * 4)); CK(hipMalloc(&d.dprev, 4)); CK(hipMalloc(&d.hn0, 4));
+        enable_spec();
+    }
+    // after a body(T) that fed positions p0..p0 + T - 1: the first n rows' context K/V into the drafter's cache
+    void dspark_inject(int n, int p0) {
+        if (!dr || n <= 0) return;
+        Draft & d = *dr;
+        const int Ck = m.Hkv * m.D;
+        for (int at = 0; at < n; at += d.TI) {
+            const int T = std::min(d.TI, n - at);
+            DMix P{};
+            for (int k = 0; k < 4; ++k) P.f[k] = feat[k] + (size_t) at * m.C;
+            for (int o = 0; o < 3; ++o) { P.mix[o] = d.L[o].ctx_mix; P.norm[o] = d.L[o].ctx_norm; P.out[o] = d.mixo[o]; }
+            P.mix[3] = d.mk_mix; P.norm[3] = d.mk_norm; P.out[3] = d.mixo[3];
+            hipLaunchKernelGGL(k_dmix, dim3(T, 4), dim3(256), 0, st, P, m.C, d.eps);
+            for (int o = 0; o < 3; ++o)
+                mmv(T, {MV{&d.L[o].wk_ctx, d.mixo[o], d.kc + (size_t) o * T * Ck, 0},
+                        MV{&d.L[o].wv_ctx, d.mixo[o], d.vc + (size_t) o * T * Ck, 0}});
+            DKV K{};
+            for (int o = 0; o < 3; ++o) {
+                K.k[o] = d.kc + (size_t) o * T * Ck; K.v[o] = d.vc + (size_t) o * T * Ck; K.kn[o] = d.L[o].kn_ctx;
+                K.Kc[o] = d.L[o].Kc; K.Vc[o] = d.L[o].Vc; K.cap[o] = d.L[o].cap;
+            }
+            hipLaunchKernelGGL(k_dkv, dim3(m.Hkv, T, 3), dim3(128), 0, st, K, m.Hkv, p0 + at, d.theta, d.eps);
+            d.frnn = d.mixo[3] + (size_t) (T - 1) * m.C;
+            d.frnn_pos = p0 + at + T - 1;
+        }
+    }
+    // greedy draft of nd <= B - 1 tokens after `anchor` at position n0 (the context must hold n0 - 1)
+    bool dspark_draft(int anchor, int n0, int nd, int * out) {
+        Draft & d = *dr;
+        if (d.frnn_pos != n0 - 1 || n0 + d.B > ctx) return false;
+        const int C = m.C, Ck = m.Hkv * m.D, B = d.B;
+        hpos[0] = n0; hpos[1] = anchor;
+        CK(hipMemcpyAsync(d.dn0, hpos, 4, hipMemcpyHostToDevice, st));
+        CK(hipMemcpyAsync(d.dprev, hpos + 1, 4, hipMemcpyHostToDevice, st));
+        hipLaunchKernelGGL(k_embed, dim3(1), dim3(256), 0, st, m.embd, d.dprev, d.x, C);
+        hipLaunchKernelGGL(k_rms_n, dim3(1, 1), dim3(256), 0, st, Norms{{d.x}, {d.tok_norm}, {d.x}}, C, d.eps);
+        hipLaunchKernelGGL(k_dmask, dim3(ew(C), B - 1), dim3(256), 0, st, d.mask, d.x, C, B);
+        for (auto & l : d.L) {
+            hipLaunchKernelGGL(k_rms_n, dim3(1, B), dim3(256), 0, st, Norms{{d.x}, {l.attn_norm}, {d.h}}, C, d.eps);
+            mmv(B, {MV{&l.wq, d.h, d.q, 0}, MV{&l.wk, d.h, d.k, 0}, MV{&l.wv, d.h, d.v, 0}});
+            hipLaunchKernelGGL(k_dqkv, dim3(m.H + m.Hkv, B), dim3(128), 0, st, d.q, d.k, d.v, l.qn, l.kn, m.H, m.Hkv,
+                               d.dn0, d.theta, d.eps, l.Kc, l.Vc, l.cap);
+            const int span = l.win ? l.win + B : n0 + B;
+            const int ns = std::min(64, std::max(1, span / 256));
+            hipLaunchKernelGGL(k_dattn, dim3(m.H, B, ns), dim3(128), 0, st, d.q, l.Kc, l.Vc, l.cap, d.dn0, B, l.win,
+                               m.Hkv, d.part, ns);
+            hipLaunchKernelGGL(k_dcomb, dim3(m.H, B), dim3(m.D), 0, st, d.part, ns, d.att, m.D);
+            mmv(B, {MV{&l.wo, d.att, d.t0, 0}});
+            hipLaunchKernelGGL(k_add, dim3(ew(B * C)), dim3(256), 0, st, d.x, d.t0, B * C);
+            hipLaunchKernelGGL(k_rms_n, dim3(1, B), dim3(256), 0, st, Norms{{d.x}, {l.ffn_norm}, {d.h}}, C, d.eps);
+            mmv(B, {MV{&l.gate, d.h, d.gg, 0}, MV{&l.up, d.h, d.uu, 0}});
+            hipLaunchKernelGGL(k_silu_mul, dim3(ew(B * d.F)), dim3(256), 0, st, d.gg, d.uu, d.gg, B * d.F);
+            mmv(B, {MV{&l.down, d.gg, d.t0, 0}});
+            hipLaunchKernelGGL(k_add, dim3(ew(B * C)), dim3(256), 0, st, d.x, d.t0, B * C);
+        }
+        (void) Ck;
+        hipLaunchKernelGGL(k_rms_n, dim3(1, B), dim3(256), 0, st, Norms{{d.x}, {d.out_norm}, {d.hn}}, C, d.eps);
+        // the target's head on rows 1..nd (no softcap: the Markov bias comes first)
+        mmv(nd, {MV{&m.head, d.hn + C, d.dlog, 0}});   // rows of vocab_pad (the head's N)
+        CK(hipMemsetAsync(d.state, 0, d.R * 4, st));
+        for (int i = 1; i <= nd; ++i) {
+            hipLaunchKernelGGL(k_mk_joint, dim3(1), dim3(256), 0, st, d.state, d.w1, d.dprev, d.hn + (size_t) i * C,
+                               d.frnn, d.joint, d.R, C);
+            mmv(1, {MV{&d.jp, d.joint, d.jo, 0}});
+            hipLaunchKernelGGL(k_mk_upd, dim3(1), dim3(d.R), 0, st, d.jo, d.jb, d.state, d.mk, d.R);
+            mmv(1, {MV{&d.w2, d.mk, d.bias, 0}});
+            hipLaunchKernelGGL(k_mk_pick, dim3(1), dim3(1024), 0, st, d.dlog + (size_t) (i - 1) * m.vocab_pad, d.bias,
+                               d.b2, m.vocab, d.dtoks + i - 1, d.dprev);
+        }
+        CK(hipMemcpyAsync(hpos, d.dtoks, (size_t) nd * 4, hipMemcpyDeviceToHost, st));
+        CK(hipStreamSynchronize(st));
+        std::memcpy(out, hpos, (size_t) nd * 4);
+        return true;
+    }
     // feed up to TM tokens at once (a prompt chunk); all_logits: every token's logits (else only the last one's, in
     // logits[0]); out gets them when given
     void chunk(const int * toks, int T, bool all_logits, std::vector<float> * out) {
@@ -1940,7 +2433,12 @@ struct Runner {
         hipLaunchKernelGGL(k_rms_n, dim3(1, T), dim3(256), 0, st, Norms{{x}, {m.embd_norm}, {x}}, C, m.eps);
         float * cur = x;
         std::vector<float *> blocks;
-        for (int il = 0; il < m.core0; ++il) layer(T, il, il, cur, blocks, nullptr, pool_i);
+        int visit = 0;
+        auto note = [&](const float * c) {
+            for (int k = 0; k < 3; ++k) if (fvisit[k] == visit) feat[k] = c;
+            ++visit;
+        };
+        for (int il = 0; il < m.core0; ++il) { note(cur); layer(T, il, il, cur, blocks, nullptr, pool_i); }
         float * prelude = cur;
         const std::vector<float *> prelude_blocks = blocks;
         const int ncore = m.core1 - m.core0;
@@ -1955,14 +2453,17 @@ struct Runner {
             }
             for (int ip = m.core0; ip < m.core1; ++ip) {
                 const int slot = p == 0 ? ip : m.n_phys + (p - 1) * ncore + (ip - m.core0);
+                note(cur);
                 if (p == 0) { layer(T, slot, ip, cur, blocks, nullptr, pool_i); continue; }
                 mix(T, bank, bank_out, m.L[ip].msg_q, 4, msgs);
                 layer(T, slot, ip, cur, blocks, msgs, pool_i);
             }
         }
-        for (int il = m.core1; il < m.n_phys; ++il) layer(T, il, il, cur, blocks, nullptr, pool_i);
+        for (int il = m.core1; il < m.n_phys; ++il) { note(cur); layer(T, il, il, cur, blocks, nullptr, pool_i); }
         mix(T, blocks, cur, m.out_res_q, 1, t1, NormW{{m.out_norm, nullptr, nullptr, nullptr}});
+        feat[3] = t1;
         if (T == 1) mv(m.head, t1, logits);
+        else if (all_logits && T <= MMV_T) mmv(T, {MV{&m.head, t1, logits, 0}});
         else if (all_logits) {
             GSegs S{};
             S.n = 1; S.tstart[0] = 0; S.tstart[1] = (m.head.N + 63) / 64;
@@ -2030,7 +2531,9 @@ void say(const char * fmt, ...) {
     std::fflush(stdout);
 }
 struct Sampling {
-    float temp = 1.0f, top_p = 1.0f, min_p = 0.0f, rep = 1.0f, freq = 0.0f, pres = 0.0f;
+    // temp 0 (greedy) when a request sends none: the server does not forward temperature=0 (serve/server.py
+    // sampling_keys), so the default has to be greedy, as hy4_serve's is
+    float temp = 0.0f, top_p = 1.0f, min_p = 0.0f, rep = 1.0f, freq = 0.0f, pres = 0.0f;
     int top_k = 0, last_n = 64;
     uint64_t seed = 0;
 };
@@ -2090,7 +2593,7 @@ int sample(const float * logits, int V, const Sampling & s, const std::vector<in
     }
     return idx[0];
 }
-int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling & defaults) {
+int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling & defaults, int n_draft, float draft_tmax) {
     std::vector<int> hist;                 // the tokens in the cache
     std::deque<Runner::Ckpt> ckpts;        // prompt-end checkpoints, the newest last
     constexpr size_t kMaxCkpt = 4;
@@ -2195,6 +2698,7 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
             const size_t n = std::min((size_t) run.TM, ids.size() - at);
             if (n == 1) run.step(ids[at], nullptr);
             else run.chunk(ids.data() + at, (int) n, false, nullptr);
+            run.dspark_inject((int) n, (int) at);
             if (at + n == ids.size()) lg = run.fetch_logits();
             hist.insert(hist.end(), ids.begin() + (ptrdiff_t) at, ids.begin() + (ptrdiff_t) (at + n));
             at += n;
@@ -2224,14 +2728,51 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
         };
         int y = sample(lg, m.vocab, s, h, rng);
         bool more = emit(y);
+        long long drafted = 0, accepted = 0;
+        // DSpark: greedy drafts after y, checked position by position with the request's own sampler; the batch
+        // keeps the draft up to the first token the target did not sample itself (the same distribution as without).
+        // A verification of n + 1 tokens costs about 1.8 single steps here (each token reads its own experts), so
+        // while the accepted share (a moving average) is under 25% the next 32 tokens go without drafting
+        double share = 0.5;
+        int plain_left = 0;
         while (more) {
             if ((long long) hist.size() + 1 > n_ctx) break;
+            // at temperature 1.0 too few drafts hold to pay for the verification (docs/inkling/ENGINE.md, step 6)
+            if (run.dr && n_draft > 0 && plain_left == 0 && s.temp <= draft_tmax) {
+                const int base = (int) hist.size();
+                const int nd = (int) std::min<long long>({(long long) n_draft, n_ctx - base - 2, (long long) (max_new - produced - 1)});
+                int dt[SPEC_T];
+                if (nd > 0 && run.dspark_draft(y, base, nd, dt)) {
+                    int b[SPEC_T];
+                    b[0] = y;
+                    for (int i = 0; i < nd; ++i) b[i + 1] = dt[i];
+                    const float * L = run.verify(b, nd + 1);
+                    int kept = 0;
+                    for (int i = 0; i <= nd; ++i) {
+                        hist.push_back(b[i]);
+                        kept = i + 1;
+                        y = sample(L + (size_t) i * m.vocab, m.vocab, s, h, rng);
+                        more = emit(y);
+                        if (!more || i == nd || y != dt[i]) break;
+                    }
+                    drafted += nd;
+                    accepted += kept - 1;
+                    run.rollback(nd + 1, kept);
+                    run.dspark_inject(kept, base);
+                    share = 0.75 * share + 0.25 * (double) (kept - 1) / nd;
+                    if (share < 0.25) { plain_left = 32; share = 0.5; }
+                    continue;
+                }
+            }
+            if (plain_left > 0) --plain_left;
             run.step(y, nullptr);
+            run.dspark_inject(1, (int) hist.size());
             lg = run.fetch_logits();
             hist.push_back(y);
             y = sample(lg, m.vocab, s, h, rng);
             more = emit(y);
         }
+        if (drafted > 0) say("INFO dspark drafted=%lld accepted=%lld\n", drafted, accepted);
         const double gen_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
         say("DONE %d %zu %.1f %.1f %s 0 0 %zu\n", produced, ids.size(), pp_ms, gen_ms, finish.c_str(), keep);
     }
@@ -2243,6 +2784,10 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
 int main(int argc, char ** argv) {
     std::string path, score, dump;
     int gpu = 0, ctx = 4096, n_dump = 0, n_bench = 0, chunk = 1;
+    std::string dspark;   // --dspark DRAFT.gguf (opt-in): Unsloth's DSpark drafter
+    int n_draft = 4;      // --dspark-n N: tokens drafted a step (at most the drafter's block - 1)
+    float draft_tmax = 0.8f;   // --dspark-max-temp T: draft only for requests at temperature <= T
+    bool spec_test = false;   // --spec-test: the text through verify(4) / rollback(2), checks the speculative path
     bool serve_mode = false;   // --serve: the engine's line protocol on stdin / stdout
     std::vector<int> eos;
     Sampling defaults;
@@ -2260,12 +2805,16 @@ int main(int argc, char ** argv) {
         else if (a == "--chunk") chunk = std::atoi(next());
         else if (a == "--bench-prefill") n_pf = std::atoi(next());
         else if (a == "--kv-q8") kvt = 1;
+        else if (a == "--spec-test") spec_test = true;
         else if (a == "--serve") serve_mode = true;
         else if (a == "--inkling") {}
         else if (a == "--ubatch") chunk = std::atoi(next());
         else if (a == "--eos") eos.push_back(std::atoi(next()));
         else if (a == "--temp") defaults.temp = (float) std::atof(next());
         else if (a == "--top-p") defaults.top_p = (float) std::atof(next());
+        else if (a == "--dspark") dspark = next();
+        else if (a == "--dspark-n") n_draft = std::atoi(next());
+        else if (a == "--dspark-max-temp") draft_tmax = (float) std::atof(next());
         else if (a == "--kv-f16") kvt = 2;
         else { std::fprintf(stderr, "almond-inkling-native: unknown argument %s\n", a.c_str()); return 2; }
     }
@@ -2287,7 +2836,14 @@ int main(int argc, char ** argv) {
         CK(hipMemGetInfo(&fr, &tot));
         std::fprintf(stderr, "almond-inkling-native: context %d, KV %s, chunks of %d, %.2f GiB of VRAM free\n", ctx,
                      kvt == 1 ? "q8_0" : kvt == 2 ? "f16" : "f32", run.TM, fr / 1073741824.0);
-        return serve(m, run, eos, defaults);
+        if (!dspark.empty()) {
+            run.dspark_load(dspark);
+            n_draft = std::max(1, std::min(n_draft, run.dr->B - 1));
+            CK(hipMemGetInfo(&fr, &tot));
+            std::fprintf(stderr, "almond-inkling-native: DSpark drafter %s, %d tokens a step, %.2f GiB of VRAM free\n",
+                         dspark.c_str(), n_draft, fr / 1073741824.0);
+        }
+        return serve(m, run, eos, defaults, dspark.empty() ? 0 : n_draft, draft_tmax);
     }
     std::vector<int> ids;
     { std::ifstream f(score); int v; while (f >> v) ids.push_back(v); }
@@ -2325,7 +2881,18 @@ int main(int argc, char ** argv) {
         if (df && (int) i >= first && dumped < n_dump) { std::fwrite(l, 4, (size_t) m.vocab, df); ++dumped; }
     };
     chunk = std::max(1, std::min(chunk, 1024));
-    for (size_t i = 0; i + 1 < ids.size();) {
+    if (spec_test) {
+        run.enable_spec();
+        for (size_t i = 0; i + 1 < ids.size();) {
+            const int T = (int) std::min<size_t>(4, ids.size() - 1 - i), keep = std::min(T, 2);
+            const float * l = run.verify(ids.data() + i, T);
+            for (int t = 0; t < keep; ++t) score_one(i + t, l + (size_t) t * m.vocab);
+            run.rollback(T, keep);
+            i += (size_t) keep;
+        }
+        chunk = 1 << 30;   // skip the loop below
+    }
+    for (size_t i = 0; chunk < (1 << 30) && i + 1 < ids.size();) {
         const int T = (int) std::min<size_t>((size_t) chunk, ids.size() - 1 - i);
         if (T == 1) { run.step(ids[i], &lg); score_one(i, lg.data()); }
         else {

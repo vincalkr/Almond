@@ -110,7 +110,9 @@ void say(const char * fmt, ...) {
 }
 
 struct Sampling {
-    float temp = 1.0f, top_p = 1.0f, min_p = 0.0f, rep = 1.0f, freq = 0.0f, pres = 0.0f;
+    // temp 0 (greedy) when a request sends none: the server does not forward temperature=0 (serve/server.py
+    // sampling_keys), so the default has to be greedy, as hy4_serve's is
+    float temp = 0.0f, top_p = 1.0f, min_p = 0.0f, rep = 1.0f, freq = 0.0f, pres = 0.0f;
     int top_k = 0, last_n = 64;
     uint64_t seed = 0;
 };
