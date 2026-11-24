@@ -356,9 +356,10 @@ __global__ void k_conv(float * x, const float * w, float * hist, int C, const fl
 }
 
 // x[h][D] *= s[h][D] (s may be null), then scaled to an L2 norm of at most th, then times tau; one block per head
-__device__ __forceinline__ float tau_of(const int * pos, float alpha, float floor_) {
-    return alpha > 0.0f ? 1.0f + alpha * logf(fmaxf(1.0f, (float) (*pos + 1) / floor_)) : 1.0f;
+__device__ __forceinline__ float tau_at(int pos, float alpha, float floor_) {
+    return alpha > 0.0f ? 1.0f + alpha * logf(fmaxf(1.0f, (float) (pos + 1) / floor_)) : 1.0f;
 }
+__device__ __forceinline__ float tau_of(const int * pos, float alpha, float floor_) { return tau_at(*pos, alpha, floor_); }
 // alpha 0: no log scale
 __global__ void k_clip(float * x, const float * s, int D, float th, const int * pos, float alpha, float floor_) {
     const float tau = tau_of(pos, alpha, floor_);
@@ -438,6 +439,7 @@ __global__ void k_control(float * x, const float * m, const float * f, const flo
 // router: sigmoid, top-k of sigmoid + bias, weights = sigmoids normalised times scale; one block of n_exp threads
 // (a multiple of 32, at most 256). Ties go to the lower index, as a stable sort would.
 __global__ void k_route(const float * logits, const float * bias, int n_exp, int k, float scale, int * ids, float * w) {
+    logits += (size_t) blockIdx.x * n_exp; ids += (size_t) blockIdx.x * k; w += (size_t) blockIdx.x * k;
     __shared__ float p[256];
     __shared__ float bv[8];
     __shared__ int bi[8];
@@ -506,7 +508,8 @@ __global__ void k_exp_down(const uint8_t * W, uint32_t type, size_t ebytes, size
     if (threadIdx.x % WS == 0) y[n] = acc;
 }
 __global__ void k_embed(const uint8_t * E, const int * dtok, float * x, int C) {
-    const int tok = *dtok;
+    const int tok = dtok[blockIdx.x];
+    x += (size_t) blockIdx.x * C;
     const uint8_t * row = E + (size_t) tok * (C / 32 * 34);
     for (int i = threadIdx.x; i < C; i += blockDim.x) {
         const uint8_t * blk = row + (i / 32) * 34;
@@ -521,7 +524,8 @@ __global__ void k_softcap(float * x, int n, float cap) {
 
 // ---------------------------------------------------------------- fused kernels (step 2)
 // several matvecs in one launch: segment j has its own matrix, input and output; 8 rows a block
-struct Seg { const uint8_t * w; const float * x; float * y; size_t rb; int N, K; uint32_t type; };
+struct Seg { const uint8_t * w; const float * x; float * y; size_t rb; int N, K; uint32_t type; int xs = 0, ys = 0; };
+// (xs, ys: the per-token strides of x and y for the batched GEMM; 0 = K and N)
 struct Segs { Seg s[12]; int start[13]; int n; };
 __global__ void k_mmv(Segs S) {
     fp4_init();
@@ -537,9 +541,9 @@ __global__ void k_mmv(Segs S) {
 // up to 4 RMS norms (weight may be null), one block each; in place allowed
 struct Norms { const float * in[4]; const float * w[4]; float * out[4]; };
 __global__ void k_rms_n(Norms R, int n, float eps) {
-    const float * x = R.in[blockIdx.x];
+    const float * x = R.in[blockIdx.x] + (size_t) blockIdx.y * n;
     const float * w = R.w[blockIdx.x];
-    float * y = R.out[blockIdx.x];
+    float * y = R.out[blockIdx.x] + (size_t) blockIdx.y * n;
     float s = 0.0f;
     for (int i = threadIdx.x; i < n; i += blockDim.x) s += x[i] * x[i];
     s = bsum(s);
@@ -584,6 +588,7 @@ struct NormW { const float * w[4]; };
 __global__ void k_mix_n(const float * const * states, int ns, const float * queries, float * out, int C, NormW nw,
                         float eps) {
     const float * q = queries + (size_t) blockIdx.x * C;
+    const size_t toff = (size_t) blockIdx.y * C;
     __shared__ float sc[16], rr[16], p[16];
     __shared__ float red[32][16];
     // every state's sum of squares and dot with the query, in one pass and one reduction (at most 8 states)
@@ -593,7 +598,7 @@ __global__ void k_mix_n(const float * const * states, int ns, const float * quer
     for (int i = threadIdx.x; i < C; i += blockDim.x) {
         const float qi = q[i];
 #pragma unroll
-        for (int s = 0; s < 8; ++s) if (s < ns) { const float v = states[s][i]; a[s] += v * v; b[s] += v * qi; }
+        for (int s = 0; s < 8; ++s) if (s < ns) { const float v = states[s][toff + i]; a[s] += v * v; b[s] += v * qi; }
     }
     const int wi = threadIdx.x / WS, ln = threadIdx.x % WS, nwv = blockDim.x / WS;
 #pragma unroll
@@ -617,11 +622,11 @@ __global__ void k_mix_n(const float * const * states, int ns, const float * quer
         for (int s = 0; s < ns; ++s) p[s] = p[s] / z * rr[s];
     }
     __syncthreads();
-    float * o = out + (size_t) blockIdx.x * C;
+    float * o = out + ((size_t) blockIdx.y * gridDim.x + blockIdx.x) * C;
     float ss = 0.0f;
     for (int i = threadIdx.x; i < C; i += blockDim.x) {
         float v = 0.0f;
-        for (int s = 0; s < ns; ++s) v += p[s] * states[s][i];
+        for (int s = 0; s < ns; ++s) v += p[s] * states[s][toff + i];
         o[i] = v;
         ss += v * v;
     }
@@ -633,55 +638,73 @@ __global__ void k_mix_n(const float * const * states, int ns, const float * quer
     }
 }
 // loop controllers, up to 4 at once: cat_j = [rms(x_j); rms(m_j)]
-struct Ctl { const float * x[4]; const float * m[4]; float * cat[4]; const float * f[4]; const float * g[4]; float * out[4]; };
+// per token t: x[j] + t*xs, m[j] + t*ms, out[j] + t*C, cat[j] + t*8C, f[j] and g[j] + t*4C
+struct Ctl { const float * x[4]; const float * m[4]; float * cat[4]; const float * f[4]; const float * g[4]; float * out[4];
+             int xs, ms; };
 __global__ void k_ctrl_cat(Ctl P, int C) {
-    const int j = blockIdx.x;
+    const int j = blockIdx.x, t = blockIdx.y;
     for (int h = 0; h < 2; ++h) {
-        const float * x = h ? P.m[j] : P.x[j];
+        const float * x = h ? P.m[j] + (size_t) t * P.ms : P.x[j] + (size_t) t * P.xs;
         float s = 0.0f;
         for (int i = threadIdx.x; i < C; i += blockDim.x) s += x[i] * x[i];
         s = bsum(s);
         const float r = rsqrtf(s / C + 1e-6f);
-        for (int i = threadIdx.x; i < C; i += blockDim.x) P.cat[j][h * C + i] = x[i] * r;
+        for (int i = threadIdx.x; i < C; i += blockDim.x) P.cat[j][(size_t) t * 8 * C + h * C + i] = x[i] * r;
     }
 }
 __global__ void k_ctrl_apply(Ctl P, int C) {
-    const int j = blockIdx.y, i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y, t = blockIdx.z, i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= C) return;
-    const float x = P.x[j][i];
-    P.out[j][i] = x - tanhf(P.f[j][i]) * x + tanhf(P.g[j][i]) * P.m[j][i];
+    const float x = P.x[j][(size_t) t * P.xs + i];
+    const size_t o4 = (size_t) t * 4 * C + i;
+    P.out[j][(size_t) t * C + i] = x - tanhf(P.f[j][o4]) * x + tanhf(P.g[j][o4]) * P.m[j][(size_t) t * P.ms + i];
 }
 // K and V convolutions in one launch (blockIdx.y)
 struct Conv2 { float * x[2]; const float * w[2]; float * hist[2]; const float * dyn[2]; };
-__global__ void k_conv2(Conv2 P, int C, int head_dim, float scale) {
+__global__ void k_conv2(Conv2 P, int C, int head_dim, float scale, int T, int dyn_stride) {
     const int j = blockIdx.y, c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C) return;
     float * hist = P.hist[j];
     const float * w = P.w[j];
-    const float h0 = hist[c], h1 = hist[C + c], h2 = hist[2 * C + c], v = P.x[j][c];
-    float o = w[c * 4 + 0] * h0 + w[c * 4 + 1] * h1 + w[c * 4 + 2] * h2 + w[c * 4 + 3] * v;
-    if (P.dyn[j]) {
-        const float * t = P.dyn[j] + (c / head_dim) * 4;
-        o += t[0] * v + t[1] * h2 + t[2] * h1 + t[3] * h0;
+    const float w0 = w[c * 4 + 0], w1 = w[c * 4 + 1], w2 = w[c * 4 + 2], w3 = w[c * 4 + 3];
+    float h0 = hist[c], h1 = hist[C + c], h2 = hist[2 * C + c];
+    for (int t = 0; t < T; ++t) {
+        float * xp = P.x[j] + (size_t) t * C + c;
+        const float v = *xp;
+        float o = w0 * h0 + w1 * h1 + w2 * h2 + w3 * v;
+        if (P.dyn[j]) {
+            const float * tp = P.dyn[j] + (size_t) t * dyn_stride + (c / head_dim) * 4;
+            o += tp[0] * v + tp[1] * h2 + tp[2] * h1 + tp[3] * h0;
+        }
+        *xp = (v + o) * scale;
+        h0 = h1; h1 = h2; h2 = v;
     }
-    hist[c] = h1; hist[C + c] = h2; hist[2 * C + c] = v;
-    P.x[j][c] = (v + o) * scale;
+    hist[c] = h0; hist[C + c] = h1; hist[2 * C + c] = h2;
 }
 // conv of x (no dynamic taps) plus an optional residual, into dst
-__global__ void k_conv_res(const float * x, const float * w, float * hist, int C, const float * res, float * dst, float scale) {
+__global__ void k_conv_res(const float * x, const float * w, float * hist, int C, const float * res, float * dst, float scale,
+                           int T) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C) return;
-    const float h0 = hist[c], h1 = hist[C + c], h2 = hist[2 * C + c], v = x[c];
-    const float o = w[c * 4 + 0] * h0 + w[c * 4 + 1] * h1 + w[c * 4 + 2] * h2 + w[c * 4 + 3] * v;
-    hist[c] = h1; hist[C + c] = h2; hist[2 * C + c] = v;
-    dst[c] = (v + o) * scale + (res ? res[c] : 0.0f);
+    const float w0 = w[c * 4 + 0], w1 = w[c * 4 + 1], w2 = w[c * 4 + 2], w3 = w[c * 4 + 3];
+    float h0 = hist[c], h1 = hist[C + c], h2 = hist[2 * C + c];
+    for (int t = 0; t < T; ++t) {
+        const size_t i = (size_t) t * C + c;
+        const float v = x[i];
+        const float o = w0 * h0 + w1 * h1 + w2 * h2 + w3 * v;
+        dst[i] = (v + o) * scale + (res ? res[i] : 0.0f);
+        h0 = h1; h1 = h2; h2 = v;
+    }
+    hist[c] = h0; hist[C + c] = h1; hist[2 * C + c] = h2;
 }
 // clip q and r (times tau on full layers), clip k and RMS-norm v, and write k and v to the cache slot; one block a head
 __global__ void k_qkvr(float * q, const float * k, const float * v, float * r, const float * qs, const float * rs, int H,
                        int Hkv, int D, int nrel, float th, float rth, const int * pos, float alpha, float floor_, float eps,
                        float * Kc, float * Vc, int cap) {
     int b = blockIdx.x;
-    const float tau = tau_of(pos, alpha, floor_);
+    const int tk = blockIdx.y, p = *pos + tk;
+    q += (size_t) tk * H * D; k += (size_t) tk * Hkv * D; v += (size_t) tk * Hkv * D; r += (size_t) tk * H * nrel;
+    const float tau = tau_at(p, alpha, floor_);
     float * x;
     const float * sc = nullptr;
     int n = D;
@@ -689,8 +712,8 @@ __global__ void k_qkvr(float * q, const float * k, const float * v, float * r, c
     float * dst = nullptr;
     bool vnorm = false;
     if (b < H) { x = q + (size_t) b * D; sc = qs + (size_t) b * D; f2 = tau; }
-    else if ((b -= H) < Hkv) { x = (float *) k + (size_t) b * D; dst = Kc + ((size_t) (*pos % cap) * Hkv + b) * D; }
-    else if ((b -= Hkv) < Hkv) { x = (float *) v + (size_t) b * D; dst = Vc + ((size_t) (*pos % cap) * Hkv + b) * D; vnorm = true; }
+    else if ((b -= H) < Hkv) { x = (float *) k + (size_t) b * D; dst = Kc + ((size_t) (p % cap) * Hkv + b) * D; }
+    else if ((b -= Hkv) < Hkv) { x = (float *) v + (size_t) b * D; dst = Vc + ((size_t) (p % cap) * Hkv + b) * D; vnorm = true; }
     else { b -= Hkv; x = r + (size_t) b * nrel; sc = rs + (size_t) b * nrel; n = nrel; t = rth; f2 = tau; }
     float a = 0.0f;
     for (int i = threadIdx.x; i < n; i += blockDim.x) { const float y = x[i] * (sc ? sc[i] : 1.0f); a += y * y; }
@@ -705,7 +728,8 @@ __global__ void k_qkvr(float * q, const float * k, const float * v, float * r, c
 
 // relative bias for this token, per query head and distance d < ext: R[h] . table[d] - sink[h]; grid H
 __global__ void k_relbias(const float * R, const float * table, int nrel, int ext, const float * sink, float * bias) {
-    const int h = blockIdx.x;
+    const int h = blockIdx.x, H = gridDim.x, tk = blockIdx.y;
+    R += (size_t) tk * H * nrel; sink += (size_t) tk * H; bias += (size_t) tk * H * ext;
     const float * rh = R + (size_t) h * nrel;
     for (int d = threadIdx.x; d < ext; d += blockDim.x) {
         const float * t = table + (size_t) d * nrel;
@@ -721,8 +745,10 @@ __global__ void k_attn_split(const float * q, const float * Kc, const float * Vc
                              int Hkv, const float * bias, int ext, const float * sink, float * part, int splitsz,
                              int nsplit) {
     constexpr int D = 128;
-    const int kvh = blockIdx.x, sp = blockIdx.y, lane = threadIdx.x % WS, wv = threadIdx.x / WS;
-    const int pos = *dpos, first = max(0, pos - span + 1);
+    const int kvh = blockIdx.x, sp = blockIdx.y, lane = threadIdx.x % WS, wv = threadIdx.x / WS, tk = blockIdx.z;
+    const int pos = *dpos + tk, first = max(0, pos - span + 1);
+    q += (size_t) tk * Hkv * G * D; bias += (size_t) tk * Hkv * G * ext; sink += (size_t) tk * Hkv * G;
+    part += (size_t) tk * Hkv * G * nsplit * (D + 2);
     const int j0 = first + sp * splitsz, j1 = min(pos, j0 + splitsz - 1);
     const float qs = rsqrtf((float) D);
     float4 qv[G];
@@ -780,7 +806,8 @@ __global__ void k_attn_split(const float * q, const float * Kc, const float * Vc
 }
 // merge the splits with the zero sink logit, times the gate's sigmoid; block per query head, D threads
 __global__ void k_attn_combine(const float * part, int nsplit, const float * gate, float * out, int D) {
-    const int h = blockIdx.x, i = threadIdx.x;
+    const int h = blockIdx.x, i = threadIdx.x, H = gridDim.x, tk = blockIdx.y;
+    part += (size_t) tk * H * nsplit * (D + 2); gate += (size_t) tk * H * D; out += (size_t) tk * H * D;
     const float * ph = part + (size_t) h * nsplit * (D + 2);
     float M = 0.0f;   // the sink
     for (int s = 0; s < nsplit; ++s) M = fmaxf(M, ph[(size_t) s * (D + 2)]);
@@ -794,6 +821,131 @@ __global__ void k_attn_combine(const float * part, int nsplit, const float * gat
     }
     const float gv = 1.0f / (1.0f + expf(-gate[(size_t) h * D + i]));
     out[(size_t) h * D + i] = A / L * gv;
+}
+
+
+// ---------------------------------------------------------------- batched kernels (prompts)
+// 8 values of a row from column k (a multiple of 8), dequantized
+__device__ __forceinline__ void load8(const uint8_t * row, uint32_t type, int K, int k, float * o) {
+    if (type == T_Q8P) {
+        const uint2 qq = *(const uint2 *) (row + k);
+        const float d = __half2float(((const __half *) (row + K))[k >> 5]);
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            o[i] = (float) (int8_t) ((qq.x >> (8 * i)) & 0xFF) * d;
+            o[4 + i] = (float) (int8_t) ((qq.y >> (8 * i)) & 0xFF) * d;
+        }
+    } else if (type == T_NVFP4) {
+        const uint8_t * blk = row + (size_t) (k >> 6) * 36;
+        const int v = k & 63, sb = v >> 4, j0 = v & 15;
+        const float d = gUe4m3[blk[sb]];
+        const uint8_t * qs = blk + 4 + sb * 8;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) o[i] = sFp4[j0 ? (qs[i] >> 4) : (qs[i] & 0xF)] * d;
+    } else if (type == T_F32) {
+        const float4 a = *(const float4 *) (row + (size_t) k * 4), b = *(const float4 *) (row + (size_t) k * 4 + 16);
+        o[0] = a.x; o[1] = a.y; o[2] = a.z; o[3] = a.w; o[4] = b.x; o[5] = b.y; o[6] = b.z; o[7] = b.w;
+    } else {   // BF16
+        const uint16_t * w = (const uint16_t *) row + k;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) o[i] = __uint_as_float((uint32_t) w[i] << 16);
+    }
+}
+// Y[t][n] = W[n] . X[t] for several segments; tiles of 64 rows x 32 tokens, K steps of 32 through LDS.
+// gx: optional gather (the X row of tile token i is gx[i]), gy: scatter of the Y row; with an expert table.
+struct GSegs { Seg s[12]; int tstart[13]; int n; };
+template <int BT>   // tokens a tile (32 or 16); 64 rows, 256 threads: each thread one row, BT/4 tokens
+__device__ __forceinline__ void gemm_tile(const Seg & g, int n0, int T, int t0, const int * xrow, const int * yrow,
+                                          float yscale_fixed, const float * yscale_row) {
+    constexpr int TPT = BT / 4;
+    __shared__ float Ws[64][33], Xs[BT][33];
+    const int tid = threadIdx.x, rn = tid % 64, tg = tid / 64;
+    const int xs = g.xs ? g.xs : g.K, ys = g.ys ? g.ys : g.N;
+    float acc[TPT];
+#pragma unroll
+    for (int i = 0; i < TPT; ++i) acc[i] = 0.0f;
+    for (int k0 = 0; k0 < g.K; k0 += 32) {
+        {   // W tile: thread -> row tid/4, 8 columns
+            const int r = tid / 4, kp = (tid % 4) * 8, n = n0 + r;
+            float o[8];
+            if (n < g.N && k0 + kp < g.K) load8(g.w + (size_t) n * g.rb, g.type, g.K, k0 + kp, o);
+            else for (int i = 0; i < 8; ++i) o[i] = 0.0f;
+#pragma unroll
+            for (int i = 0; i < 8; ++i) Ws[r][kp + i] = o[i];
+        }
+        if (tid < BT * 8) {   // X tile: thread -> token tid/8, 4 columns
+            const int tt = tid / 8, kp = (tid % 8) * 4, t = t0 + tt;
+            float4 v = make_float4(0, 0, 0, 0);
+            if (t < T && k0 + kp < g.K) v = *(const float4 *) (g.x + (size_t) (xrow ? xrow[t] : t) * xs + k0 + kp);
+            Xs[tt][kp] = v.x; Xs[tt][kp + 1] = v.y; Xs[tt][kp + 2] = v.z; Xs[tt][kp + 3] = v.w;
+        }
+        __syncthreads();
+#pragma unroll 8
+        for (int kk = 0; kk < 32; ++kk) {
+            const float w = Ws[rn][kk];
+#pragma unroll
+            for (int i = 0; i < TPT; ++i) acc[i] += w * Xs[tg * TPT + i][kk];
+        }
+        __syncthreads();
+    }
+    const int n = n0 + rn;
+    if (n >= g.N) return;
+#pragma unroll
+    for (int i = 0; i < TPT; ++i) {
+        const int t = t0 + tg * TPT + i;
+        if (t >= T) break;
+        const int yr = yrow ? yrow[t] : t;
+        g.y[(size_t) yr * ys + n] = acc[i] * yscale_fixed * (yscale_row ? yscale_row[yr] : 1.0f);
+    }
+}
+__global__ void k_gemm(GSegs S, int T) {
+    fp4_init();
+    const int tile = blockIdx.x;
+    int j = 0;
+    while (tile >= S.tstart[j + 1]) ++j;
+    gemm_tile<32>(S.s[j], (tile - S.tstart[j]) * 64, T, blockIdx.y * 32, nullptr, nullptr, 1.0f, nullptr);
+}
+// group the (token, slot) entries by expert: counts, offsets and the entry list (one block)
+__global__ void k_group(const int * ids, int n, int n_exp, int * offs, int * list) {
+    __shared__ int cnt[256], cur[256];
+    for (int e = threadIdx.x; e < n_exp; e += blockDim.x) cnt[e] = 0;
+    __syncthreads();
+    for (int i = threadIdx.x; i < n; i += blockDim.x) atomicAdd(&cnt[ids[i]], 1);
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        int a = 0;
+        for (int e = 0; e < n_exp; ++e) { offs[e] = a; cur[e] = a; a += cnt[e]; }
+        offs[n_exp] = a;
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < n; i += blockDim.x) list[atomicAdd(&cur[ids[i]], 1)] = i;
+}
+// one expert's rows for its entries: grid (row tiles, experts, entry tiles of 32). x row of entry i = i / xdiv
+// (gate_up: the token; down: the entry), y row = the entry, times the expert's scale (and the entry's weight)
+__global__ void k_gemm_exp(const uint8_t * W, uint32_t type, size_t ebytes, size_t rb, int N, int K, const float * x,
+                           float * y, const int * offs, const int * list, int xdiv, const float * scale,
+                           const float * wts) {
+    fp4_init();
+    const int e = blockIdx.y, c0 = offs[e], cnt = offs[e + 1] - c0, t0 = blockIdx.z * 16;
+    if (t0 >= cnt) return;
+    __shared__ int xr[16], yr[16];
+    if (threadIdx.x < 16) {
+        const int i = t0 + threadIdx.x < cnt ? list[c0 + t0 + threadIdx.x] : 0;
+        xr[threadIdx.x] = i / xdiv;
+        yr[threadIdx.x] = i;
+    }
+    __syncthreads();
+    Seg g{W + (size_t) e * ebytes, x, y, rb, N, K, type};
+    // the tile's tokens are local 0..31: shift the row tables so token t0 + i reads xr[i]
+    gemm_tile<16>(g, blockIdx.x * 64, cnt, t0, xr - t0, yr - t0, scale ? scale[e] : 1.0f, wts);
+}
+// y[t][c] = sum over the token's k entries of yd[t*k + j][c]
+__global__ void k_exp_sum(const float * yd, float * y, int C, int k) {
+    const int t = blockIdx.y, c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= C) return;
+    float a = 0.0f;
+    for (int j = 0; j < k; ++j) a += yd[((size_t) t * k + j) * C + c];
+    y[(size_t) t * C + c] = a;
 }
 
 // ---------------------------------------------------------------- model
@@ -921,73 +1073,92 @@ struct Slot {     // a layer visit's cache
 };
 
 struct Runner {
+    static constexpr int TM = 128;     // the largest prompt chunk
     Model & m;
     int ctx;
     std::vector<Slot> slots;
+    // per-token buffers, [TM][...]
     float *x, *t0, *t1, *t2, *inp[3], *q, *k, *v, *r, *sinkv, *att, *g, *dk, *dv, *scr, *logits, *msgs, *ctrl_g,
-        *ctrl_a, *ctrl_b, *cat, *gu, *hh, *wts, *rl;
-    int * ids;
-    float *relb, *part;          // the token's relative bias [H][ext]; the attention's split partials
-    const float ** dstates;    // device array of state pointers for k_mix
-    std::vector<float *> pool; // the block states
+        *ctrl_a, *ctrl_b, *cat, *gu, *hh, *wts, *rl, *yd;
+    int *ids, *offs, *list;
+    float *relb, *part;          // relative bias [T][H][ext]; the attention's split partials
+    std::vector<float *> pool;   // the layer outputs and block states, [TM][C] each
     int pos = 0;
     hipStream_t st;
-    int *dpos, *dtok, *hpos;          // hpos: pinned host [tok, pos]
+    int *dpos, *dtok, *hpos;          // hpos: pinned host [pos, tok...]
     std::vector<const float **> marr; // one device array of state pointers per mix call of a token
     size_t mix_i = 0;
     bool eager_done = false;
     hipGraphExec_t gexec = nullptr;
+    int nsplit_max = 64;
 
     float * dalloc(size_t n) { float * p; CK(hipMalloc(&p, n * 4)); CK(hipMemset(p, 0, n * 4)); return p; }
 
     Runner(Model & m_, int ctx_) : m(m_), ctx(ctx_) {
         const int C = m.C, Ck = m.Hkv * m.D;
+        const size_t T = TM;
         const int n_slots = m.n_phys + (m.passes - 1) * (m.core1 - m.core0);
         slots.resize(n_slots);
         for (int s = 0; s < n_slots; ++s) {
             const int ip = s < m.n_phys ? s : m.core0 + (s - m.n_phys) % (m.core1 - m.core0);
             Slot & sl = slots[s];
-            sl.cap = m.L[ip].swa ? std::min(ctx, m.swa) : ctx;
+            // a window layer keeps its window plus a chunk: a chunk's first token still sees its whole window
+            sl.cap = m.L[ip].swa ? std::min(ctx, m.swa + TM) : ctx;
             sl.K = dalloc((size_t) sl.cap * Ck);
             sl.V = dalloc((size_t) sl.cap * Ck);
             sl.hist = dalloc((size_t) 3 * (2 * Ck + 2 * C));
         }
-        x = dalloc(C); t0 = dalloc(C); t1 = dalloc(C); t2 = dalloc(C);
-        for (auto & p : inp) p = dalloc(C);
-        q = dalloc(m.H * m.D); k = dalloc(Ck); v = dalloc(Ck); r = dalloc(m.H * m.nrel); sinkv = dalloc(m.H);
-        att = dalloc(m.H * m.D); g = dalloc(m.H * m.D); dk = dalloc(4 * m.Hkv); dv = dalloc(4 * m.Hkv);
-        scr = dalloc((size_t) 4 * C + (size_t) m.H * ctx); logits = dalloc(m.vocab_pad); msgs = dalloc(4 * C);
-        ctrl_g = dalloc(4 * m.rank); ctrl_a = dalloc(4 * C); ctrl_b = dalloc(4 * C); cat = dalloc(8 * C);
-        gu = dalloc((size_t) m.k_exp * 2 * m.F); hh = dalloc((size_t) m.k_exp * m.F); wts = dalloc(m.k_exp);
-        rl = dalloc(m.n_exp);
-        relb = dalloc((size_t) m.H * m.ext);
-        part = dalloc((size_t) m.H * 64 * (m.D + 2));
-        CK(hipMalloc(&ids, m.k_exp * 4));
-        CK(hipMalloc(&dstates, 32 * sizeof(float *)));
+        x = dalloc(T * C); t0 = dalloc(T * C); t1 = dalloc(T * C); t2 = dalloc(T * C);
+        for (auto & p : inp) p = dalloc(T * C);
+        q = dalloc(T * m.H * m.D); k = dalloc(T * Ck); v = dalloc(T * Ck); r = dalloc(T * m.H * m.nrel);
+        sinkv = dalloc(T * m.H); att = dalloc(T * m.H * m.D); g = dalloc(T * m.H * m.D);
+        dk = dalloc(T * 4 * m.Hkv); dv = dalloc(T * 4 * m.Hkv);
+        scr = dalloc(T * 3 * C); logits = dalloc(T * m.vocab_pad); msgs = dalloc(T * 4 * C);
+        ctrl_g = dalloc(T * 4 * m.rank); ctrl_a = dalloc(T * 4 * C); ctrl_b = dalloc(T * 4 * C); cat = dalloc(T * 8 * C);
+        gu = dalloc(T * m.k_exp * 2 * m.F); hh = dalloc(T * m.k_exp * m.F); wts = dalloc(T * m.k_exp);
+        yd = dalloc(T * m.k_exp * C);
+        rl = dalloc(T * m.n_exp);
+        relb = dalloc(T * m.H * m.ext);
+        part = dalloc(T * m.H * nsplit_max * (m.D + 2));
+        CK(hipMalloc(&ids, T * m.k_exp * 4));
+        CK(hipMalloc(&offs, (m.n_exp + 1) * 4));
+        CK(hipMalloc(&list, T * m.k_exp * 4));
         CK(hipStreamCreate(&st));
-        CK(hipMalloc(&dpos, 4)); CK(hipMalloc(&dtok, 4)); CK(hipHostMalloc(&hpos, 8));
-        for (int i = 0; i < 128; ++i) pool.push_back(dalloc(C));   // 2 a visit (48 visits) and a few more
+        CK(hipMalloc(&dpos, 4)); CK(hipMalloc(&dtok, T * 4)); CK(hipHostMalloc(&hpos, (T + 1) * 4));
+        for (int i = 0; i < 128; ++i) pool.push_back(dalloc(T * C));   // 2 a visit (48 visits) and a few more
     }
 
+    int ew(int n) { return (n + 255) / 256; }
     void mv(const Mat & a, const float * in, float * out) {
         hipLaunchKernelGGL(k_matvec, dim3((a.N + 7) / 8), dim3(256), 0, st, a.w, a.type, in, out, a.N, a.K, a.rb);
     }
-    // several matvecs in one launch
-    void mmv(std::initializer_list<std::tuple<const Mat *, const float *, float *>> list) {
-        Segs S{};
-        S.n = 0;
-        S.start[0] = 0;
+    // several matvecs (T = 1) or GEMMs (T > 1) in one launch; xs: the per-token stride of each input (0 = K)
+    using MV = std::tuple<const Mat *, const float *, float *, int>;
+    void mmv(int T, std::initializer_list<MV> list) {
+        if (T == 1) {
+            Segs S{};
+            S.n = 0; S.start[0] = 0;
+            for (const auto & e : list) {
+                const Mat & a = *std::get<0>(e);
+                S.s[S.n] = Seg{a.w, std::get<1>(e), std::get<2>(e), a.rb, a.N, a.K, a.type};
+                S.start[S.n + 1] = S.start[S.n] + a.N;
+                ++S.n;
+            }
+            hipLaunchKernelGGL(k_mmv, dim3((S.start[S.n] + 7) / 8), dim3(256), 0, st, S);
+            return;
+        }
+        GSegs S{};
+        S.n = 0; S.tstart[0] = 0;
         for (const auto & e : list) {
             const Mat & a = *std::get<0>(e);
-            S.s[S.n] = Seg{a.w, std::get<1>(e), std::get<2>(e), a.rb, a.N, a.K, a.type};
-            S.start[S.n + 1] = S.start[S.n] + a.N;
+            S.s[S.n] = Seg{a.w, std::get<1>(e), std::get<2>(e), a.rb, a.N, a.K, a.type, std::get<3>(e), 0};
+            S.tstart[S.n + 1] = S.tstart[S.n] + (a.N + 63) / 64;
             ++S.n;
         }
-        hipLaunchKernelGGL(k_mmv, dim3((S.start[S.n] + 7) / 8), dim3(256), 0, st, S);
+        hipLaunchKernelGGL(k_gemm, dim3(S.tstart[S.n], (T + 31) / 32), dim3(256), 0, st, S, T);
     }
-    int ew(int n) { return (n + 255) / 256; }
-    // mix(blocks, cur, queries) -> out[nq][C], each output RMS-normed with nw.w[j] when given
-    void mix(const std::vector<float *> & blocks, const float * cur, const float * queries, int nq, float * out,
+    // mix(blocks, cur, queries) -> out[T][nq][C], each output RMS-normed with nw.w[j] when given
+    void mix(int T, const std::vector<float *> & blocks, const float * cur, const float * queries, int nq, float * out,
              NormW nw = NormW{{nullptr, nullptr, nullptr, nullptr}}) {
         // the pointer sets are the same every token (the pool is handed out in the same order): written once
         std::vector<const float *> sv(blocks.begin(), blocks.end());
@@ -998,136 +1169,173 @@ struct Runner {
             CK(hipMemcpy(dd, sv.data(), sv.size() * sizeof(float *), hipMemcpyHostToDevice));
             marr.push_back(dd);
         }
-        hipLaunchKernelGGL(k_mix_n, dim3(nq), dim3(1024), 0, st, marr[mix_i++], (int) sv.size(), queries, out, m.C, nw, m.eps);
+        hipLaunchKernelGGL(k_mix_n, dim3(nq, T), dim3(1024), 0, st, marr[mix_i++], (int) sv.size(), queries, out, m.C,
+                           nw, m.eps);
     }
     // n loop controllers at once: out[j] = control(x[j], msg[j]) with the layer's controller c0 + j
-    void controls(const Layer & l, int c0, int n, const float * const * xs, const float * const * ms, float * const * outs) {
+    void controls(int T, const Layer & l, int c0, int n, const float * const * xs, int xstride, const float * const * ms,
+                  int mstride, float * const * outs) {
         const int C = m.C;
         Ctl P{};
+        P.xs = xstride; P.ms = mstride;
         for (int j = 0; j < n; ++j) {
             P.x[j] = xs[j]; P.m[j] = ms[j]; P.cat[j] = cat + (size_t) j * 2 * C;
             P.f[j] = ctrl_b + (size_t) j * C; P.g[j] = ctrl_a + (size_t) j * C; P.out[j] = outs[j];
         }
-        hipLaunchKernelGGL(k_ctrl_cat, dim3(n), dim3(256), 0, st, P, C);
-        Segs S{};
-        S.n = 0; S.start[0] = 0;
-        auto add = [&](const Mat & a, const float * in, float * out) {
-            S.s[S.n] = Seg{a.w, in, out, a.rb, a.N, a.K, a.type};
-            S.start[S.n + 1] = S.start[S.n] + a.N;
-            ++S.n;
-        };
-        for (int j = 0; j < n; ++j) add(l.cdown[c0 + j], P.cat[j], ctrl_g + (size_t) j * m.rank);
-        hipLaunchKernelGGL(k_mmv_f32_splitk<8>, dim3(S.start[S.n]), dim3(256), 0, st, S);
-        S.n = 0;
-        for (int j = 0; j < n; ++j) {
-            add(l.cgain[c0 + j], ctrl_g + (size_t) j * m.rank, ctrl_a + (size_t) j * C);
-            add(l.cforget[c0 + j], ctrl_g + (size_t) j * m.rank, ctrl_b + (size_t) j * C);
+        hipLaunchKernelGGL(k_ctrl_cat, dim3(n, T), dim3(256), 0, st, P, C);
+        if (T == 1) {
+            Segs S{};
+            S.n = 0; S.start[0] = 0;
+            auto add = [&](const Mat & a, const float * in, float * out) {
+                S.s[S.n] = Seg{a.w, in, out, a.rb, a.N, a.K, a.type};
+                S.start[S.n + 1] = S.start[S.n] + a.N;
+                ++S.n;
+            };
+            for (int j = 0; j < n; ++j) add(l.cdown[c0 + j], P.cat[j], ctrl_g + (size_t) j * m.rank);
+            hipLaunchKernelGGL(k_mmv_f32_splitk<8>, dim3(S.start[S.n]), dim3(256), 0, st, S);
+            S.n = 0;
+            for (int j = 0; j < n; ++j) {
+                add(l.cgain[c0 + j], ctrl_g + (size_t) j * m.rank, ctrl_a + (size_t) j * C);
+                add(l.cforget[c0 + j], ctrl_g + (size_t) j * m.rank, ctrl_b + (size_t) j * C);
+            }
+            hipLaunchKernelGGL(k_mmv, dim3((S.start[S.n] + 7) / 8), dim3(256), 0, st, S);
+        } else {
+            // per token the layouts are cat [8C], ctrl_g [4 rank], ctrl_a / ctrl_b [4C]
+            GSegs S{};
+            S.n = 0; S.tstart[0] = 0;
+            auto add = [&](const Mat & a, const float * in, float * out, int xs_, int ys_) {
+                S.s[S.n] = Seg{a.w, in, out, a.rb, a.N, a.K, a.type, xs_, ys_};
+                S.tstart[S.n + 1] = S.tstart[S.n] + (a.N + 63) / 64;
+                ++S.n;
+            };
+            for (int j = 0; j < n; ++j) add(l.cdown[c0 + j], P.cat[j], ctrl_g + (size_t) j * m.rank, 8 * C, 4 * m.rank);
+            hipLaunchKernelGGL(k_gemm, dim3(S.tstart[S.n], (T + 31) / 32), dim3(256), 0, st, S, T);
+            S.n = 0;
+            for (int j = 0; j < n; ++j) {
+                add(l.cgain[c0 + j], ctrl_g + (size_t) j * m.rank, ctrl_a + (size_t) j * C, 4 * m.rank, 4 * C);
+                add(l.cforget[c0 + j], ctrl_g + (size_t) j * m.rank, ctrl_b + (size_t) j * C, 4 * m.rank, 4 * C);
+            }
+            hipLaunchKernelGGL(k_gemm, dim3(S.tstart[S.n], (T + 31) / 32), dim3(256), 0, st, S, T);
         }
-        hipLaunchKernelGGL(k_mmv, dim3((S.start[S.n] + 7) / 8), dim3(256), 0, st, S);
-        hipLaunchKernelGGL(k_ctrl_apply, dim3(ew(C), n), dim3(256), 0, st, P, C);
+        hipLaunchKernelGGL(k_ctrl_apply, dim3(ew(C), n, T), dim3(256), 0, st, P, C);
     }
 
-    // one layer visit: cur is replaced by the visit's output (a new pool buffer); the input stays as it was, so it
-    // can be a block state
-    void layer(int slot, int ip, float *& cur, std::vector<float *> & blocks, const float * messages, int & pool_i) {
+    // one layer visit for T tokens: cur is replaced by the visit's output (a new pool buffer); the input stays as it
+    // was, so it can be a block state
+    void layer(int T, int slot, int ip, float *& cur, std::vector<float *> & blocks, const float * messages, int & pool_i) {
         const Layer & l = m.L[ip];
         const int C = m.C, Ck = m.Hkv * m.D;
         Slot & sl = slots[slot];
         float * inpSA = cur;
         const float * in3[3];
-        // attention inputs
+        int xs3 = C;   // the per-token stride of the attention inputs
         if (!messages) {
             if (l.swa) {
-                if (l.res_q) mix(blocks, cur, l.res_q, 1, inp[0], NormW{{l.attn_norm, nullptr, nullptr, nullptr}});
-                else hipLaunchKernelGGL(k_rms_n, dim3(1), dim3(256), 0, st, Norms{{cur}, {l.attn_norm}, {inp[0]}}, C, m.eps);
+                if (l.res_q) mix(T, blocks, cur, l.res_q, 1, inp[0], NormW{{l.attn_norm, nullptr, nullptr, nullptr}});
+                else hipLaunchKernelGGL(k_rms_n, dim3(1, T), dim3(256), 0, st, Norms{{cur}, {l.attn_norm}, {inp[0]}}, C, m.eps);
                 in3[0] = in3[1] = in3[2] = inp[0];
             } else {
-                mix(blocks, cur, l.res_q, 3, scr, NormW{{l.qn, l.kn, l.vn, nullptr}});
+                mix(T, blocks, cur, l.res_q, 3, scr, NormW{{l.qn, l.kn, l.vn, nullptr}});
                 for (int j = 0; j < 3; ++j) in3[j] = scr + (size_t) j * C;
+                xs3 = 3 * C;
             }
         } else {
             // loop pass: mix, then the controllers with the q, k, v messages, then the norms
-            mix(blocks, cur, l.res_q, l.n_res_q, scr);
+            mix(T, blocks, cur, l.res_q, l.n_res_q, scr);
             const float * xs[3], * ms[3];
             for (int j = 0; j < 3; ++j) { xs[j] = scr + (size_t) (l.swa ? 0 : j) * C; ms[j] = messages + (size_t) j * C; }
-            controls(l, 0, 3, xs, ms, inp);
+            controls(T, l, 0, 3, xs, l.n_res_q * C, ms, 4 * C, inp);
             Norms R{};
             for (int j = 0; j < 3; ++j) {
                 R.in[j] = inp[j]; R.out[j] = inp[j];
                 R.w[j] = l.swa ? l.attn_norm : (j == 0 ? l.qn : j == 1 ? l.kn : l.vn);
             }
-            hipLaunchKernelGGL(k_rms_n, dim3(3), dim3(256), 0, st, R, C, m.eps);
+            hipLaunchKernelGGL(k_rms_n, dim3(3, T), dim3(256), 0, st, R, C, m.eps);
             for (int j = 0; j < 3; ++j) in3[j] = inp[j];
         }
         // projections, one launch
         if (l.swa)
-            mmv({{&l.wq, in3[0], q}, {&l.wk, in3[1], k}, {&l.wv, in3[2], v}, {&l.rel, in3[0], r}, {&l.sink, in3[0], sinkv},
-                 {&l.gate, in3[0], g}});
+            mmv(T, {MV{&l.wq, in3[0], q, xs3}, MV{&l.wk, in3[1], k, xs3}, MV{&l.wv, in3[2], v, xs3}, MV{&l.rel, in3[0], r, xs3},
+                    MV{&l.sink, in3[0], sinkv, xs3}, MV{&l.gate, in3[0], g, xs3}});
         else
-            mmv({{&l.wq, in3[0], q}, {&l.wk, in3[1], k}, {&l.wv, in3[2], v}, {&l.rel, in3[0], r}, {&l.sink, in3[0], sinkv},
-                 {&l.gate, in3[0], g}, {&l.kproj, in3[1], dk}, {&l.vproj, in3[2], dv}});
+            mmv(T, {MV{&l.wq, in3[0], q, xs3}, MV{&l.wk, in3[1], k, xs3}, MV{&l.wv, in3[2], v, xs3}, MV{&l.rel, in3[0], r, xs3},
+                    MV{&l.sink, in3[0], sinkv, xs3}, MV{&l.gate, in3[0], g, xs3}, MV{&l.kproj, in3[1], dk, xs3},
+                    MV{&l.vproj, in3[2], dv, xs3}});
         const float cs = 1.0f / sqrtf((float) ((l.swa ? 1 : 2) * 4 + 1));
         hipLaunchKernelGGL(k_conv2, dim3(ew(Ck), 2), dim3(256), 0, st,
                            Conv2{{k, v}, {l.kconv, l.vconv}, {sl.hist, sl.hist + 3 * Ck},
-                                 {l.swa ? nullptr : dk, l.swa ? nullptr : dv}}, Ck, m.D, cs);
-        hipLaunchKernelGGL(k_qkvr, dim3(2 * m.H + 2 * m.Hkv), dim3(128), 0, st, q, k, v, r, l.q_clip, l.rel_clip, m.H,
+                                 {l.swa ? nullptr : dk, l.swa ? nullptr : dv}}, Ck, m.D, cs, T, 4 * m.Hkv);
+        hipLaunchKernelGGL(k_qkvr, dim3(2 * m.H + 2 * m.Hkv, T), dim3(128), 0, st, q, k, v, r, l.q_clip, l.rel_clip, m.H,
                            m.Hkv, m.D, m.nrel, m.qk_clip, m.rel_clip, dpos, l.swa ? 0.0f : m.alpha, m.floor_, m.eps,
                            sl.K, sl.V, sl.cap);
         const int span = l.swa ? std::min(m.swa, ctx) : ctx;
-        hipLaunchKernelGGL(k_relbias, dim3(m.H), dim3(256), 0, st, r, l.rel_bias, m.nrel, m.ext, sinkv, relb);
-        const int splitsz = std::max(64, (span + 63) / 64), nsplit = (span + splitsz - 1) / splitsz;
-        hipLaunchKernelGGL(k_attn_split<3>, dim3(m.Hkv, nsplit), dim3(128), 0, st, q, sl.K, sl.V, sl.cap, dpos, span,
+        hipLaunchKernelGGL(k_relbias, dim3(m.H, T), dim3(256), 0, st, r, l.rel_bias, m.nrel, m.ext, sinkv, relb);
+        const int splitsz = std::max(64, (span + nsplit_max - 1) / nsplit_max), nsplit = (span + splitsz - 1) / splitsz;
+        hipLaunchKernelGGL(k_attn_split<3>, dim3(m.Hkv, nsplit, T), dim3(128), 0, st, q, sl.K, sl.V, sl.cap, dpos, span,
                            m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit);
-        hipLaunchKernelGGL(k_attn_combine, dim3(m.H), dim3(m.D), 0, st, part, nsplit, g, att, m.D);
-        mv(l.wo, att, t0);
+        hipLaunchKernelGGL(k_attn_combine, dim3(m.H, T), dim3(m.D), 0, st, part, nsplit, g, att, m.D);
+        mmv(T, {MV{&l.wo, att, t0, 0}});
         float * h1 = pool[pool_i++];
         const bool starts = ip % m.block == 0;
         if (starts) blocks.push_back(inpSA);
         hipLaunchKernelGGL(k_conv_res, dim3(ew(C)), dim3(256), 0, st, t0, l.post_conv, sl.hist + 6 * Ck, C,
-                           starts ? (const float *) nullptr : inpSA, h1, 1.0f / sqrtf(5.0f));
+                           starts ? (const float *) nullptr : inpSA, h1, 1.0f / sqrtf(5.0f), T);
         // MoE
-        if (!messages) mix(blocks, h1, l.ffn_res_q, 1, t1, NormW{{l.ffn_norm, nullptr, nullptr, nullptr}});
+        if (!messages) mix(T, blocks, h1, l.ffn_res_q, 1, t1, NormW{{l.ffn_norm, nullptr, nullptr, nullptr}});
         else {
-            mix(blocks, h1, l.ffn_res_q, 1, t2);
+            mix(T, blocks, h1, l.ffn_res_q, 1, t2);
             const float * xs[1] = {t2}, * ms[1] = {messages + 3 * (size_t) C};
             float * os[1] = {t1};
-            controls(l, 3, 1, xs, ms, os);
-            hipLaunchKernelGGL(k_rms_n, dim3(1), dim3(256), 0, st, Norms{{t1}, {l.ffn_norm}, {t1}}, C, m.eps);
+            controls(T, l, 3, 1, xs, C, ms, 4 * C, os);
+            hipLaunchKernelGGL(k_rms_n, dim3(1, T), dim3(256), 0, st, Norms{{t1}, {l.ffn_norm}, {t1}}, C, m.eps);
         }
-        {
+        if (T == 1) {
             Segs S{};
             S.n = 1; S.start[0] = 0; S.start[1] = l.router.N;
             S.s[0] = Seg{l.router.w, t1, rl, l.router.rb, l.router.N, l.router.K, l.router.type};
             hipLaunchKernelGGL(k_mmv_f32_splitk<4>, dim3((l.router.N + 1) / 2), dim3(256), 0, st, S);
+        } else {
+            mmv(T, {MV{&l.router, t1, rl, 0}});
         }
-        hipLaunchKernelGGL(k_route, dim3(1), dim3(m.n_exp), 0, st, rl, l.probs_b, m.n_exp, m.k_exp, m.wscale, ids, wts);
-        hipLaunchKernelGGL(k_exp_gu, dim3((2 * m.F + 7) / 8, m.k_exp), dim3(256), 0, st, l.gu, l.gu_type, l.gu_ebytes,
-                           l.gu_rb, l.gu_scale, ids, t1, gu, 2 * m.F, C);
-        hipLaunchKernelGGL(k_situ, dim3(ew(m.F * m.k_exp)), dim3(256), 0, st, gu, hh, m.F, m.k_exp, m.situ_b, m.situ_lb);
-        hipLaunchKernelGGL(k_exp_down, dim3((C + 7) / 8), dim3(256), 0, st, l.down, l.down_type, l.down_ebytes,
-                           l.down_rb, l.down_scale, ids, wts, hh, t2, C, m.F, m.k_exp);
+        hipLaunchKernelGGL(k_route, dim3(T), dim3(m.n_exp), 0, st, rl, l.probs_b, m.n_exp, m.k_exp, m.wscale, ids, wts);
         float * h2 = pool[pool_i++];
+        if (T == 1) {
+            hipLaunchKernelGGL(k_exp_gu, dim3((2 * m.F + 7) / 8, m.k_exp), dim3(256), 0, st, l.gu, l.gu_type, l.gu_ebytes,
+                               l.gu_rb, l.gu_scale, ids, t1, gu, 2 * m.F, C);
+            hipLaunchKernelGGL(k_situ, dim3(ew(m.F * m.k_exp)), dim3(256), 0, st, gu, hh, m.F, m.k_exp, m.situ_b, m.situ_lb);
+            hipLaunchKernelGGL(k_exp_down, dim3((C + 7) / 8), dim3(256), 0, st, l.down, l.down_type, l.down_ebytes,
+                               l.down_rb, l.down_scale, ids, wts, hh, t2, C, m.F, m.k_exp);
+        } else {
+            const int ne = T * m.k_exp;
+            hipLaunchKernelGGL(k_group, dim3(1), dim3(1024), 0, st, ids, ne, m.n_exp, offs, list);
+            hipLaunchKernelGGL(k_gemm_exp, dim3((2 * m.F + 63) / 64, m.n_exp, (T + 15) / 16), dim3(256), 0, st, l.gu,
+                               l.gu_type, l.gu_ebytes, l.gu_rb, 2 * m.F, C, t1, gu, offs, list, m.k_exp, l.gu_scale,
+                               (const float *) nullptr);
+            hipLaunchKernelGGL(k_situ, dim3(ew(m.F * ne)), dim3(256), 0, st, gu, hh, m.F, ne, m.situ_b, m.situ_lb);
+            hipLaunchKernelGGL(k_gemm_exp, dim3((C + 63) / 64, m.n_exp, (T + 15) / 16), dim3(256), 0, st, l.down,
+                               l.down_type, l.down_ebytes, l.down_rb, C, m.F, hh, yd, offs, list, 1, l.down_scale, wts);
+            hipLaunchKernelGGL(k_exp_sum, dim3(ew(C), T), dim3(256), 0, st, yd, t2, C, m.k_exp);
+        }
         hipLaunchKernelGGL(k_conv_res, dim3(ew(C)), dim3(256), 0, st, t2, l.ffn_conv, sl.hist + 6 * Ck + 3 * C, C,
-                           h1, h2, 1.0f / sqrtf(5.0f));
+                           h1, h2, 1.0f / sqrtf(5.0f), T);
         cur = h2;
     }
 
-    // feed one token; the logits of the next one land in `logits` (host copy in out when given)
     // feed one token: the first one runs eagerly (it writes the mix pointer sets), the second is captured as a graph,
     // every later one replays it
     void step(int tok, std::vector<float> * out) {
-        hpos[0] = tok;
-        hpos[1] = pos;
-        CK(hipMemcpyAsync(dtok, hpos, 4, hipMemcpyHostToDevice, st));
-        CK(hipMemcpyAsync(dpos, hpos + 1, 4, hipMemcpyHostToDevice, st));
+        hpos[0] = pos;
+        hpos[1] = tok;
+        CK(hipMemcpyAsync(dpos, hpos, 4, hipMemcpyHostToDevice, st));
+        CK(hipMemcpyAsync(dtok, hpos + 1, 4, hipMemcpyHostToDevice, st));
         if (!eager_done) {
-            body();
+            body(1, false);
             eager_done = true;
         } else {
             if (!gexec) {
                 hipGraph_t gr;
                 CK(hipStreamBeginCapture(st, hipStreamCaptureModeGlobal));
-                body();
+                body(1, false);
                 CK(hipStreamEndCapture(st, &gr));
                 CK(hipGraphInstantiate(&gexec, gr, nullptr, nullptr, 0));
             }
@@ -1140,15 +1348,33 @@ struct Runner {
         }
         CK(hipStreamSynchronize(st));
     }
-    void body() {
+    // feed up to TM tokens at once (a prompt chunk); all_logits: every token's logits (else only the last one's, in
+    // logits[0]); out gets them when given
+    void chunk(const int * toks, int T, bool all_logits, std::vector<float> * out) {
+        hpos[0] = pos;
+        std::memcpy(hpos + 1, toks, (size_t) T * 4);
+        CK(hipMemcpyAsync(dpos, hpos, 4, hipMemcpyHostToDevice, st));
+        CK(hipMemcpyAsync(dtok, hpos + 1, (size_t) T * 4, hipMemcpyHostToDevice, st));
+        body(T, all_logits);
+        pos += T;
+        if (out) {
+            const int nl = all_logits ? T : 1;
+            out->resize((size_t) nl * m.vocab);
+            for (int i = 0; i < nl; ++i)
+                CK(hipMemcpyAsync(out->data() + (size_t) i * m.vocab, logits + (size_t) i * m.vocab_pad,
+                                  (size_t) m.vocab * 4, hipMemcpyDeviceToHost, st));
+        }
+        CK(hipStreamSynchronize(st));
+    }
+    void body(int T, bool all_logits) {
         const int C = m.C;
         int pool_i = 0;
         mix_i = 0;
-        hipLaunchKernelGGL(k_embed, dim3(1), dim3(256), 0, st, m.embd, dtok, x, C);
-        hipLaunchKernelGGL(k_rms_n, dim3(1), dim3(256), 0, st, Norms{{x}, {m.embd_norm}, {x}}, C, m.eps);
+        hipLaunchKernelGGL(k_embed, dim3(T), dim3(256), 0, st, m.embd, dtok, x, C);
+        hipLaunchKernelGGL(k_rms_n, dim3(1, T), dim3(256), 0, st, Norms{{x}, {m.embd_norm}, {x}}, C, m.eps);
         float * cur = x;
         std::vector<float *> blocks;
-        for (int il = 0; il < m.core0; ++il) layer(il, il, cur, blocks, nullptr, pool_i);
+        for (int il = 0; il < m.core0; ++il) layer(T, il, il, cur, blocks, nullptr, pool_i);
         float * prelude = cur;
         const std::vector<float *> prelude_blocks = blocks;
         const int ncore = m.core1 - m.core0;
@@ -1163,15 +1389,22 @@ struct Runner {
             }
             for (int ip = m.core0; ip < m.core1; ++ip) {
                 const int slot = p == 0 ? ip : m.n_phys + (p - 1) * ncore + (ip - m.core0);
-                if (p == 0) { layer(slot, ip, cur, blocks, nullptr, pool_i); continue; }
-                mix(bank, bank_out, m.L[ip].msg_q, 4, msgs);
-                layer(slot, ip, cur, blocks, msgs, pool_i);
+                if (p == 0) { layer(T, slot, ip, cur, blocks, nullptr, pool_i); continue; }
+                mix(T, bank, bank_out, m.L[ip].msg_q, 4, msgs);
+                layer(T, slot, ip, cur, blocks, msgs, pool_i);
             }
         }
-        for (int il = m.core1; il < m.n_phys; ++il) layer(il, il, cur, blocks, nullptr, pool_i);
-        mix(blocks, cur, m.out_res_q, 1, t1, NormW{{m.out_norm, nullptr, nullptr, nullptr}});
-        mv(m.head, t1, logits);
-        hipLaunchKernelGGL(k_softcap, dim3(ew(m.vocab)), dim3(256), 0, st, logits, m.vocab, m.softcap);
+        for (int il = m.core1; il < m.n_phys; ++il) layer(T, il, il, cur, blocks, nullptr, pool_i);
+        mix(T, blocks, cur, m.out_res_q, 1, t1, NormW{{m.out_norm, nullptr, nullptr, nullptr}});
+        if (T == 1) mv(m.head, t1, logits);
+        else if (all_logits) {
+            GSegs S{};
+            S.n = 1; S.tstart[0] = 0; S.tstart[1] = (m.head.N + 63) / 64;
+            S.s[0] = Seg{m.head.w, t1, logits, m.head.rb, m.head.N, m.head.K, m.head.type, 0, m.vocab_pad};
+            hipLaunchKernelGGL(k_gemm, dim3(S.tstart[1], (T + 31) / 32), dim3(256), 0, st, S, T);
+        } else mv(m.head, t1 + (size_t) (T - 1) * C, logits);
+        const int nl = all_logits ? T : 1;
+        hipLaunchKernelGGL(k_softcap, dim3(ew(nl * m.vocab_pad)), dim3(256), 0, st, logits, nl * m.vocab_pad, m.softcap);
     }
 };
 
@@ -1179,7 +1412,8 @@ struct Runner {
 
 int main(int argc, char ** argv) {
     std::string path, score, dump;
-    int gpu = 0, ctx = 4096, n_dump = 0, n_bench = 0;   // --bench N: N decode steps after the text, timed
+    int gpu = 0, ctx = 4096, n_dump = 0, n_bench = 0, chunk = 1;
+    int n_pf = 0;   // --bench-prefill N: a fresh N-token prompt (the text repeated) in chunks, only the last logits   // --chunk N: the text in chunks of N   // --bench N: N decode steps after the text, timed
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char * { return i + 1 < argc ? argv[++i] : ""; };
@@ -1189,6 +1423,8 @@ int main(int argc, char ** argv) {
         else if (a == "--score") score = next();
         else if (a == "--dump-logits") { dump = next(); n_dump = std::atoi(next()); }
         else if (a == "--bench") n_bench = std::atoi(next());
+        else if (a == "--chunk") chunk = std::atoi(next());
+        else if (a == "--bench-prefill") n_pf = std::atoi(next());
         else { std::fprintf(stderr, "almond-inkling-native: unknown argument %s\n", a.c_str()); return 2; }
     }
     if (path.empty() || score.empty()) {
@@ -1206,6 +1442,21 @@ int main(int argc, char ** argv) {
     std::vector<int> ids;
     { std::ifstream f(score); int v; while (f >> v) ids.push_back(v); }
     if ((int) ids.size() > ctx) ids.resize(ctx);
+    if (n_pf > 0) {
+        Runner pr(m, ctx);
+        std::vector<int> t;
+        while ((int) t.size() < n_pf) t.insert(t.end(), ids.begin(), ids.end());
+        t.resize((size_t) n_pf);
+        const int c = std::max(2, std::min(chunk, Runner::TM));
+        pr.chunk(t.data(), c, false, nullptr);   // warm-up chunk (pointer sets, kernels)
+        pr.pos = 0;
+        for (auto & sl : pr.slots) CK(hipMemset(sl.hist, 0, (size_t) 3 * (2 * m.Hkv * m.D + 2 * m.C) * 4));
+        const auto tp = std::chrono::steady_clock::now();
+        for (int i = 0; i < n_pf; i += c) pr.chunk(t.data() + i, std::min(c, n_pf - i), false, nullptr);
+        const double ps = std::chrono::duration<double>(std::chrono::steady_clock::now() - tp).count();
+        std::printf("BENCH prefill %d tokens in chunks of %d: %.1f tok/s (%.2f s)\n", n_pf, c, n_pf / ps, ps);
+        return 0;
+    }
     Runner run(m, ctx);
     std::vector<float> lg;
     FILE * df = dump.empty() ? nullptr : std::fopen(dump.c_str(), "wb");
@@ -1214,16 +1465,24 @@ int main(int argc, char ** argv) {
     std::vector<int> top1;
     const int first = (int) ids.size() / 2;
     const auto t1 = std::chrono::steady_clock::now();
-    for (size_t i = 0; i + 1 < ids.size(); ++i) {
-        run.step(ids[i], &lg);
-        const float mx = *std::max_element(lg.begin(), lg.end());
+    auto score_one = [&](size_t i, const float * l) {
+        const float mx = *std::max_element(l, l + m.vocab);
         double z = 0;
-        for (float v : lg) z += std::exp((double) v - mx);
-        const double lp = (double) lg[ids[i + 1]] - mx - std::log(z);
-        top1.push_back((int) (std::max_element(lg.begin(), lg.end()) - lg.begin()));
+        for (int j = 0; j < m.vocab; ++j) z += std::exp((double) l[j] - mx);
+        const double lp = (double) l[ids[i + 1]] - mx - std::log(z);
+        top1.push_back((int) (std::max_element(l, l + m.vocab) - l));
         if ((int) i >= first) { nll -= lp; ++n_scored; }
-        if (df && (int) i >= first && dumped < n_dump) { std::fwrite(lg.data(), 4, lg.size(), df); ++dumped; }
-        if (i % 256 == 0) std::fprintf(stderr, "%zu / %zu\n", i, ids.size());
+        if (df && (int) i >= first && dumped < n_dump) { std::fwrite(l, 4, (size_t) m.vocab, df); ++dumped; }
+    };
+    chunk = std::max(1, std::min(chunk, Runner::TM));
+    for (size_t i = 0; i + 1 < ids.size();) {
+        const int T = (int) std::min<size_t>((size_t) chunk, ids.size() - 1 - i);
+        if (T == 1) { run.step(ids[i], &lg); score_one(i, lg.data()); }
+        else {
+            run.chunk(ids.data() + i, T, true, &lg);
+            for (int t = 0; t < T; ++t) score_one(i + t, lg.data() + (size_t) t * m.vocab);
+        }
+        i += (size_t) T;
     }
     if (df) std::fclose(df);
     if (n_bench > 0) {
