@@ -276,7 +276,11 @@ int main(int argc, char ** argv) {
     bool kv_q8 = false, serve = false;
     std::vector<int> eos;
     Sampling defaults;
-    std::string dspark;      // --dspark DRAFT.gguf (almond-inkling-dspark only)
+    std::string dspark;
+    bool cpu_weights = false;   // the weights stay in RAM (the Q8_0 reference, which does not fit a card)
+    std::string dump;        // --dump-logits FILE N: the first N scored positions' logits (F32)
+    int n_dump = 0;
+    std::string score;       // --score IDS.txt: the PPL of the text's second half (checks src/inkling/native)      // --dspark DRAFT.gguf (almond-inkling-dspark only)
     int n_draft = 3;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -293,6 +297,9 @@ int main(int argc, char ** argv) {
         else if (a == "--temp") defaults.temp = (float) std::atof(next());
         else if (a == "--top-p") defaults.top_p = (float) std::atof(next());
         else if (a == "--dspark") dspark = next();
+        else if (a == "--score") score = next();
+        else if (a == "--cpu-weights") cpu_weights = true;
+        else if (a == "--dump-logits") { dump = next(); n_dump = std::atoi(next()); }
         else if (a == "--dspark-n") n_draft = std::max(1, std::atoi(next()));
         else { std::fprintf(stderr, "almond-inkling: unknown argument %s\n", a.c_str()); return 2; }
     }
@@ -302,13 +309,14 @@ int main(int argc, char ** argv) {
         return 2;
     }
 #endif
+    if (!score.empty()) serve = true;
     if (path.empty() || !serve) {
         std::fprintf(stderr, "usage: almond-inkling -m MODEL.gguf [-c N] [--gpu N] [--kv-q8] [--ubatch N] --serve\n");
         return 2;
     }
     llama_backend_init();
     llama_model_params mp = llama_model_default_params();
-    mp.n_gpu_layers = -1;
+    mp.n_gpu_layers = cpu_weights ? 0 : -1;
     mp.split_mode = split ? LLAMA_SPLIT_MODE_LAYER : LLAMA_SPLIT_MODE_NONE;
     mp.main_gpu = gpu;
     Engine eng;
@@ -376,6 +384,42 @@ int main(int argc, char ** argv) {
     eng.batch = llama_batch_init(eng.n_batch, 0, 1);
     if (eos.empty()) eos.push_back(llama_vocab_eos(eng.vocab));
 
+    if (!score.empty()) {
+        // every token fed in order; the second half's next tokens give the PPL (the rule ink_native.hip uses)
+        std::vector<llama_token> t;
+        { FILE * f = std::fopen(score.c_str(), "r"); int v; while (f && std::fscanf(f, "%d", &v) == 1) t.push_back(v); if (f) std::fclose(f); }
+        if ((int64_t) t.size() > eng.n_ctx()) t.resize((size_t) eng.n_ctx());
+        double nll = 0;
+        int n = 0;
+        std::vector<int> top1;
+        const size_t first = t.size() / 2;
+        FILE * df = dump.empty() ? nullptr : std::fopen(dump.c_str(), "wb");
+        int dumped = 0;
+        for (size_t at = 0; at + 1 < t.size();) {
+            const int m = (int) std::min<size_t>((size_t) eng.n_batch, t.size() - 1 - at);
+            eng.batch.n_tokens = m;
+            for (int i = 0; i < m; ++i) {
+                eng.batch.token[i] = t[at + i]; eng.batch.pos[i] = (llama_pos) (at + i);
+                eng.batch.n_seq_id[i] = 1; eng.batch.seq_id[i][0] = 0; eng.batch.logits[i] = 1;
+            }
+            if (llama_decode(eng.ctx, eng.batch) != 0) { std::fprintf(stderr, "decode failed\n"); return 1; }
+            for (int i = 0; i < m; ++i) {
+                const float * l = llama_get_logits_ith(eng.ctx, i);
+                const float mx = *std::max_element(l, l + eng.n_vocab);
+                double z = 0;
+                for (int64_t j = 0; j < eng.n_vocab; ++j) z += std::exp((double) l[j] - mx);
+                top1.push_back((int) (std::max_element(l, l + eng.n_vocab) - l));
+                if (at + i >= first) { nll -= (double) l[t[at + i + 1]] - mx - std::log(z); ++n; }
+                if (df && at + i >= first && dumped < n_dump) { std::fwrite(l, 4, (size_t) eng.n_vocab, df); ++dumped; }
+            }
+            at += (size_t) m;
+        }
+        if (df) std::fclose(df);
+        std::printf("SCORE ppl=%.4f scored=%d tokens=%zu\nTOP1", std::exp(nll / std::max(1, n)), n, t.size());
+        for (int v : top1) std::printf(" %d", v);
+        std::printf("\n");
+        return 0;
+    }
     LineQueue lq;
     std::thread rd([&] { lq.run(); });
     rd.detach();

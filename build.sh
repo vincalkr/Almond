@@ -96,4 +96,7 @@ if [ -d models/inkling2-mini ] || [ -n "${INKLING:-}" ]; then
             -pthread -o build-inkling/almond-inkling-dspark
         echo "=== done: build-inkling/almond-inkling-dspark"
     fi
+    # almond-inkling-native: Almond's own Inkling engine (src/inkling/native, docs/inkling/ENGINE.md), HIP only
+    "$CXX_HIP" -O2 -std=c++17 --offload-arch="$GFX" src/inkling/native/ink_native.hip -o build-inkling/almond-inkling-native
+    echo "=== done: build-inkling/almond-inkling-native"
 fi
