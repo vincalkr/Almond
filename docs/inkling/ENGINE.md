@@ -333,3 +333,10 @@ tokens); shapes and text ("ALMOND 42"), a bar chart (Thursday, 9) and a drawn ho
 same text throughout, thinking included; for the third the thinking parts after 205 characters on a close wording
 and the answer is the same sentence. Text without pictures: logits identical to the previous build (KL 0 over 511
 positions), the server tests pass.
+
+`local/inkling-dspark-local-vision.json`: the DSpark configuration with the same encoder; launch.py takes an Inkling
+configuration's `-vision` twin when the encoder is there, so the router's `inkling-dspark` entry gets it. The encoder
+is on the CPU, so card 0 has what the DSpark configuration had: 0.61 GiB free after the drafter. Through the server
+at temperature 0 (the three pictures above and a code question, 400 tokens out at most), the answers with and
+without DSpark are the same text, character for character; requests (prompt reading included) 58.0 -> 75.0,
+49.6 -> 61.3, 41.2 -> 42.3 and 83.7 -> 109.5 tok/s.
