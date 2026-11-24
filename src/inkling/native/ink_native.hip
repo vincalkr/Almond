@@ -794,7 +794,10 @@ __global__ void k_attn_split(const float * q, const void * Kc, const void * Vc, 
     const int pos = *dpos + tk, first = max(0, pos - span + 1);
     q += (size_t) tk * Hkv * G * D; bias += (size_t) tk * Hkv * G * ext; sink += (size_t) tk * Hkv * G;
     part += (size_t) tk * Hkv * G * nsplit * (D + 2);
-    const int j0 = first + sp * splitsz, j1 = min(pos, j0 + splitsz - 1);
+    // the splits follow the keys there are now (the position is read on the device, so a captured graph adapts):
+    // at least splitsz keys a split
+    const int nk = pos - first + 1, ssz = max(splitsz, (nk + nsplit - 1) / nsplit);
+    const int j0 = first + sp * ssz, j1 = min(pos, j0 + ssz - 1);
     const float qs = rsqrtf((float) D);
     float4 qv[G];
     float m[G], ls[G];
@@ -1589,8 +1592,8 @@ struct Runner {
         hipLaunchKernelGGL(k_relbias, dim3(m.H, T), dim3(256), 0, st, r, l.rel_bias, m.nrel, m.ext, sinkv, relb);
         int nsplit;
         if (T == 1) {
-            const int splitsz = std::max(64, (span + nsplit_max - 1) / nsplit_max);
-            nsplit = (span + splitsz - 1) / splitsz;
+            const int splitsz = 32;   // the least a split; the kernel spreads the keys present over nsplit
+            nsplit = std::min(nsplit_max, (span + splitsz - 1) / splitsz);
             hipLaunchKernelGGL(k_attn_split<3>, dim3(m.Hkv, nsplit, T), dim3(128), 0, st, q, sl.K, sl.V, sl.cap, dpos,
                                span, m.Hkv, relb, m.ext, sinkv, part, splitsz, nsplit, kvt);
         } else {
@@ -1740,6 +1743,14 @@ struct Runner {
         std::fclose(f);
         if (ok) load_state(st_, (int) n);
         return ok;
+    }
+    // the last token's logits into pinned host memory (serve): one copy, no staging
+    float * hlog = nullptr;
+    const float * fetch_logits() {
+        if (!hlog) CK(hipHostMalloc(&hlog, (size_t) m.vocab * 4));
+        CK(hipMemcpyAsync(hlog, logits, (size_t) m.vocab * 4, hipMemcpyDeviceToHost, st));
+        CK(hipStreamSynchronize(st));
+        return hlog;
     }
     // feed one token: the first one runs eagerly (it writes the mix pointer sets), the second is captured as a graph,
     // every later one replays it
@@ -1903,6 +1914,17 @@ int sample(const float * logits, int V, const Sampling & s, const std::vector<in
         }
     }
     if (s.temp <= 0.0f) return (int) (std::max_element(l.begin(), l.end()) - l.begin());
+    if (s.top_k <= 0 && s.top_p >= 1.0f && s.min_p <= 0.0f) {
+        // no truncation asked: draw from the whole softmax (two passes, no sort). The sorted path below keeps the best
+        // 4,096; this one keeps every token, so it is the exact distribution
+        const float mx = *std::max_element(l.begin(), l.end()), it = 1.0f / s.temp;
+        double tot = 0;
+        for (int i = 0; i < V; ++i) { const float e = expf((l[(size_t) i] - mx) * it); l[(size_t) i] = e; tot += e; }
+        std::uniform_real_distribution<double> u(0.0, tot);
+        double r = u(rng), acc = 0;
+        for (int i = 0; i < V; ++i) { acc += l[(size_t) i]; if (r <= acc) return i; }
+        return (int) (std::max_element(logits, logits + V) - logits);
+    }
     std::vector<int32_t> idx((size_t) V);
     for (int i = 0; i < V; ++i) idx[(size_t) i] = i;
     const size_t cut = std::min<size_t>(s.top_k > 0 ? (size_t) s.top_k : (size_t) V, 4096);
@@ -1961,7 +1983,7 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
         run.kvt == 1 ? "q8_0" : run.kvt == 2 ? "f16" : "f32");
     say("READY %lld stop\n", n_ctx);
     std::string line;
-    std::vector<float> lg;
+    const float * lg = nullptr;
     while (lq.pop(line)) {
         if (line.empty()) continue;
         if (line == "QUIT") break;
@@ -2036,8 +2058,9 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
         bool cancelled = false;
         for (size_t at = keep; at < ids.size();) {
             const size_t n = std::min((size_t) run.TM, ids.size() - at);
-            if (n == 1) run.step(ids[at], &lg);
-            else run.chunk(ids.data() + at, (int) n, false, &lg);
+            if (n == 1) run.step(ids[at], nullptr);
+            else run.chunk(ids.data() + at, (int) n, false, nullptr);
+            if (at + n == ids.size()) lg = run.fetch_logits();
             hist.insert(hist.end(), ids.begin() + (ptrdiff_t) at, ids.begin() + (ptrdiff_t) (at + n));
             at += n;
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -2064,13 +2087,14 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
             if (lq.stop) { finish = "cancel"; return false; }
             return true;
         };
-        int y = sample(lg.data(), m.vocab, s, h, rng);
+        int y = sample(lg, m.vocab, s, h, rng);
         bool more = emit(y);
         while (more) {
             if ((long long) hist.size() + 1 > n_ctx) break;
-            run.step(y, &lg);
+            run.step(y, nullptr);
+            lg = run.fetch_logits();
             hist.push_back(y);
-            y = sample(lg.data(), m.vocab, s, h, rng);
+            y = sample(lg, m.vocab, s, h, rng);
             more = emit(y);
         }
         const double gen_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
