@@ -403,8 +403,10 @@ Speed (`--bench-prefill N`, F16 KV, chunks of 1,024; decode `--bench 200` at dep
 | prefill 128K | 775 tok/s | 538 tok/s |
 | prefill 256K | does not fit | 390 tok/s (673 s) |
 | decode, 32K context, depth 1K | 86.1 tok/s | 72.3 tok/s |
+| decode, 512K F16 / 1M q8_0 context, depth 1K | - | 72.2 / 72.7 tok/s |
+| 32K text scored, then decode at depth 32K (one card 128K F16; far 1M q8_0) | PPL 4.2943, 601 tok/s, decode 73.8 | PPL 4.2882, 434 tok/s, decode 63.7 |
 
 The copies cost: every far visit of a 1,024-token chunk moves q, the gate and the output (12 MB each) over PCIe,
-and decode pays 16 cross-card waits a token. Not measured yet (the run was stopped at 512K): prefill at 512K and 1M,
+and decode pays 16 cross-card waits a token. The 1M q8_0 and 512K F16 runners allocate and run. Not measured yet (the run was stopped at 512K): prefill at 512K and 1M,
 decode at depth, KL and needle retrieval at 256K / 1M, DSpark / images / checkpoints with `--kv-gpu`, the server
 configuration. So 128K on one card stays the default.
