@@ -1,0 +1,35 @@
+{
+  "exe": "build-inkling/almond-inkling-native",
+  "args": [
+    "--inkling",
+    "-m",
+    "models/inkling2-mini/Inkling-2-Mini-UD-Q4_K_XL.gguf",
+    "--gpu",
+    "0",
+    "-c",
+    "131072",
+    "--kv-f16",
+    "--ubatch",
+    "1024"
+  ],
+  "cwd": ".",
+  "tokenizer": "models/inkling2-mini/tokenizer",
+  "model_name": "inkling-2-mini",
+  "log": "local/serve-inkling-engine.log",
+  "port": 8150,
+  "backend": "hip",
+  "gpu": 0,
+  "sampling": {
+    "temperature": 1.0,
+    "top_p": 1.0
+  },
+  "loop_guard": true,
+  "fit_max_tokens": true,
+  "vision": {
+    "exe": "build-vision-inkling/bin/almond-vision",
+    "mmproj": "models/inkling2-mini/mmproj-F32.gguf",
+    "model": "models/inkling2-mini/Inkling-2-Mini-UD-Q4_K_XL.gguf",
+    "gpu": false,
+    "threads": 12
+  }
+}

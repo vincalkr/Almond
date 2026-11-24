@@ -64,7 +64,7 @@ desc() {
         inkling-q8)          echo "Inkling 2 Mini Q8_0 (ggml-org): the quality reference, two cards                27.8 GB";;
         inkling-iq4nl)       echo "Inkling 2 Mini IQ4_NL (ggml-org): 4-bit experts, rest Q8_0, one card (compared)  17.6 GB";;
         inkling-dspark)      echo "Inkling 2 Mini DSpark drafter Q8_0 (Unsloth)                                     0.5 GB";;
-        inkling-vision)      echo "Inkling 2 Mini image encoder (mmproj BF16, Unsloth)                              0.6 GB";;
+        inkling-vision)      echo "Inkling 2 Mini image encoder (mmproj F32, Unsloth)                               1.3 GB";;
     esac
 }
 files() {   # the files that make the item present
@@ -89,7 +89,7 @@ files() {   # the files that make the item present
         inkling-q8)          echo "$INK/Inkling-2-Mini-Q8_0.gguf";;
         inkling-iq4nl)       echo "$INK/Inkling-2-Mini-IQ4_NL.gguf";;
         inkling-dspark)      echo "$INK/unsloth/dspark-Inkling-2-Mini-Q8_0.gguf";;
-        inkling-vision)      echo "$INK/mmproj-BF16.gguf";;
+        inkling-vision)      echo "$INK/mmproj-F32.gguf";;
     esac
 }
 state() {   # present / partial / missing (by the files being there; sizes are checked at download)
@@ -168,7 +168,7 @@ fetch() {
         inkling-q8)          get $INK_REPO Inkling-2-Mini-Q8_0.gguf "$INK/Inkling-2-Mini-Q8_0.gguf";;
         inkling-iq4nl)       get $INK_REPO Inkling-2-Mini-IQ4_NL.gguf "$INK/Inkling-2-Mini-IQ4_NL.gguf";;
         inkling-dspark)      get $INK_UD_REPO dspark-Inkling-2-Mini-Q8_0.gguf "$INK/unsloth/dspark-Inkling-2-Mini-Q8_0.gguf";;
-        inkling-vision)      get $INK_UD_REPO mmproj-BF16.gguf "$INK/mmproj-BF16.gguf";;
+        inkling-vision)      get $INK_UD_REPO mmproj-F32.gguf "$INK/mmproj-F32.gguf";;
         *) echo "fetch: no item '$1' (${ITEMS[*]})" >&2; exit 2;;
     esac
 }

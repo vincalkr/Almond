@@ -578,6 +578,12 @@ __global__ void k_embed(const uint8_t * E, const int * dtok, float * x, int C) {
         x[i] = __half2float(*(const __half *) blk) * (float) ((const int8_t *) (blk + 2))[i % 32];
     }
 }
+// a prompt's picture rows take their tokens' place, as the encoder gave them (llama.cpp does not normalise raw
+// embeddings): x[t] = rows[t] where mask[t]
+__global__ void k_img_put(float * x, const float * rows, const int * mask, int C) {
+    if (!mask[blockIdx.x]) return;
+    for (int i = threadIdx.x; i < C; i += blockDim.x) x[(size_t) blockIdx.x * C + i] = rows[(size_t) blockIdx.x * C + i];
+}
 __global__ void k_softcap(float * x, int n, float cap) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) x[i] = cap * tanhf(x[i] / cap);
@@ -1899,6 +1905,7 @@ struct Runner {
     int pos = 0;
     hipStream_t st;
     int *dpos, *dtok, *hpos;          // hpos: pinned host [pos, tok...]
+    float * dimg = nullptr; int * dimgm = nullptr; bool img_on = false;   // a chunk's picture rows (GENI)
     std::vector<const float **> marr; // one device array of state pointers per mix call of a token
     size_t mix_i = 0;
     bool eager_done = false;
@@ -2547,12 +2554,27 @@ struct Runner {
     }
     // feed up to TM tokens at once (a prompt chunk); all_logits: every token's logits (else only the last one's, in
     // logits[0]); out gets them when given
-    void chunk(const int * toks, int T, bool all_logits, std::vector<float> * out) {
+    // rows: per token, its picture row (C floats, host) or null for text
+    void chunk(const int * toks, int T, bool all_logits, std::vector<float> * out, const float * const * rows = nullptr) {
         hpos[0] = pos;
         std::memcpy(hpos + 1, toks, (size_t) T * 4);
         CK(hipMemcpyAsync(dpos, hpos, 4, hipMemcpyHostToDevice, st));
         CK(hipMemcpyAsync(dtok, hpos + 1, (size_t) T * 4, hipMemcpyHostToDevice, st));
+        img_on = false;
+        if (rows) {
+            if (!dimg) { CK(hipMalloc(&dimg, (size_t) TM * m.C * 4)); CK(hipMalloc(&dimgm, (size_t) TM * 4)); }
+            std::vector<int> mk((size_t) T, 0);
+            for (int t = 0; t < T; ++t)
+                if (rows[t]) {
+                    mk[(size_t) t] = 1;
+                    CK(hipMemcpyAsync(dimg + (size_t) t * m.C, rows[t], (size_t) m.C * 4, hipMemcpyHostToDevice, st));
+                    img_on = true;
+                }
+            CK(hipMemcpyAsync(dimgm, mk.data(), (size_t) T * 4, hipMemcpyHostToDevice, st));
+            CK(hipStreamSynchronize(st));   // (mk is on the stack)
+        }
         body(T, all_logits);
+        img_on = false;
         pos += T;
         if (out) {
             const int nl = all_logits ? T : 1;
@@ -2569,6 +2591,7 @@ struct Runner {
         mix_i = 0;
         hipLaunchKernelGGL(k_embed, dim3(T), dim3(256), 0, st, m.embd, dtok, x, C);
         hipLaunchKernelGGL(k_rms_n, dim3(1, T), dim3(256), 0, st, Norms{{x}, {m.embd_norm}, {x}}, C, m.eps);
+        if (img_on) hipLaunchKernelGGL(k_img_put, dim3(T), dim3(256), 0, st, x, dimg, dimgm, C);
         float * cur = x;
         std::vector<float *> blocks;
         int visit = 0;
@@ -2681,7 +2704,7 @@ int sample(const float * logits, int V, const Sampling & s, const std::vector<in
     if (s.rep != 1.0f || s.freq != 0.0f || s.pres != 0.0f) {
         std::unordered_map<int, int> cnt;
         const size_t from = s.last_n > 0 && hist.size() > (size_t) s.last_n ? hist.size() - (size_t) s.last_n : 0;
-        for (size_t i = from; i < hist.size(); ++i) ++cnt[hist[i]];
+        for (size_t i = from; i < hist.size(); ++i) if (hist[i] >= 0) ++cnt[hist[i]];
         for (const auto & [t, c] : cnt) {
             if (t < 0 || t >= V) continue;
             float & x = l[(size_t) t];
@@ -2731,6 +2754,69 @@ int sample(const float * logits, int V, const Sampling & s, const std::vector<in
     }
     return idx[0];
 }
+// A GENI request's pictures: the embeddings file holds one record per picture in prompt order (int32 'SVE1', n,
+// nx, ny, n_embd, then n x n_embd floats: almond-vision's format). The chat template writes a picture as
+// <|content_image|><|unused_200054|><|end_message|>; the server repeats the placeholder once per image token, and
+// picture k's rows take the k-th run of it (llama.cpp's mtmd puts the rows right after <|content_image|> the same
+// way, with ordinary positions). Each row's cache key is negative, from its picture's key (the server's img_keys=,
+// or a hash of its rows) and its index, so two pictures are never taken for each other.
+constexpr int kImageTok = 200054;
+bool image_rows(const std::string & file, const std::vector<std::string> & ikeys, int C, const std::vector<int> & ids,
+                std::vector<int> & keys, std::vector<float> & buf, std::vector<const float *> & rows, std::string & why) {
+    FILE * fp = std::fopen(file.c_str(), "rb");
+    if (!fp) { why = "cannot open the embeddings file " + file; return false; }
+    struct Rec { int32_t n; size_t row0; uint64_t h; };
+    std::vector<Rec> recs;
+    buf.clear();
+    for (;;) {
+        int32_t hd[5];
+        if (std::fread(hd, 4, 5, fp) != 5) break;
+        if (std::memcmp(hd, "SVE1", 4) != 0 || hd[4] != C || hd[1] <= 0) {
+            std::fclose(fp);
+            why = "the embeddings file is not an almond-vision record set for this model (n_embd " + std::to_string(hd[4]) + ")";
+            return false;
+        }
+        const size_t row0 = buf.size() / (size_t) C;
+        buf.resize(buf.size() + (size_t) hd[1] * C);
+        if (std::fread(buf.data() + row0 * C, 4, (size_t) hd[1] * C, fp) != (size_t) hd[1] * C) {
+            std::fclose(fp);
+            why = "the embeddings file is cut short";
+            return false;
+        }
+        uint64_t h = 1469598103934665603ull;   // FNV-1a over the picture's key, or its rows
+        if (recs.size() < ikeys.size()) for (char ch : ikeys[recs.size()]) h = (h ^ (uint8_t) ch) * 1099511628211ull;
+        else {
+            const uint8_t * b = (const uint8_t *) (buf.data() + row0 * C);
+            for (size_t i = 0; i < (size_t) hd[1] * C * 4; i += 61) h = (h ^ b[i]) * 1099511628211ull;
+        }
+        recs.push_back({hd[1], row0, h});
+    }
+    std::fclose(fp);
+    rows.assign(ids.size(), nullptr);
+    size_t k = 0;
+    for (size_t i = 0; i < ids.size();) {
+        if (ids[i] != kImageTok) { ++i; continue; }
+        size_t j = i;
+        while (j < ids.size() && ids[j] == kImageTok) ++j;
+        if (k >= recs.size() || (size_t) recs[k].n != j - i) {
+            why = "the prompt's picture " + std::to_string(k + 1) + " has " + std::to_string(j - i) +
+                  " image tokens, the embeddings file " + (k < recs.size() ? std::to_string(recs[k].n) : "none");
+            return false;
+        }
+        for (int32_t t = 0; t < recs[k].n; ++t) {
+            rows[i + t] = buf.data() + (recs[k].row0 + (size_t) t) * C;
+            const uint64_t hk = recs[k].h ^ ((uint64_t) (t + 1) * 0x9E3779B97F4A7C15ull);
+            keys[i + t] = -1 - (int) (hk & 0x3FFFFFFF);
+        }
+        ++k;
+        i = j;
+    }
+    if (k != recs.size()) {
+        why = "the embeddings file has " + std::to_string(recs.size()) + " pictures, the prompt " + std::to_string(k);
+        return false;
+    }
+    return true;
+}
 int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling & defaults, int n_draft, float draft_tmax) {
     std::vector<int> hist;                 // the tokens in the cache
     std::deque<Runner::Ckpt> ckpts;        // prompt-end checkpoints, the newest last
@@ -2750,6 +2836,7 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
         hist.resize((size_t) ckpts.back().n);
         return hist.size();
     };
+    std::vector<float> img_buf;            // the current request's picture rows
     LineQueue lq;
     std::thread rd([&] { lq.run(); });
     rd.detach();
@@ -2782,7 +2869,8 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
             else say("SERR %s 0 the cache file could not be %s\n", save ? "write" : "read", save ? "written" : "read");
             continue;
         }
-        if (line.rfind("GENI ", 0) == 0) { say("ERR images are not wired for Inkling yet\n"); continue; }
+        const bool geni = line.rfind("GENI ", 0) == 0;
+        if (geni) line = "GEN " + line.substr(5);   // GENI <max_new> [keys] [img_keys=..] <embeddings file> <ids>
         if (line.rfind("GEN ", 0) != 0) { say("ERR unknown command\n"); continue; }
         std::vector<std::string> f;
         for (size_t i = 4; i < line.size();) {
@@ -2792,7 +2880,21 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
             i = j + 1;
         }
         std::vector<int> ids;
-        if (f.size() < 2 || !parse_ids(f.back(), ids)) { say("ERR bad GEN line\n"); continue; }
+        if (f.size() < (geni ? 3u : 2u) || !parse_ids(f.back(), ids)) { say("ERR bad GEN line\n"); continue; }
+        std::string efile;
+        std::vector<std::string> ikeys;
+        if (geni) {
+            efile = f[f.size() - 2];
+            f.erase(f.end() - 2);
+            for (const std::string & x : f)
+                if (x.rfind("img_keys=", 0) == 0)
+                    for (size_t p = 9; p <= x.size();) {
+                        size_t q = x.find(',', p);
+                        if (q == std::string::npos) q = x.size();
+                        ikeys.push_back(x.substr(p, q - p));
+                        p = q + 1;
+                    }
+        }
         const int max_new = std::max(1, std::atoi(f[0].c_str()));
         Sampling s = defaults;
         for (size_t i = 1; i + 1 < f.size(); ++i) {
@@ -2814,6 +2916,14 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
         bool bad = false;
         for (int t : ids) if (t < 0 || t >= m.vocab) bad = true;
         if (bad) { say("ERR a token id is outside the vocabulary\n"); continue; }
+        // keys: what the cache matches a prompt on (the token, or for a picture's row a negative key of the picture
+        // and the row); rows: per token its picture row
+        std::vector<int> keys(ids);
+        std::vector<const float *> rows;
+        if (geni) {
+            std::string why;
+            if (!image_rows(efile, ikeys, m.C, ids, keys, img_buf, rows, why)) { say("ERR %s\n", why.c_str()); continue; }
+        }
         if ((long long) ids.size() + 1 > n_ctx) {
             say("ERR the prompt (%zu tokens) does not fit the context (%lld)\n", ids.size(), n_ctx);
             continue;
@@ -2821,10 +2931,10 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
         lq.stop = false;
         // the cache is kept only when the prompt extends it (the convolution state cannot be cut back)
         size_t keep = 0;
-        if (!hist.empty() && hist.size() < ids.size() && std::equal(hist.begin(), hist.end(), ids.begin())) keep = hist.size();
+        if (!hist.empty() && hist.size() < keys.size() && std::equal(hist.begin(), hist.end(), keys.begin())) keep = hist.size();
         else {
             size_t same = 0;
-            while (same < hist.size() && same < ids.size() && hist[same] == ids[same]) ++same;
+            while (same < hist.size() && same < keys.size() && hist[same] == keys[same]) ++same;
             keep = restore_ckpt(std::min(same, ids.size() - 1));
             if (keep == 0) clear();
             else say("INFO checkpoint restored at %zu (shared prefix %zu)\n", keep, same);
@@ -2834,11 +2944,13 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
         bool cancelled = false;
         for (size_t at = keep; at < ids.size();) {
             const size_t n = std::min((size_t) run.TM, ids.size() - at);
-            if (n == 1) run.step(ids[at], nullptr);
-            else run.chunk(ids.data() + at, (int) n, false, nullptr);
+            const bool pic = !rows.empty() && std::any_of(rows.begin() + (ptrdiff_t) at, rows.begin() + (ptrdiff_t) (at + n),
+                                                          [](const float * r) { return r != nullptr; });
+            if (n == 1 && !pic) run.step(ids[at], nullptr);
+            else run.chunk(ids.data() + at, (int) n, false, nullptr, pic ? rows.data() + at : nullptr);
             run.dspark_inject((int) n, (int) at);
             if (at + n == ids.size()) lg = run.fetch_logits();
-            hist.insert(hist.end(), ids.begin() + (ptrdiff_t) at, ids.begin() + (ptrdiff_t) (at + n));
+            hist.insert(hist.end(), keys.begin() + (ptrdiff_t) at, keys.begin() + (ptrdiff_t) (at + n));
             at += n;
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             say("PP %zu %zu %.0f %.1f\n", at, ids.size(), ms, (double) (at - keep) / std::max(ms, 1e-3) * 1000.0);
@@ -2946,6 +3058,7 @@ int main(int argc, char ** argv) {
         else if (a == "--spec-test") spec_test = true;
         else if (a == "--serve") serve_mode = true;
         else if (a == "--inkling") {}
+        else if (a == "--vision") {}   // (the server says images may come: GENI is always read)
         else if (a == "--ubatch") chunk = std::atoi(next());
         else if (a == "--eos") eos.push_back(std::atoi(next()));
         else if (a == "--temp") defaults.temp = (float) std::atof(next());

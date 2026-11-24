@@ -149,6 +149,31 @@ def _render_inkling(self, messages, tools=None, add_generation_prompt=True, **kw
 F.ChatTemplate.render = _render_inkling
 
 
+# ---- images (local/inkling-local-vision.json): the template writes a picture as
+# <|content_image|><|unused_200054|><|end_message|>; the placeholder becomes one token per image token, whose rows the
+# engine (GENI) takes from almond-vision's file in prompt order - llama.cpp's mtmd puts the rows right after
+# <|content_image|> the same way.  Only a placeholder right after <|content_image|> is a picture.
+IMAGE_TOKEN = 200054      # <|unused_200054|>
+CONTENT_IMAGE = 200005    # <|content_image|>
+
+
+def inkling_expand_image_tokens(self, ids, encoded):
+    out, k = [], 0
+    for j, t in enumerate(ids):
+        if t == IMAGE_TOKEN and j > 0 and ids[j - 1] == CONTENT_IMAGE:
+            if k == len(encoded):
+                raise ValueError("the prompt and its images do not match")
+            out += [IMAGE_TOKEN] * encoded[k][1]
+            k += 1
+        else:
+            out.append(t)
+    if k != len(encoded):
+        raise ValueError("the prompt and its images do not match")
+    return out
+
+
+S.Service.expand_image_tokens = inkling_expand_image_tokens
+
 # ---- output: Inkling's message tokens -> the server's tags
 def _param(v) -> str:
     return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)

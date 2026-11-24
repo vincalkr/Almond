@@ -99,4 +99,10 @@ if [ -d models/inkling2-mini ] || [ -n "${INKLING:-}" ]; then
     # almond-inkling-native: Almond's own Inkling engine (src/inkling/native, docs/inkling/ENGINE.md), HIP only
     "$CXX_HIP" -O2 -std=c++17 --offload-arch="$GFX" src/inkling/native/ink_native.hip -o build-inkling/almond-inkling-native
     echo "=== done: build-inkling/almond-inkling-native"
+    # almond-vision against this llama.cpp's mtmd (its inkling2v projector): images for local/inkling-local-vision.json
+    if [ -f build-inkling/llama.cpp/tools/mtmd/models/inkling2v.cpp ]; then
+        cmake -S tools/glm/vision -B build-vision-inkling -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR="$PWD/build-inkling/llama.cpp"
+        cmake --build build-vision-inkling --target almond-vision -j "$JOBS"
+        echo "=== done: build-vision-inkling/bin/almond-vision"
+    fi
 fi

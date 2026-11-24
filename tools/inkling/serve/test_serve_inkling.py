@@ -49,5 +49,24 @@ class Effort(unittest.TestCase):
             I.effort_kwargs("loud")
 
 
+
+class Images(unittest.TestCase):
+    P, CI = I.IMAGE_TOKEN, I.CONTENT_IMAGE
+
+    def test_each_picture_takes_its_tokens(self):
+        ids = [1, self.CI, self.P, 9, self.CI, self.P, 9]
+        self.assertEqual(I.inkling_expand_image_tokens(None, ids, [("a", 3), ("b", 2)]),
+                         [1, self.CI, self.P, self.P, self.P, 9, self.CI, self.P, self.P, 9])
+
+    def test_a_placeholder_alone_stays_text(self):
+        self.assertEqual(I.inkling_expand_image_tokens(None, [5, self.P, self.CI, self.P], [("a", 2)]),
+                         [5, self.P, self.CI, self.P, self.P])
+
+    def test_counts_must_match(self):
+        with self.assertRaises(ValueError):
+            I.inkling_expand_image_tokens(None, [self.CI, self.P], [])
+        with self.assertRaises(ValueError):
+            I.inkling_expand_image_tokens(None, [self.CI, self.P], [("a", 1), ("b", 1)])
+
 if __name__ == "__main__":
     unittest.main()

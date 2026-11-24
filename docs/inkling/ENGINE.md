@@ -307,3 +307,29 @@ Engine, 128K, F16 KV, 1K-token prompt (`--bench 300` after `--score`, and `--ser
 With DSpark the greedy text of this prompt changes (the F16 KV rounds a close pick the other way), so the accepted
 share changes with it (127/251 against 104/216) and the two runs do not compare token for token: 96.7 / 102.1 before,
 94.3 / 98.8 after.
+
+## Step 9, images (2026-11-24)
+
+The llama.cpp configuration was the only one that could have taken images and it never did; this engine now reads
+them. The image encoder stays llama.cpp's mtmd (its `inkling2v` projector: a 23-layer ViT with a CLS token, 2-D RoPE,
+2 x 2 patch merge and a GELU projector into the model's 2304 channels), built as `build-vision-inkling/bin/almond-vision`
+against `build-inkling/llama.cpp`, with Unsloth's mmproj in F32 (the highest precision published: F32 / F16 / BF16;
+`local/fetch.sh inkling-vision`), on the CPU, so card 0 keeps its 1.7 GiB for the 128K cache.
+
+- Prompt: the chat template writes a picture as `<|content_image|><|unused_200054|><|end_message|>`; the server shim
+  (`tools/inkling/serve/serve_inkling.py`) repeats the placeholder once per image token, only right after
+  `<|content_image|>`. llama.cpp's mtmd places the rows right after `<|content_image|>` the same way, with
+  ordinary positions (no 2-D positions in the text model).
+- Engine (`GENI <max_new> [keys] [img_keys=..] <file> <ids>`): picture k's rows take the k-th run of placeholders;
+  each row replaces its token's embedding after the embedding norm, as given (llama.cpp does not normalise raw
+  embeddings). The cache matches a picture's rows on negative keys made from the picture's key and the row index,
+  so a different picture never reuses a cached prompt; repetition penalties skip them.
+- `local/inkling-local-vision.json` is `inkling-local.json` with the encoder; launch.py picks it when the encoder
+  and the mmproj are there.
+
+Checked against llama.cpp's server (`llama-server`, the same GGUF and mmproj, card 1) on three test pictures, both
+at temperature 0 with the template's default effort, 400 tokens out: the same prompt length (331 / 221 / 544
+tokens); shapes and text ("ALMOND 42"), a bar chart (Thursday, 9) and a drawn house. The first two answers are the
+same text throughout, thinking included; for the third the thinking parts after 205 characters on a close wording
+and the answer is the same sentence. Text without pictures: logits identical to the previous build (KL 0 over 511
+positions), the server tests pass.

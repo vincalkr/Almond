@@ -44,6 +44,10 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   The llama.cpp path (`build-inkling/almond-inkling`, `src/inkling`) is no longer served (removed as slower; its
   numbers stay in docs/inkling/); files in `models/inkling2-mini` (`local/fetch.sh inkling`), measurements in `local/inkling-measure.sh`
   and docs/inkling/.
+  Images: `local/inkling-local-vision.json` (launch.py picks it when the encoder is there): Unsloth's mmproj F32
+  (`local/fetch.sh inkling-vision`) through `build-vision-inkling/bin/almond-vision` (built by `./build.sh` against
+  `build-inkling/llama.cpp`'s mtmd) on the CPU, the rows read by the native engine (`GENI`); answers checked against
+  llama.cpp's server (docs/inkling/ENGINE.md, step 9).
   `local/inkling-dspark-local.json` (`./almond -m inkling-dspark`, opt-in) adds Unsloth's DSpark drafter
   (`local/fetch.sh inkling-dspark`) to the native engine (`--dspark`, docs/inkling/ENGINE.md step 6): through the
   server 123-144 tok/s at temperature 0 and 98-135 at 0.6 against 77-78, the same distribution; requests above
