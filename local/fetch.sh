@@ -40,7 +40,7 @@ HY4_SHARDS=$(for i in 1 2; do echo "$M/hy4-iq2ah/Hy4-flash-IQ2_AH-0000$i-of-0000
 
 ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision qwen qwen-mtp qwen-vision
        qwen27 qwen27-q8 qwen27-vision hy4 hy4-vision
-       inkling inkling-q8 inkling-iq4nl inkling-dspark inkling-vision)
+       inkling inkling-q8 inkling-dspark inkling-vision)
 desc() {
     case $1 in
         deepseek)            echo "DeepSeek-V4.1-Flash-1017, GSQ-RCO IQ2_XXS pack + Engram IQ4_NL (ISTA-DASLab)   ~249 GB";;
@@ -58,9 +58,8 @@ desc() {
         hy4)                 echo "Hy4-flash IQ2-AH (Tencent/AngelSlim): experts IQ2_XXS, Engram FP8 table         135 GB";;
         hy4-vision)          echo "Hy4-flash image encoder (mmproj BF16, AngelSlim)                                 1.0 GB";;
         inkling)             echo "Inkling 2 Mini UD-Q4_K_XL (Unsloth Dynamic): one card                         17.6 GB";;
-        inkling-q8)          echo "Inkling 2 Mini Q8_0 (ggml-org): the quality reference, two cards                27.8 GB";;
-        inkling-iq4nl)       echo "Inkling 2 Mini IQ4_NL (ggml-org): 4-bit experts, rest Q8_0, one card (compared)  17.6 GB";;
-        inkling-dspark)      echo "Inkling 2 Mini DSpark drafter Q8_0 (Unsloth)                                     0.5 GB";;
+        inkling-q8)          echo "Inkling 2 Mini Q8_0 (ggml-org): the KL reference for measurements, no configuration 27.8 GB";;
+        inkling-dspark)      echo "Inkling 2 Mini DSpark drafter Q8_0 (Unsloth): needed by inkling-1m               0.5 GB";;
         inkling-vision)      echo "Inkling 2 Mini image encoder (mmproj F32, Unsloth)                               1.3 GB";;
     esac
 }
@@ -82,7 +81,6 @@ files() {   # the files that make the item present
         hy4-vision)          echo "$M/hy4-iq2ah/mmproj-Hy4-flash-bf16.gguf";;
         inkling)             echo "$INK/Inkling-2-Mini-UD-Q4_K_XL.gguf"; echo "$INK/tokenizer";;
         inkling-q8)          echo "$INK/Inkling-2-Mini-Q8_0.gguf";;
-        inkling-iq4nl)       echo "$INK/Inkling-2-Mini-IQ4_NL.gguf";;
         inkling-dspark)      echo "$INK/unsloth/dspark-Inkling-2-Mini-Q8_0.gguf";;
         inkling-vision)      echo "$INK/mmproj-F32.gguf";;
     esac
@@ -156,7 +154,6 @@ fetch() {
                              [ "$DRY_RUN" = 1 ] || [ -s "$INK/tokenizer/tokenizer.json" ] ||
                                  PYTHONPATH="$R/tools/qwen" "$PY" "$R/tools/almond_tokenizer.py" --gguf "$INK/Inkling-2-Mini-UD-Q4_K_XL.gguf" --out "$INK";;
         inkling-q8)          get $INK_REPO Inkling-2-Mini-Q8_0.gguf "$INK/Inkling-2-Mini-Q8_0.gguf";;
-        inkling-iq4nl)       get $INK_REPO Inkling-2-Mini-IQ4_NL.gguf "$INK/Inkling-2-Mini-IQ4_NL.gguf";;
         inkling-dspark)      get $INK_UD_REPO dspark-Inkling-2-Mini-Q8_0.gguf "$INK/unsloth/dspark-Inkling-2-Mini-Q8_0.gguf";;
         inkling-vision)      get $INK_UD_REPO mmproj-F32.gguf "$INK/mmproj-F32.gguf";;
         *) echo "fetch: no item '$1' (${ITEMS[*]})" >&2; exit 2;;
@@ -206,7 +203,7 @@ show() {
         echo "               original weights, both cards, 256K)"
     elif [ "$CARDS" = 1 ]; then
         echo "  Qwen3.8-27B: qwen27 (IQ3_S, fits one card with its MTP block); qwen27-q8 needs two cards"
-        echo "  GLM-5.3-Flash needs two cards; DeepSeek and Qwen3.8-Flash-Next run on one"
+        echo "  GLM-5.3-Flash, Qwen3.8-Flash-Next, Hy4-flash and inkling-1m need two cards; DeepSeek and inkling run on one"
     else
         echo "  no 24 GB card found (rocm-smi): Almond needs at least one RX 7900 XT / XTX"
     fi

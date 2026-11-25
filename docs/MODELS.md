@@ -4,6 +4,22 @@ What each model gets, where it comes from, and what was measured.  Everything be
 shipped configurations (`local/ds41-local*.json`, `local/glm-local.json`, `local/qwen-local.json`); a client sees the levels in `/health`,
 `/v1/models` (the router) and `./almond`'s `/models`.  Reviewed 2026-10-29.
 
+## The configurations now (2026-11-25)
+
+One or two per model; the sections below keep the measurements of configurations since removed (the Qwen3.8-Flash
+IQ3_S ones, `qwen27-local-256k`, the DSpine ones, `hy4-local-fast`, `inkling-dspark`), named as they were then.
+
+| model | router name | configuration | cards | context |
+| --- | --- | --- | --- | --- |
+| DeepSeek-V4.1-Flash | `ds41` | `local/ds41-local.json` (`-1gpu` with `--gpu 0`, `-vision` twins) | 2 | 256K |
+| GLM-5.3-Flash | `glm` | `local/glm-local.json` (`-vision`) | 2 | 256K |
+| Qwen3.8-Flash-Next | `qwen` | `local/qwen-local.json`, UD-Q4_K_XL, images on | 2 | 256K |
+| Qwen3.8-27B | `qwen27` | `local/qwen27-local.json` (`-vision`), IQ3_S, MTP 3 | 1 | 192K |
+| | `qwen27-q8` | `local/qwen27-q8-local.json`, Q8_0, `--tp` | 2 | 256K |
+| Hy4-flash | `hy4` | `local/hy4-local.json` (`-vision`) | 2 | 256K |
+| Inkling 2 Mini | `inkling` | `local/inkling-local.json` (`-vision`) | 1 | 256K |
+| | `inkling-1m` | `local/inkling-1m-local.json`, DSpark, K/V on card 1 | 2 | 1M |
+
 ## DeepSeek-V4.1-Flash-1017 (GSQ-RCO IQ2_XXS, `ds41_generate`)
 
 Source: DeepSeek's cloud API reference (api-docs.deepseek.com, create-chat-completion, `deepseek-flash`) and the
