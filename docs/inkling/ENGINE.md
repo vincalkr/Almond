@@ -425,5 +425,24 @@ Measured, card 0, the repository's sources as text:
 - 256K, full slots on card 1, a 262,000-token text with a passphrase at token 20,000 and the question at the end:
   the 11 answer tokens are each the top prediction, F16 and q8_0 alike; KL of q8_0 from F16 over 256 positions
   at depth ~131K: 0.0108 (max 1.20, same top token 253 / 256); PPL 1.8365 / 1.8360.
-- Not measured: the same needle on one card (stopped), prefill filled to 512K / 1M, KL against the Q8_0 weights at
-  long context, DSpark / images / checkpoints at 256K through the server.
+- 256K q8_0 on card 0 alone (`local/inkling-local.json`), the same 262,000-token needle text, chunks of 256: the 11
+  answer tokens each the top prediction; PPL 1.8336, 277.5 tok/s for the whole scoring run.
+- KL from the Q8_0 weights (llama.cpp, `almond-inkling --cpu-weights`), 8,192 tokens of the same text, 256 positions
+  from token 4,096: q8_0 KV 0.00706 (250 / 256 same top token), F16 KV 0.00714 (248 / 256). On this text the q8_0 KV
+  costs nothing measurable against the quantization's own loss.
+- Through the server (`local/inkling-local-vision.json`, 256K q8_0, 0.64 GiB free; `/v1/chat/completions`, streamed,
+  temperature 1.0, 256 tokens out; prefill = prompt tokens / time to the first token):
+
+| prompt | prefill | decode |
+|---|---|---|
+| 5,867 tokens | 1,474 tok/s | 78.9 tok/s |
+| 50,319 | 1,015 | 66.5 |
+| 189,227 | 501 | 45.4 |
+| a 520-token picture request (encoder on card 0 in lent memory) | 204 | 82.5 |
+
+  The picture was described correctly (the llama.cpp logo); at 50K and 189K the model found the passphrase in the
+  prompt and reasoned about whether to repeat it.
+- `local/inkling-1m-local.json` (1M q8_0, full slots on card 1) filled to 524,000 tokens (the needle text, chunks of
+  256, every position's logits): the 11 answer tokens each the top prediction; 163.3 tok/s for the whole scoring
+  run (45 min); decode at depth 524K 28.2 tok/s (`--bench 100`). Not measured: a context filled to 1M (about 3 hours
+  at this rate), DSpark and checkpoints at 256K through the server.
