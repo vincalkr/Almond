@@ -575,3 +575,20 @@ mapping, ~100 us each of launch and staging), and the CPU barely saves anything 
 -13%: the swapped slots still compute, and from 8 experts on the copies compete with the CPU for the RAM's bandwidth).
 Doing it well would need batched asynchronous copies and a CPU product that skips the slots; the ceiling was +5-8%,
 and the bandwidth contention seen here eats into it. Left in the tree, off.
+
+## A crash with the Engram table in RAM: --reserve-mib 1400 -> 1700 (2026-11-25)
+
+With `--engram-place ram` at 256K (16K real-text prompt, `--temp 0 -n 500`), every run ended in a segmentation fault in
+the first generation steps, the old binary as the new one. Under gdb: `hipGraphExecUpdate` inside
+`ggml_cuda_graph_evaluate_and_capture`, from `Hy4Engine::Impl::step`. The start log had warned: 275 MiB left on the
+cards with the compute buffers in (card 0 0.26 GiB, card 1 0.76 GiB); the runtime's graph update finds no room there.
+The engine runs on ROCm 7.14 here.
+
+| `--reserve-mib` | expert layers in VRAM | free after buffers (card 0 / 1) | prompt | generation |
+|---|---|---|---|---|
+| 1400 | 29 of 42 | 0.26 / 0.76 GiB | crash | crash |
+| 1400, `--min-free-mib 600` | 29 | not reachable at any prompt step | crash | crash |
+| 1700 | 28 | 1.66 / 0.58 GiB | 458.0 tok/s | 20.76 tok/s (1.79 tokens a round) |
+| 2000 | 26 | 1.66 / 3.00 GiB | 435.0 tok/s | 19.94 tok/s (1.82) |
+
+The configurations take 1700: the smallest of these that ran, one expert layer fewer on the cards than 1400.
