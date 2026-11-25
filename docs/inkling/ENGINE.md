@@ -509,3 +509,22 @@ gives, for the whole prompt:
 With `--kv-gpu 1` the far slots add their copies between the cards. The measured 512K scoring run at 163 tok/s
 (step 11) used chunks of 256 and every position's logits. Not done yet: overlapping card 0's next chunk with card
 1's attention, `--pf-wq8` in the configurations, and DSpark and checkpoints through the server with it.
+
+### `--pf-wq8` in the configurations (2026-11-25)
+
+All five Inkling configurations now pass `--pf-wq8`; it is used for chunks of at least 64 tokens, so DSpark's
+verify steps keep the F32 kernel. Through the server, the same requests as step 11:
+
+| configuration | prompt | prefill before | prefill now | decode now |
+|---|---|---|---|---|
+| `inkling-local-vision.json` (256K) | 5,867 | 1,474 tok/s | 1,506 | 78.6 tok/s |
+| | 50,319 | 1,015 | 1,165 | 66.1 |
+| | 189,227 | 501 | 661 | 45.0 |
+| | picture (520) | 204 | 206 | 81.7 |
+| `inkling-dspark-local-vision.json` (192K, temperature 0) | 50,319 | 937 | 1,074 | 69.7 (78.6 before) |
+
+The picture is described correctly. With DSpark the answer at temperature 0 is a different text from before (the
+attention's arithmetic differs, see above), so its decode speed is that text's draft acceptance: with the flag and
+with the guard at 64 tokens the generated text is the same, byte for byte. Two things were also seen without the
+flag and are not caused by it: with DSpark at temperature 0 the picture's answer repeats one sentence, and the same
+50K prompt sent twice is prefilled again in full (the same speed both times).

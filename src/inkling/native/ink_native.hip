@@ -2470,7 +2470,7 @@ struct Runner {
             while (nsplit > 1 && m.Hkv * tiles * nsplit > 4096) --nsplit;
             const int splitsz = ((nk + nsplit - 1) / nsplit + 31) / 32 * 32;
             nsplit = (nk + splitsz - 1) / splitsz;
-            if (kvt == 2 || (kvt == 1 && pf_wq8)) {   // F16 or (opt-in) q8_0 cache: the matrix cores, 16 rows a block
+            if (kvt == 2 || (kvt == 1 && pf_wq8 && T >= 64)) {   // F16 or (opt-in, prompts) q8_0: the matrix cores
                 const int sz16 = (splitsz + 15) / 16 * 16;
                 const int ns16 = (nk + sz16 - 1) / sz16;
                 if (kvt == 2)
