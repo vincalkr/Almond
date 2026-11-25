@@ -446,3 +446,66 @@ Measured, card 0, the repository's sources as text:
   256, every position's logits): the 11 answer tokens each the top prediction; 163.3 tok/s for the whole scoring
   run (45 min); decode at depth 524K 28.2 tok/s (`--bench 100`). Not measured: a context filled to 1M (about 3 hours
   at this rate), DSpark and checkpoints at 256K through the server.
+
+## Step 12, the prompt attention on the matrix cores for the q8_0 cache (2026-11-25, opt-in)
+
+Where the time goes (rocprofv3 kernel trace, 131,072-token prompt in chunks of 1,024 on card 0, q8_0 KV, 205 s of
+kernel time): `k_attn_pf`, the F32 prompt attention the q8_0 cache used, 67.0%; the expert GEMM 16.5%, the dense
+GEMMs 7.8%, everything else under 3% each. The F16 cache already had a matrix-core kernel (`k_attn_pf_w`); q8_0 did
+not.
+
+`--pf-wq8` (opt-in) runs the prompt attention of a q8_0 cache through `k_attn_pf_wq8`: 4 waves a block, 64
+(token, head) rows, each 16-key tile read once into LDS and shared. K's int8 values are exact in F16 and go to the
+matrix cores as they are, each key's 4 scales (one per 32 dims) multiply its partial scores after the products,
+the queries and P in two F16 parts (hi + lo) as in `k_attn_pf_w`. V is int8 times the key's scale over the tile's
+largest scale of that block, rounded to F16 (2^-11 relative, against q8_0's own 1/254), the largest put back after
+P . V. A first version with one wave a block (each tile converted by 16 rows only) was slower than F32, 990 against
+1,172 tok/s at 32K.
+
+Quality (8K-token text, 256 positions, chunks of 256):
+
+| path | PPL | KL from Q8_0 weights | same top token |
+|---|---|---|---|
+| F32 kernel (now) | 4.0886 | 0.00706 | 250 / 256 |
+| `--pf-wq8` | 4.0854 | 0.00619 | 248 / 256 |
+
+The two paths' logits are not identical (KL between them 0.0046): the same holds for the F16 cache's existing
+matrix-core kernel against the F32 kernel on the same F16 cache (KL 0.0017), small differences in the attention
+grow through the 24 layers and 3 loops. `--kv-gpu 1` with `--pf-wq8` gives logits byte-identical to one card.
+
+Prompt speed, `--bench-prefill N --chunk 1024`, card 0, q8_0 KV:
+
+| prompt | F32 kernel | `--pf-wq8` | |
+|---|---|---|---|
+| 8K | 1,492.6 tok/s | 1,542.7 | +3% |
+| 32K | 1,172.3 | 1,301.2 | +11% |
+| 64K | 916.1 | 1,084.5 | +18% |
+| 128K | 636.7 | 813.6 | +28% |
+| 256K | 394.5 | 542.4 | +37% |
+
+512K and 1M were not filled (hours each). `--attn-bench N [GPU]` times one 1,024-token chunk's full-context
+attention of one layer at depth N on synthetic q8_0 K/V (no model) with both kernels, and compares their merged
+outputs; on card 1:
+
+| depth | F32 kernel | `k_attn_pf_wq8` | max abs difference (outputs up to ~0.035) |
+|---|---|---|---|
+| 8K | 16.5 ms | 11.4 ms | 4.2e-6 |
+| 64K | 138.4 | 80.3 | 1.2e-6 |
+| 128K | 278.8 | 161.9 | 7.9e-7 |
+| 256K | 535.5 | 326.4 | 5.5e-7 |
+| 512K | 1,150.7 | 642.5 | 3.8e-7 |
+| 1M | 2,297.6 | 1,308.2 | 3.2e-7 |
+
+Projection (not measured): a prompt of N tokens costs about 8 full layers x N / 1,024 chunks x the time above at
+depth N / 2, plus about 0.68 s a chunk for everything else (the 8K run). This gives 746 s at 256K with the F32
+kernel and 507 s with `--pf-wq8`, against 664 s and 483 s measured, so the projection is a little pessimistic. It
+gives, for the whole prompt:
+
+| prompt | F32 kernel | `--pf-wq8` |
+|---|---|---|
+| 512K | ~206 tok/s (42 min) | ~311 tok/s (28 min) |
+| 1M | ~104 tok/s (2.8 h) | ~176 tok/s (1.7 h) |
+
+With `--kv-gpu 1` the far slots add their copies between the cards. The measured 512K scoring run at 163 tok/s
+(step 11) used chunks of 256 and every position's logits. Not done yet: overlapping card 0's next chunk with card
+1's attention, `--pf-wq8` in the configurations, and DSpark and checkpoints through the server with it.

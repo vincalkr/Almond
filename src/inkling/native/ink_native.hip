@@ -873,6 +873,7 @@ __global__ void k_conv_res(const float * x, const float * w, float * hist, int C
 // clip q and r (times tau on full layers), clip k and RMS-norm v, and write k and v to the cache slot; one block a head
 // KV cache rows (one position, one KV head, D = 128): F32, or q8_0 (--kv-q8: 128 int8 then 4 F16 scales, 136 bytes)
 constexpr int KVQ8_ROW = 136;
+static bool pf_wq8 = false;   // --pf-wq8: prompt attention on the matrix cores for the q8_0 cache (opt-in)
 // kvt: 0 F32, 1 q8_0, 2 F16
 __device__ __forceinline__ float4 kv_load(const void * C, size_t row, int l4, int q8) {
     if (q8 == 2) {
@@ -1658,6 +1659,148 @@ __global__ void k_attn_pf_w(const float * q, const void * Kc, const void * Vc, i
         for (int dt = 0; dt < 8; ++dt) o[2 + dt * 16 + c] = acc[dt][i];
     }
 }
+// k_attn_pf_w for the q8_0 cache, 4 waves a block (64 (token, head) rows) sharing one LDS copy of each 16-key tile.
+// K: the int8 values are exact in F16 and go to the matrix cores as they are, a key's 4 scales (one per 32 dims)
+// multiply its partial scores after the products. V: int8 times the key's scale over the tile's largest scale of that
+// block, rounded to F16 (2^-11 relative, against q8_0's own 1/254), the largest put back after P . V.
+// grid (Hkv, ceil(3T / 64), nsplit), 128 threads; writes part[] like k_attn_pf_w.
+__device__ __forceinline__ void i8x4_h(uint32_t w, _Float16 * o) {
+#pragma unroll
+    for (int e = 0; e < 4; ++e) o[e] = (_Float16) (int8_t) ((w >> (8 * e)) & 0xFF);
+}
+__global__ void __launch_bounds__(128) k_attn_pf_wq8(const float * q, const void * Kc, const void * Vc, int cap,
+                              const int * dpos, int span, int Hkv, const float * bias, int ext, const float * sink,
+                              float * part, int splitsz, int nsplit, int T) {
+    constexpr int D = 128, G = 3, NW = 4;
+    __shared__ __attribute__((aligned(16))) _Float16 Qh[16 * NW][D + 8], Ql[16 * NW][D + 8], Ks[16][D + 8],
+        Vt[D][16 + 8], Ph[NW][16][16 + 8], Pl[NW][16][16 + 8];
+    __shared__ float Kd[16][4], Vd[16][4], Vm[4];
+    const int kvh = blockIdx.x, sp = blockIdx.z, tid = threadIdx.x, wv = tid / WS, lane = tid % WS, hf = lane >> 4,
+              c = lane & 15;
+    const int rb0 = blockIdx.y * 16 * NW, r0 = rb0 + 16 * wv;
+    const int pos0 = *dpos, H = Hkv * G, nrows = T * G;
+    const int tkf = rb0 / G, tkl = min(nrows - 1, rb0 + 16 * NW - 1) / G;
+    const int kfirst = max(0, pos0 + tkf - span + 1), kend = pos0 + tkl;
+    const int j0 = kfirst + sp * splitsz, j1 = min(kend, j0 + splitsz - 1);
+    const float qsc = rsqrtf((float) D);
+    for (int i = tid; i < 16 * NW * D; i += blockDim.x) {
+        const int rr = i / D, d = i % D, row = rb0 + rr;
+        float v = 0.0f;
+        if (row < nrows) v = q[((size_t) (row / G) * H + kvh * G + row % G) * D + d] * qsc;
+        const _Float16 h = (_Float16) v;
+        Qh[rr][d] = h; Ql[rr][d] = (_Float16) ((v - (float) h) * LO_UP);
+    }
+    float m[8], ls[8];
+    int qpos[8], brow[8];
+    bool rok[8];
+    f8v acc[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const int row = r0 + 2 * i + hf;
+        rok[i] = row < nrows;
+        qpos[i] = pos0 + row / G;
+        brow[i] = rok[i] ? (row / G) * H + kvh * G + row % G : 0;
+        m[i] = -INFINITY; ls[i] = 0.0f;
+        acc[i] = f8v{};
+    }
+    const uint8_t * K8 = (const uint8_t *) Kc;
+    const uint8_t * V8 = (const uint8_t *) Vc;
+    const int lk = tid >> 3, lp = tid & 7;   // loader: key lk, bytes 16lp..16lp+15
+    for (int jb = j0; jb <= j1; jb += 16) {
+        __syncthreads();
+        const int jl = jb + lk;
+        const bool in = jl <= j1;
+        const size_t rofs = ((size_t) (min(jl, j1) % cap) * Hkv + kvh) * KVQ8_ROW;
+        const uint4 kraw = *(const uint4 *) (K8 + rofs + 16 * lp);
+        const uint4 vraw = in ? *(const uint4 *) (V8 + rofs + 16 * lp) : make_uint4(0, 0, 0, 0);
+        if (lp < 4) {
+            Kd[lk][lp] = __half2float(((const __half *) (K8 + rofs + 128))[lp]);
+            Vd[lk][lp] = in ? __half2float(((const __half *) (V8 + rofs + 128))[lp]) : 0.0f;
+        }
+        {
+            _Float16 t[16];
+            i8x4_h(kraw.x, t); i8x4_h(kraw.y, t + 4); i8x4_h(kraw.z, t + 8); i8x4_h(kraw.w, t + 12);
+            *(h16v *) &Ks[lk][16 * lp] = *(const h16v *) t;
+        }
+        __syncthreads();
+        if (tid < 4) {
+            float mx = 0.0f;
+            for (int kk = 0; kk < 16; ++kk) mx = fmaxf(mx, Vd[kk][tid]);
+            Vm[tid] = mx;
+        }
+        __syncthreads();
+        {
+            const int bb = lp >> 1;
+            const float sc = Vm[bb] > 0.0f ? Vd[lk][bb] / Vm[bb] : 0.0f;
+            const uint32_t w[4] = {vraw.x, vraw.y, vraw.z, vraw.w};
+#pragma unroll
+            for (int e = 0; e < 16; ++e) Vt[16 * lp + e][lk] = (_Float16) ((float) (int8_t) ((w[e >> 2] >> (8 * (e & 3))) & 0xFF) * sc);
+        }
+        // S = Q K^T per 32-dim block, times the key's scale of that block; lane = key column c
+        f8v S = {};
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+            f8v Sb = {}, Sl = {};
+#pragma unroll
+            for (int h2 = 0; h2 < 2; ++h2) {
+                const int dc = 2 * b + h2;
+                const h16v kb = ld16(&Ks[c][dc * 16]);
+                const h16v ah = ld16(&Qh[16 * wv + c][dc * 16]), al = ld16(&Ql[16 * wv + c][dc * 16]);
+                Sb = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(ah, kb, Sb);
+                Sl = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(al, kb, Sl);
+            }
+            const float dk = Kd[c][b];
+#pragma unroll
+            for (int i = 0; i < 8; ++i) S[i] += (Sb[i] + Sl[i] * LO_DN) * dk;
+        }
+        const int j = jb + c;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int dd = qpos[i] - j;
+            const bool ok = rok[i] && j <= j1 && dd >= 0 && dd < span;
+            float sc = -INFINITY;
+            if (ok) sc = S[i] + (dd < ext ? bias[(size_t) brow[i] * ext + dd] : -sink[brow[i]]);
+            float mx = sc;
+#pragma unroll
+            for (int o = 8; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor(mx, o, WS));
+            const float mn = fmaxf(m[i], mx);
+            float p = 0.0f;
+            if (mn != -INFINITY) {
+                const float f = expf(m[i] - mn);
+                p = ok ? expf(sc - mn) : 0.0f;
+                float ps = p;
+#pragma unroll
+                for (int o = 8; o > 0; o >>= 1) ps += __shfl_xor(ps, o, WS);
+                ls[i] = ls[i] * f + ps;
+#pragma unroll
+                for (int dt = 0; dt < 8; ++dt) acc[dt][i] *= f;
+                m[i] = mn;
+            }
+            const _Float16 h = (_Float16) p;
+            Ph[wv][2 * i + hf][c] = h; Pl[wv][2 * i + hf][c] = (_Float16) ((p - (float) h) * LO_UP);
+        }
+        __syncthreads();
+        const h16v ph = ld16(&Ph[wv][c][0]), pl = ld16(&Pl[wv][c][0]);
+#pragma unroll
+        for (int dt = 0; dt < 8; ++dt) {
+            const h16v vb = ld16(&Vt[dt * 16 + c][0]);
+            f8v zl = {}, zh = {};
+            zl = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pl, vb, zl);
+            zh = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(ph, vb, zh);
+            const float vm = Vm[dt >> 1];
+#pragma unroll
+            for (int i = 0; i < 8; ++i) acc[dt][i] += (zh[i] + zl[i] * LO_DN) * vm;
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        if (!rok[i]) continue;
+        float * o = part + ((size_t) brow[i] * nsplit + sp) * (D + 2);
+        if (c == 0) { o[0] = m[i]; o[1] = ls[i]; }
+#pragma unroll
+        for (int dt = 0; dt < 8; ++dt) o[2 + dt * 16 + c] = acc[dt][i];
+    }
+}
 // y[t][c] = sum over the token's k entries of yd[t*k + j][c]
 __global__ void k_exp_sum(const float * yd, float * y, int C, int k) {
     const int t = blockIdx.y, c = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2327,11 +2470,15 @@ struct Runner {
             while (nsplit > 1 && m.Hkv * tiles * nsplit > 4096) --nsplit;
             const int splitsz = ((nk + nsplit - 1) / nsplit + 31) / 32 * 32;
             nsplit = (nk + splitsz - 1) / splitsz;
-            if (kvt == 2) {   // F16 cache: the matrix cores, 16 (token, head) rows a block
+            if (kvt == 2 || (kvt == 1 && pf_wq8)) {   // F16 or (opt-in) q8_0 cache: the matrix cores, 16 rows a block
                 const int sz16 = (splitsz + 15) / 16 * 16;
                 const int ns16 = (nk + sz16 - 1) / sz16;
-                hipLaunchKernelGGL(k_attn_pf_w, dim3(m.Hkv, (3 * T + 15) / 16, ns16), dim3(WS), 0, ast, aq, sl.K, sl.V,
-                                   sl.cap, adp, span, m.Hkv, arb, m.ext, ask, apt, sz16, ns16, T);
+                if (kvt == 2)
+                    hipLaunchKernelGGL(k_attn_pf_w, dim3(m.Hkv, (3 * T + 15) / 16, ns16), dim3(WS), 0, ast, aq, sl.K,
+                                       sl.V, sl.cap, adp, span, m.Hkv, arb, m.ext, ask, apt, sz16, ns16, T);
+                else
+                    hipLaunchKernelGGL(k_attn_pf_wq8, dim3(m.Hkv, (3 * T + 63) / 64, ns16), dim3(4 * WS), 0, ast, aq,
+                                       sl.K, sl.V, sl.cap, adp, span, m.Hkv, arb, m.ext, ask, apt, sz16, ns16, T);
                 nsplit = ns16;
             } else
                 hipLaunchKernelGGL(k_attn_pf, dim3(m.Hkv, tiles, nsplit), dim3(256), 0, ast, aq, sl.K, sl.V, sl.cap, adp,
@@ -3186,7 +3333,83 @@ int serve(Model & m, Runner & run, const std::vector<int> & eos, const Sampling 
 
 }  // namespace
 
+// --attn-bench N [GPU]: times one 1,024-token chunk's full-context prompt attention at depth N on synthetic q8_0 K/V
+// (no model), the F32 kernel against --pf-wq8's, with the split rule of Runner::layer
+static int attn_bench(int N, int gpu) {
+    CK(hipSetDevice(gpu));
+    const int Hkv = 8, G = 3, H = Hkv * G, D = 128, ext = 1024, T = 1024, cap = N, pos = N - T, nsplit_max = 64;
+    std::vector<uint8_t> kv((size_t) cap * Hkv * KVQ8_ROW);
+    uint32_t r = 12345;
+    auto rnd = [&]() { r = r * 1664525u + 1013904223u; return r >> 8; };
+    for (size_t i = 0; i < kv.size(); ++i) kv[i] = (uint8_t) rnd();
+    for (size_t row = 0; row < (size_t) cap * Hkv; ++row)
+        for (int b = 0; b < 4; ++b) {
+            const __half h = __float2half(0.002f + 0.004f * (rnd() % 1000) / 1000.0f);
+            std::memcpy(&kv[row * KVQ8_ROW + 128 + 2 * b], &h, 2);
+        }
+    std::vector<float> hq((size_t) T * H * D), hb((size_t) T * H * ext), hs((size_t) T * H);
+    for (auto & x : hq) x = ((int) (rnd() % 2001) - 1000) / 400.0f;
+    for (auto & x : hb) x = ((int) (rnd() % 2001) - 1000) / 1000.0f;
+    for (auto & x : hs) x = 1.0f;
+    void *K, *V; float *q, *bias, *sink, *part, *part2; int * dp;
+    CK(hipMalloc(&K, kv.size())); CK(hipMalloc(&V, kv.size()));
+    CK(hipMemcpy(K, kv.data(), kv.size(), hipMemcpyHostToDevice)); CK(hipMemcpy(V, kv.data(), kv.size(), hipMemcpyHostToDevice));
+    CK(hipMalloc(&q, hq.size() * 4)); CK(hipMalloc(&bias, hb.size() * 4)); CK(hipMalloc(&sink, hs.size() * 4));
+    CK(hipMemcpy(q, hq.data(), hq.size() * 4, hipMemcpyHostToDevice));
+    CK(hipMemcpy(bias, hb.data(), hb.size() * 4, hipMemcpyHostToDevice));
+    CK(hipMemcpy(sink, hs.data(), hs.size() * 4, hipMemcpyHostToDevice));
+    CK(hipMalloc(&dp, 4)); CK(hipMemcpy(dp, &pos, 4, hipMemcpyHostToDevice));
+    const int span = cap, nk = std::min(span + 15, pos + T), tiles = (T + 15) / 16;
+    int nsplit = std::min(nsplit_max, std::max(1, (nk + 511) / 512));
+    while (nsplit > 1 && Hkv * tiles * nsplit > 4096) --nsplit;
+    const int splitsz = ((nk + nsplit - 1) / nsplit + 31) / 32 * 32;
+    nsplit = (nk + splitsz - 1) / splitsz;
+    const int sz16 = (splitsz + 15) / 16 * 16, ns16 = (nk + sz16 - 1) / sz16;
+    const size_t pb = (size_t) T * H * std::max(nsplit, ns16) * (D + 2) * 4;
+    CK(hipMalloc(&part, pb)); CK(hipMalloc(&part2, pb));
+    hipEvent_t e0, e1;
+    CK(hipEventCreate(&e0)); CK(hipEventCreate(&e1));
+    float ms[2];
+    for (int k = 0; k < 2; ++k) {
+        for (int it = 0; it < 3; ++it) {
+            if (it == 1) CK(hipEventRecord(e0, 0));
+            if (k == 0)
+                hipLaunchKernelGGL(k_attn_pf, dim3(Hkv, tiles, nsplit), dim3(256), 0, 0, q, K, V, cap, dp, span, Hkv,
+                                   bias, ext, sink, part, splitsz, nsplit, T, 1);
+            else
+                hipLaunchKernelGGL(k_attn_pf_wq8, dim3(Hkv, (3 * T + 63) / 64, ns16), dim3(4 * WS), 0, 0, q, K, V, cap,
+                                   dp, span, Hkv, bias, ext, sink, part2, sz16, ns16, T);
+        }
+        CK(hipEventRecord(e1, 0)); CK(hipEventSynchronize(e1));
+        CK(hipEventElapsedTime(&ms[k], e0, e1)); ms[k] /= 2;
+    }
+    // the two kernels' merged outputs, compared (combine on the host for a sample of rows)
+    std::vector<float> p1((size_t) T * H * nsplit * (D + 2)), p2((size_t) T * H * ns16 * (D + 2));
+    CK(hipMemcpy(p1.data(), part, p1.size() * 4, hipMemcpyDeviceToHost));
+    CK(hipMemcpy(p2.data(), part2, p2.size() * 4, hipMemcpyDeviceToHost));
+    auto merge = [&](const std::vector<float> & p, int ns, int row, std::vector<double> & o) {
+        double M = -INFINITY, L = 0; o.assign(D, 0.0);
+        for (int s = 0; s < ns; ++s) M = std::max(M, (double) p[((size_t) row * ns + s) * (D + 2)]);
+        for (int s = 0; s < ns; ++s) {
+            const float * e = &p[((size_t) row * ns + s) * (D + 2)];
+            if (e[0] == -INFINITY) continue;
+            const double f = std::exp(e[0] - M); L += e[1] * f;
+            for (int d = 0; d < D; ++d) o[d] += e[2 + d] * f;
+        }
+        for (int d = 0; d < D; ++d) o[d] /= L;
+    };
+    double err = 0, mag = 0;
+    std::vector<double> o1, o2;
+    for (int row = 0; row < T * H; row += 97) {
+        merge(p1, nsplit, row, o1); merge(p2, ns16, row, o2);
+        for (int d = 0; d < D; ++d) { err = std::max(err, std::fabs(o1[d] - o2[d])); mag = std::max(mag, std::fabs(o1[d])); }
+    }
+    std::printf("ATTN depth %d: 1024-token chunk, one full layer: F32 %.2f ms, wq8 %.2f ms (x%.2f); max |diff| %.3g of max %.3g\n",
+                N, ms[0], ms[1], ms[0] / ms[1], err, mag);
+    return 0;
+}
 int main(int argc, char ** argv) {
+    if (argc >= 3 && std::string(argv[1]) == "--attn-bench") return attn_bench(std::atoi(argv[2]), argc >= 4 ? std::atoi(argv[3]) : 0);
     std::string path, score, dump;
     int gpu = 0, ctx = 4096, n_dump = 0, n_bench = 0, chunk = 1;
     std::string dspark;   // --dspark DRAFT.gguf (opt-in): Unsloth's DSpark drafter
@@ -3211,6 +3434,7 @@ int main(int argc, char ** argv) {
         else if (a == "--chunk") chunk = std::atoi(next());
         else if (a == "--bench-prefill") n_pf = std::atoi(next());
         else if (a == "--kv-q8") kvt = 1;
+        else if (a == "--pf-wq8") pf_wq8 = true;
         else if (a == "--spec-test") spec_test = true;
         else if (a == "--serve") serve_mode = true;
         else if (a == "--inkling") {}
