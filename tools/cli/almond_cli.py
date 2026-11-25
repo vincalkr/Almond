@@ -2065,6 +2065,11 @@ class Chat:
                     c["id"] = v.get("id") or c["id"]
                     c["name"] += fn.get("name") or ""
                     c["arguments"] += fn.get("arguments") or ""
+                    if first is None:
+                        first = time.time()
+                    n = len(c["arguments"])     # the status bar says the call is being written, not thought
+                    bar.phase = (f"writing {c['name'] or 'tool call'} "
+                                 f"({n / 1024:.1f} KB)" if n >= 1024 else f"writing {c['name'] or 'tool call'}")
                 elif kind == "end":
                     end = v
         except KeyboardInterrupt:
