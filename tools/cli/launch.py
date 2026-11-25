@@ -183,10 +183,9 @@ def pick_config(o: dict) -> str:
         on = vision and whole(ROOT / "models/qwen38-27b/mmproj-Qwen3.8-27B-BF16.gguf")
         return str(ROOT / ("local/qwen27-local-vision.json" if on else "local/qwen27-local.json"))
     if m == "qwen":
-        # with the image encoder (local/fetch.sh qwen-vision): images on, read on the CPU (the engine lends the
-        # encoder no VRAM; its cards hold the expert cache)
-        on = vision and whole(ROOT / "models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf")
-        return str(ROOT / ("local/qwen-local-vision.json" if on else "local/qwen-local.json"))
+        # Unsloth's UD-Q4_K_XL on two cards, the only Qwen3.8-Flash configuration since 2026-11-25 (the IQ3_S one
+        # removed); its encoder (local/fetch.sh qwen-vision) is named in the configuration
+        return str(ROOT / "local/qwen-local.json")
     o["gpu"] = o["gpu"] or "0,1"
     cards = len(o["gpu"].split(","))
     if cards not in (1, 2):

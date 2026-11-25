@@ -327,7 +327,7 @@ CPU.
 lends it for the request and takes back after (docs/MODELS.md, "Images").
 
 **Qwen3.8-Flash-Next:** with its encoder (`local/fetch.sh qwen-vision`, 0.9 GB) and `almond-vision` built,
-`./almond serve --model qwen` picks `local/qwen-local-vision.json`; the encoder reads pictures on the CPU (12 threads,
+`./almond serve --model qwen` starts `local/qwen-local.json` (images on); the encoder reads pictures on the CPU (12 threads,
 up to
 300 image tokens a picture), the engine's card keeps its expert cache.
 

@@ -736,6 +736,10 @@ refuses an arena that does not leave `ALMOND_ARENA_HEADROOM_GIB` (default 8) fre
 `unsloth/Qwen3.8-Flash-Next-GGUF` UD-Q4_K_XL (four shards, 111.3 GB; experts 63.47 GiB, the figure the engine
 printed on an RX 6900 XT 16 GB), `local/fetch.sh qwen-q4` (its pack with `--compat-bf16`: the routers, SSM gates and
 injections are F32 and the hyper-connection projections Q8_0 in this GGUF; the engine reads them as BF16),
+(Since 2026-11-25 this is the only Qwen3.8-Flash configuration, `local/qwen-local.json`, `./almond -m qwen`; the IQ3_S
+configurations of the sections above were removed. First run through the server: a 68-token prompt, 85 tokens at
+42.8 tok/s, 51 of 65 drafts accepted, the expert cache 84.6% hit.)
+
 `local/qwen-q4-local.json`, `./almond -m qwen-q4` (router name `qwen3.8-flash-next-q4`): card 0's expert slots, card 1
 as the peer expert tier, the rest read through the page cache with up to 56 GiB kept in RAM (`--mmap-experts
 --resident-budget-gib 56`), the MTP block of `models/qwen38-mtp`. `--ple-gguf` is left to the engine, which finds the

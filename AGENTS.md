@@ -2,7 +2,7 @@
 
 Almond is a multi-model engine for AMD RX 7900 XTX cards (ROCm/HIP), for MoE and dense models: the MoE models
 DeepSeek-V4.1-Flash-1017 (the published GSQ-RCO IQ2_XXS pack), GLM-5.3-Flash (GSQ-RCO 3.5bit) and Qwen3.8-Flash-Next
-(GSQ-RCO IQ3_S), their experts across card 0, a second 24 GB card, pinned RAM and NVMe, and the dense Qwen3.8-27B
+(Unsloth UD-Q4_K_XL), their experts across card 0, a second 24 GB card, pinned RAM and NVMe, and the dense Qwen3.8-27B
 (GSQ-RCO IQ3_S) on one card. One C++/HIP executable, `build-hip-fused/almond-engine` (DeepSeek's path in `src/ds41`,
 GLM's in `src/glm` when its arguments name `--glm-pack`, Qwen's in `src/qwen` when they name `--qwen`, the dense
 Qwen3.8-27B's in `src/qwen35` when they name `--qwen35`, the shared libraries in `src/` and `include/`); an OpenAI- and Anthropic-compatible server (`serve/`,
@@ -60,12 +60,12 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   server 123-144 tok/s at temperature 0 and 98-135 at 0.6 against 77-78, the same distribution; requests above
   temperature 0.8 are not drafted (no gain at 1.0). The llama.cpp build of it (`build-inkling/almond-inkling-dspark`,
   PR #32218 in `build-inkling/llama.cpp-dspark`) is still built but no configuration names it.
-- Qwen: `local/qwen-local.json` on card 0 (`local/qwen-local-vision.json` with its encoder,
-  `models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf`, on card 0 only while pictures are encoded, in the expert
-  cache's memory the engine lends it, `--vram-elastic`): the GGUF's two shards in
-  `models/qwen38-iq3s`, its pack in `models/qwen38-iq3s-pack` (`tools/qwen/iq_pack.py`), the MTP block in
-  `models/qwen38-mtp` (`tools/qwen/mtp_fetch.py`, `mtp_pack.py`, `mtp_rt.py`); `local/qwen-q4-local.json` Unsloth's UD-Q4_K_XL (Dynamic 3.1) on two cards
-  with at most 56 GiB of experts in RAM (`./almond -m qwen-q4`, `local/fetch.sh qwen-q4`; not yet measured here).
+- Qwen: `local/qwen-local.json`, Unsloth's UD-Q4_K_XL (Dynamic 3.1) on two cards with at most 56 GiB of experts in
+  RAM, images on (the encoder `models/qwen38-q4/mmproj-Qwen3.8-Flash-Next-BF16.gguf`): the GGUF's four shards in
+  `models/qwen38-q4`, its pack in `models/qwen38-q4-pack` (`tools/qwen/iq_pack.py`), the MTP block in
+  `models/qwen38-mtp` (`tools/qwen/mtp_fetch.py`, `mtp_pack.py`, `mtp_rt.py`); `local/fetch.sh qwen`. The GSQ-RCO
+  IQ3_S configurations (one card) were removed on 2026-11-25 to keep one Qwen3.8-Flash profile; their numbers stay in
+  docs/MODELS.md.
 - `./almond-bench`: quality benchmarks against the router (MMLU-Pro, GPQA, MATH-500, HumanEval+/MBPP+, IFEval,
   BFCL graded without a judge, Arena-Hard with a judge model, KL divergence from logit dumps), Textual UI;
   `./almond-bench fetch` downloads the missing datasets into `local/bench/data` (`--update` newer revisions; a
