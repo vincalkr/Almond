@@ -32,7 +32,7 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
 - The quantization of a model is chosen in `local/fetch.sh` (separate items, each with its configuration and router
   entry); the router leaves out an entry whose files are not downloaded.
 - Qwen3.8-27B (dense): `local/qwen27-local.json` (`./almond serve --model qwen27`, `src/qwen35`, `--qwen35`: one
-  card, 192K, q8_0 KV, MTP 3; `-vision` with its encoder); `local/qwen27-local-256k.json` on two cards; `local/qwen27-q8-local.json` the Q8_0 on two cards (the two-card ones with `--tp`, tensor parallel, docs/MODELS.md) (`./almond -m qwen27-q8`). Files in `models/qwen38-27b` (docs/MODELS.md, "Qwen3.8-27B").
+  card, 192K, q8_0 KV, MTP 3; `-vision` with its encoder); `local/qwen27-q8-local.json` the Q8_0 on two cards, 256K (with `--tp`, tensor parallel, docs/MODELS.md) (`./almond -m qwen27-q8`). Files in `models/qwen38-27b` (docs/MODELS.md, "Qwen3.8-27B").
 - Hy4-flash: `local/hy4-local.json` (`-vision` with its encoder and `build-vision-hy4`) (`./almond serve --model hy4`, `src/hy4`, `--hy4`: cards 0 and 1, the experts that
   do not fit in VRAM read from RAM, the Engram table from the SSD or RAM, `--engram-place auto`); files in
   `models/hy4-iq2ah` with the tokenizer extracted by `tools/almond_tokenizer.py`; images with
@@ -57,8 +57,7 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   Unsloth's DSpark drafter (`local/fetch.sh inkling-dspark`, `--dspark`, docs/inkling/ENGINE.md step 6) is in the 1M
   configuration only (the one-card one at 256K has 0.02 GiB left with it): through the server on the 1M configuration
   at temperature 0.6 code 91.8-100.2 tok/s against 69.6, prose 64-65 against 70, the same distribution; requests above
-  temperature 0.8 are not drafted (no gain at 1.0). The 192K one-card DSpark configurations were removed on 2026-11-25. The llama.cpp build of it (`build-inkling/almond-inkling-dspark`,
-  PR #32218 in `build-inkling/llama.cpp-dspark`) is still built but no configuration names it.
+  temperature 0.8 are not drafted (no gain at 1.0). The 192K one-card DSpark configurations were removed on 2026-11-25.
 - Qwen: `local/qwen-local.json`, Unsloth's UD-Q4_K_XL (Dynamic 3.1) on two cards with at most 56 GiB of experts in
   RAM, images on (the encoder `models/qwen38-q4/mmproj-Qwen3.8-Flash-Next-BF16.gguf`): the GGUF's four shards in
   `models/qwen38-q4`, its pack in `models/qwen38-q4-pack` (`tools/qwen/iq_pack.py`), the MTP block in

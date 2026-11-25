@@ -78,24 +78,6 @@ if [ -d models/inkling2-mini ] || [ -n "${INKLING:-}" ]; then
         src/inkling/inkling_serve.cpp -L"$VI/build/bin" -lllama -lggml -lggml-base -Wl,-rpath,"$PWD/$VI/build/bin" \
         -pthread -o build-inkling/almond-inkling
     echo "=== done: build-inkling/almond-inkling"
-    # almond-inkling-dspark (opt-in, docs/inkling/NOTES.md): the same source with -DALMOND_DSPARK on llama.cpp
-    # PR #32218 (Inkling 2 DSpark, not on master yet), in its own tree; built when the drafter is downloaded
-    # (local/fetch.sh inkling-dspark) or INKLING_DSPARK=1
-    if [ -f models/inkling2-mini/unsloth/dspark-Inkling-2-Mini-Q8_0.gguf ] || [ -n "${INKLING_DSPARK:-}" ]; then
-        VD=build-inkling/llama.cpp-dspark
-        DSPARK_COMMIT=e4b1cb5318f1ac55d148be228c6347c6a94cc4c6
-        if [ ! -d "$VD" ]; then
-            mkdir -p "$VD" && git -C "$VD" init -q && git -C "$VD" remote add origin https://github.com/ggml-org/llama.cpp &&
-                git -C "$VD" fetch -q --depth 1 origin "$DSPARK_COMMIT" && git -C "$VD" checkout -q FETCH_HEAD
-        fi
-        cmake -S "$VD" -B "$VD/build" "${COMMON[@]}" -DGGML_HIP=ON -DGGML_HIP_GRAPHS=ON -DGGML_HIP_NO_VMM=ON -DLLAMA_CURL=OFF
-        cmake --build "$VD/build" -j "$JOBS" --target llama llama-common llama-server
-        g++ -O2 -std=c++17 -DALMOND_DSPARK -DALMOND_VERSION="\"inkling-dspark-$(git rev-parse --short HEAD)\"" \
-            -I"$VD/include" -I"$VD/ggml/include" -I"$VD/common" -I"$VD/vendor" src/inkling/inkling_serve.cpp \
-            -L"$VD/build/bin" -lllama-common -lllama -lggml -lggml-base -Wl,-rpath,"$PWD/$VD/build/bin" \
-            -pthread -o build-inkling/almond-inkling-dspark
-        echo "=== done: build-inkling/almond-inkling-dspark"
-    fi
     # almond-inkling-native: Almond's own Inkling engine (src/inkling/native, docs/inkling/ENGINE.md), HIP only
     "$CXX_HIP" -O2 -std=c++17 --offload-arch="$GFX" src/inkling/native/ink_native.hip -o build-inkling/almond-inkling-native
     echo "=== done: build-inkling/almond-inkling-native"
