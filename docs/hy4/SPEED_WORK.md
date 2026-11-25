@@ -617,3 +617,19 @@ The engine runs on ROCm 7.14 here.
 | 2000 | 26 | 1.66 / 3.00 GiB | 435.0 tok/s | 19.94 tok/s (1.82) |
 
 The configurations take 1700: the smallest of these that ran, one expert layer fewer on the cards than 1400.
+
+### Warp sums through DPP: no gain, not kept (2026-11-25)
+
+`warp_reduce_sum` / `warp_reduce_max` in the vendored ggml with DPP row moves and `v_permlanex16` in place of
+`ds_bpermute` on RDNA3 (ENGINES_WATCH, sweep of 2026-11-24). With the repeatable top-k above, without
+`--prefetch-experts`: KL from the build without it 0.00000, top-1 100.00% over 8190 rows (8K of the 16K document).
+Speed at 256K (16K prompt, 500 tokens, reserve 1700, Engram in RAM, both on the same token path, 1.81 tokens a round),
+two runs each:
+
+| Build | Prompt tok/s | Generation tok/s |
+|---|---|---|
+| ds_bpermute | 426.3 / 424.1 | 21.13 / 21.16 |
+| DPP | 424.9 / 427.4 | 21.07 / 21.15 |
+
+The same within the noise, so the change was not kept.
+
