@@ -657,3 +657,14 @@ The drafter's ~1 GB on the last card (it must sit beside trunk layers 25-41, who
 the 1024-token prompt steps' buffers there, and giving it room moves expert layers to RAM, which takes back what the
 longer guesses win. At 256K DFly2 gains 3-4% of generation for 36-53% of the prompt, so the configuration keeps MTP.
 
+### Reserve 1700 gave wrong text through the server: 2000 (2026-11-25)
+
+With `--reserve-mib 1700` (a2db2a0), `--mtp` and `--prefetch-experts`, the server's answers turned to garbage after
+about ten tokens ("None None None ...", greedy, a 400-word story and a code edit), while the engine's `--ppl` stayed
+41.1452. The prefetch staged no copy in those requests; what it changes is the placement (card 0's staging charged to
+its budget: 15 / 28 layers) and card 1 is left with 0.58 GiB free after the compute buffers, where the HIP runtime
+computes wrong without an error. Without `--mtp`, without `--prefetch-experts`, or with `--pin-experts` in its place the
+text was right. With reserve 2000 or 2200: 27 expert layers in VRAM, card 1 1.79 GiB free, the story and a Python
+function right, 24.5 and 26.3-26.6 tok/s through the server. The configurations now take 2000. The speed numbers
+measured at 1700 above are on a run whose text was not checked.
+
