@@ -517,6 +517,12 @@ the same text as MTP's on all four; DSpine alone the same on three (the story pa
 do). Configurations: `local/qwen27-local-dspine.json` (`./almond -m qwen27-dspine`, 131072) and
 `local/qwen27-q8-local-dspine.json` (`./almond -m qwen27-q8-dspine`, two cards); the defaults keep MTP.
 
+**Removed on 2026-11-25** (both configurations, the router entries and the download item; the engine keeps `--dflash`
+and `--spec auto`). Through the server on card 0, temperature 0, the IQ3_S at 192K with DSpine against MTP 3, two runs
+each: a Python module with tests (1500 tokens) 96.1 / 96.6 against 92.6 / 92.8 tok/s (+4%), a 500-word story (894
+tokens) 53.3 / 53.4 against 54.5 / 54.5, a 182,638-token prompt read at 477 tok/s by both and answered at 33.0 against
+33.7. DSpine fits at 192K, but +4% on code and -2% elsewhere did not earn a profile.
+
 ### Every configuration through the server, short and ~123K context (2026-11-15)
 
 Each configuration started with `./almond serve --config local/<name>.json --port 8161` on 127.0.0.1 and was sent,

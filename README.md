@@ -14,8 +14,7 @@ Anthropic-compatible server, a router that serves every model at one address, an
 - **Qwen3.8-Flash-Next** as the [ISTA-DASLab GSQ-RCO IQ3_S GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF)
   (two shards, 83.6 GB) with its MTP draft block from the BF16 checkpoint (`src/qwen`).
 - **Qwen3.8-27B** (dense) as the [ISTA-DASLab GSQ-RCO IQ3_S GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF)
-  (11.28 GiB, its MTP block in the same file) on ggml graphs (`src/qwen35`), with images on its encoder, optionally
-  with Tencent's DSpine drafter inside code (`qwen27-dspine`).
+  (11.28 GiB, its MTP block in the same file) on ggml graphs (`src/qwen35`), with images on its encoder.
 - **Hy4-flash** as [AngelSlim's IQ2-AH GGUF](https://huggingface.co/AngelSlim/Hy4-flash-GGUF) (two shards, 135 GB:
   experts IQ2_XXS, the Engram table FP8) on ggml graphs over both cards (`src/hy4`, `./almond serve --model hy4`):
   about 21 tok/s with its MTP block, the experts that do not fit in VRAM run from RAM and the Engram table is
@@ -86,10 +85,8 @@ local/fetch.sh                                                        # the mode
 - `./setup.sh --check` only says what is there. `local/fetch.sh` lists the models with their state in `models/` and
   asks which to download (DeepSeek's pack and FP8 Engram rows through their own scripts, GLM, its MTP block, both
   image encoders, the Qwen models); `local/fetch.sh --list` only lists. The quantization is chosen there: a model's
-  quantizations are separate items (`qwen27` IQ3_S or `qwen27-q8` Q8_0, and
-  `qwen27-dspine`, Tencent's DSpine drafter used inside code: +31% there on the IQ3_S; `qwen` IQ3_S or `qwen-q4`
-  UD-Q4_K_XL, two cards, not yet measured), each with its
-  own configuration and name in the router (`./almond -m qwen27-q8`, `./almond -m qwen-q4`). The list starts with
+  quantizations are separate items (`qwen27` IQ3_S or `qwen27-q8` Q8_0), each with its
+  own configuration and name in the router (`./almond -m qwen27-q8`). The list starts with
   this machine's cards, RAM and free disk, marks what does not fit (`[needs 2 cards of 24 GB]`) and ends with a
   suggestion for the machine.
 - `local/fetch-rco-1017.sh` downloads the four shards and the pack's Engram IQ4_NL GGUF with `aria2c` (4 connections,
