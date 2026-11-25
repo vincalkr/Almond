@@ -668,3 +668,27 @@ text was right. With reserve 2000 or 2200: 27 expert layers in VRAM, card 1 1.79
 function right, 24.5 and 26.3-26.6 tok/s through the server. The configurations now take 2000. The speed numbers
 measured at 1700 above are on a run whose text was not checked.
 
+
+### Long verbatim copies loop at temperature 0; prompt lookup (n-gram) drafting not kept (2026-11-25)
+
+Asked through the server to return a 9,000-character Python file with one function renamed, at temperature 0, the
+answer turns into a repeated fragment after about 400-570 tokens. It does so with `--mtp` and with speculation off
+(`d["loading", ...` and `"launch.py(), ...`), so it is not the drafting. The two runs part at the third token, where
+the first two logits are 0.004-0.08 apart; each answer had 11 such places under 0.1, and the same row differed by
+~0.2 between the batched and one-token forward (0.02 against 0.23 for the top-two gap). Greedy text on this 2-bit
+model follows those ties into different branches, some of which loop; the earlier "right without MTP" run was one
+branch. Not compared against a reference implementation.
+
+`--ngram K` (draft the K tokens that followed the latest earlier match of the last 3 tokens, before MTP) was
+written and measured on the `hy4` profile through the server, five requests at temperature 0.6, seeds 1 and 2:
+
+| request | without (tok/s) | `--ngram 4` (tok/s) |
+|---|---|---|
+| file edit (rename) | 22.8-25.8 | 15.2-22.1 (answers of 5 and 105 tokens) |
+| add docstrings | 22.8-24.5 | 23.1-25.3 |
+| summary of a document | 22.0-22.9 | 19.5-20.3 |
+| new code | 24.5-25.1 | 30.9-36.6 |
+| Italian story | 21.7-25.3 | 30.8-33.9 |
+
+The gains are on the answers that repeat themselves (all four flagged as looping by the tail check), the summary
+is ~10% slower, and the edits, where a copy should help, show nothing measurable. The code was removed.
