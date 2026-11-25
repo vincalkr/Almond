@@ -387,6 +387,31 @@ experts of the dense DeepSeek-V4.1 path with `ggml_top_k` over the router scores
 takes its sampling candidates with it. Ties are rarer on raw logits and on sigmoid+bias router scores than on a pool
 mask, but the shape of the failure is the same - the pick, and so the answer, is not the pick of the next run.
 
+### The ties were still taken in thread order: `top_k_radix_ties` (2026-11-25)
+
+The index ramp did not make every run repeat: 8K of the 16K document (`--ppl`, `-c 8192`, two cards, reserve 1700,
+Engram table in RAM) gave ppl 41.1452, 41.6646, 41.6577 or 40.9848 from one run to the next, with or without
+`--prefetch-experts`. Dropping one option at a time, two runs each: only without `--fused-indexer` (41.1164 four
+times out of four) did the runs agree. The ramp, `idx x 1e-15`, is below a float's resolution for any score that is
+not 0, so two pools with the same non-zero score still tie, and the radix top-k kernel placed the keys equal to the
+k-th with `atomicAdd`: which of them made the cut followed the order the threads ran in.
+
+The vendored kernel (`top-k.cu`, `tools/v41/ggml/topk-ties.patch`) now places those keys in a separate pass, one block
+a row, lowest column first; the keys above the k-th still go in with `atomicAdd`, in any order, which is the same set
+every run (the indexer sorts its picks afterwards). Measured with the same 8K:
+
+| Run | ppl, 4-6 runs |
+|---|---|
+| before, `--fused-indexer` | 41.1452 / 41.6646 / 41.6577 / 40.9848 |
+| after, without `--prefetch-experts` | 41.1452 six times out of six |
+| after, with `--prefetch-experts` | 41.1452 three times, 41.1477 once |
+
+With `--prefetch-experts` a routed expert is computed from its staged copy on card 0 or on the CPU depending on
+when the copy lands, and the two do not round the same way, so that run-to-run difference stays; compare quality
+without it. Speed at 256K (16K prompt, 500 tokens, reserve 1700, Engram in RAM): prompt 457.5 tok/s against 458.0,
+85-87 ms a round of generation against 86 ms before (the runs took another token path, 1.73 tokens a round, so the
+tok/s do not compare directly).
+
 ### `--host-moe` re-checked against a reference that repeats (2026-11-22, `local/hy4-host-moe-quality-check.sh` again)
 
 With the pool pick sorted (the default now), the same four arms print:
