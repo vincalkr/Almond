@@ -49,16 +49,15 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
   `build-inkling/llama.cpp`'s mtmd), the rows read by the native engine (`GENI`); the encoder on card 0 only while a
   request's pictures are encoded, in the experts' memory the engine lends it (`VLEND` / `VRECLAIM`, as GLM; F32
   products and no flash attention, `f32_matmul` / `no_flash_attn`), then the model is back byte for byte; answers
-  checked against llama.cpp's server (docs/inkling/ENGINE.md, steps 9-10); `local/inkling-dspark-local-vision.json`
-  the same with DSpark.
-  `local/inkling-1m-local.json` (opt-in, 1M, q8_0) and `--kv-gpu 1` puts the full attention layers' K/V and attention on card 1 for
+  checked against llama.cpp's server (docs/inkling/ENGINE.md, steps 9-10).
+  `local/inkling-1m-local.json` (`./almond -m inkling-1m`, 1M, q8_0, two cards, with DSpark) and `--kv-gpu 1` puts the full attention layers' K/V and attention on card 1 for
   contexts past 128K: logits identical, needle found at 256K (one card) and 512K, decode 28 tok/s at depth 512K, KL from Q8_0 with q8_0 KV 0.00706 against 0.00714 with F16 (docs/inkling/ENGINE.md, step 11).
   `--pf-wq8` (in every Inkling configuration since 2026-11-25, chunks of 64 tokens or more): the q8_0 cache's prompt attention on the matrix cores, prefill
   +37% at 256K (394.5 -> 542.4 tok/s; through the server 501 -> 661 at 189K), KL from Q8_0 0.00619 against 0.00706 (docs/inkling/ENGINE.md, step 12).
-  `local/inkling-dspark-local.json` (`./almond -m inkling-dspark`, opt-in) adds Unsloth's DSpark drafter
-  (`local/fetch.sh inkling-dspark`) to the native engine (`--dspark`, docs/inkling/ENGINE.md step 6): through the
-  server 123-144 tok/s at temperature 0 and 98-135 at 0.6 against 77-78, the same distribution; requests above
-  temperature 0.8 are not drafted (no gain at 1.0). The llama.cpp build of it (`build-inkling/almond-inkling-dspark`,
+  Unsloth's DSpark drafter (`local/fetch.sh inkling-dspark`, `--dspark`, docs/inkling/ENGINE.md step 6) is in the 1M
+  configuration only (the one-card one at 256K has 0.02 GiB left with it): through the server on the 1M configuration
+  at temperature 0.6 code 91.8-100.2 tok/s against 69.6, prose 64-65 against 70, the same distribution; requests above
+  temperature 0.8 are not drafted (no gain at 1.0). The 192K one-card DSpark configurations were removed on 2026-11-25. The llama.cpp build of it (`build-inkling/almond-inkling-dspark`,
   PR #32218 in `build-inkling/llama.cpp-dspark`) is still built but no configuration names it.
 - Qwen: `local/qwen-local.json`, Unsloth's UD-Q4_K_XL (Dynamic 3.1) on two cards with at most 56 GiB of experts in
   RAM, images on (the encoder `models/qwen38-q4/mmproj-Qwen3.8-Flash-Next-BF16.gguf`): the GGUF's four shards in

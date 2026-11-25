@@ -528,3 +528,24 @@ attention's arithmetic differs, see above), so its decode speed is that text's d
 with the guard at 64 tokens the generated text is the same, byte for byte. Two things were also seen without the
 flag and are not caused by it: with DSpark at temperature 0 the picture's answer repeats one sentence, and the same
 50K prompt sent twice is prefilled again in full (the same speed both times).
+
+## Step 13: two configurations, DSpark on the 1M one (2026-11-25)
+
+To keep at most two configurations per model: `inkling-local.json` (256K, one card) and `inkling-1m-local.json`
+(1M, two cards, now with DSpark, `--dspark-n 4`); `inkling-dspark-local.json` and its `-vision` twin (192K, one card:
+DSpark does not fit at 256K there, 0.02 GiB left) were removed. The 1M configuration did not start through the server
+before this: the server added `--layer-split` for its two cards, which this engine does not take; it no longer does
+beside `--kv-gpu` (`serve/server.py`, `layer_split_of`, with a test). Through the server, temperature 0.6, 1M
+configuration, two runs each:
+
+| request | without DSpark | with DSpark |
+|---|---|---|
+| Python module with tests, 1500 tokens (all thinking) | 69.6 / 69.6 tok/s | 91.8 / 95.3 |
+| the same, `reasoning_effort: none`, 3000 tokens | - | 99.6 / 100.2 |
+| 500-word story, 900 tokens | 70.0 / 70.0 | 64.1 / 65.0 |
+| 77,434-token prompt: prefill / decode | 654 / 55.5 | 654 / 58.9 |
+
+Drafting only inside ``` blocks and tool calls (as `src/qwen35`'s `--spec auto`) was tried and not kept: the story
+went back to 69.2, but the code request fell to 71.3-73.0 tok/s, because the model writes several thousand characters
+of thinking before the block and DSpark speeds that up too.
+

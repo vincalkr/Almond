@@ -1953,6 +1953,11 @@ class PeerDevice(unittest.TestCase):
         self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1]}), args)
         self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1], "split_skip_if_fits": True}), args)
 
+    def test_no_split_with_kv_gpu(self):
+        """Inkling's --kv-gpu: the second card holds the full attention K/V; that engine has no --layer-split."""
+        args = ["--inkling", "-m", "x", "--gpu", "0", "--kv-gpu", "1"]
+        self.assertEqual(engine_args({"args": list(args), "gpu": "0,1"}), args)
+
     def test_both_cards_visible(self):
         from serve.server import child_env
         env = child_env({"args": ["--peer-device", "1"], "gpu": [0, 1]})

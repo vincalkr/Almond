@@ -2457,8 +2457,9 @@ def layer_split_value(cfg: dict) -> str:
 
 def layer_split_of(cfg: dict) -> bool:
     """Several GPUs in the config are a layer split, unless the args put the later card(s) to another use: with
-    --peer-device the second card is an expert-cache tier, and the engine refuses that beside --layer-split (#665)."""
-    return len(gpu_list(cfg)) > 1 and "--peer-device" not in cfg["args"]
+    --peer-device the second card is an expert-cache tier, and the engine refuses that beside --layer-split (#665);
+    with --kv-gpu (Inkling's native engine) it holds the full attention layers' K/V, and that engine has no --layer-split."""
+    return len(gpu_list(cfg)) > 1 and "--peer-device" not in cfg["args"] and "--kv-gpu" not in cfg["args"]
 
 
 def engine_args(cfg: dict) -> list[str]:

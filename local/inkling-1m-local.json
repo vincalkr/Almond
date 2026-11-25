@@ -13,7 +13,11 @@
     "--ubatch",
     "1024",
     "--kv-gpu",
-    "1"
+    "1",
+    "--dspark",
+    "models/inkling2-mini/unsloth/dspark-Inkling-2-Mini-Q8_0.gguf",
+    "--dspark-n",
+    "4"
   ],
   "cwd": ".",
   "tokenizer": "models/inkling2-mini/tokenizer",
