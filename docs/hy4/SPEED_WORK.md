@@ -633,3 +633,9 @@ two runs each:
 
 The same within the noise, so the change was not kept.
 
+### `hy4-local-fast.json` removed (2026-11-25)
+
+To keep at most two configurations per model, and since a chat waits on generation more than on the prompt: the fast
+configuration's `--ubatch 2048 --expert-layers-gpu 26` gave the prompt +10% (480.3 -> 528.9 tok/s, 16K) for -5% of
+generation (21.67 -> 20.62), moving three expert layers to RAM. `local/hy4-local.json` (and its `-vision` twin) stay.
+

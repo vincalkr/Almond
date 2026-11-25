@@ -6,7 +6,6 @@
     {"model": "qwen27"},
     {"model": "qwen27", "config": "local/qwen27-q8-local.json"},
     {"model": "hy4"},
-    {"model": "hy4", "config": "local/hy4-local-fast.json"},
     {"model": "inkling"},
     {"model": "inkling", "config": "local/inkling-1m-local.json"}
   ],
