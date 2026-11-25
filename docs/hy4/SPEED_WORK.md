@@ -639,3 +639,21 @@ To keep at most two configurations per model, and since a chat waits on generati
 configuration's `--ubatch 2048 --expert-layers-gpu 26` gave the prompt +10% (480.3 -> 528.9 tok/s, 16K) for -5% of
 generation (21.67 -> 20.62), moving three expert layers to RAM. `local/hy4-local.json` (and its `-vision` twin) stay.
 
+### DFly2 on the q8_0 cache, at 256K (2026-11-25)
+
+`--dfly` now also runs with `--kv-q8` (the drafter's layers read the trunk's q8_0 rows as F16, as the trunk's mask
+path does). First at 64K with the F16 cache, 16K prompt, 400 tokens, greedy: MTP 1.80 tokens a round, 19.88 tok/s,
+prompt 480 tok/s; DFly2 with 2 guesses 2.42, 22.19 tok/s (+12%), prompt 425; with 3 guesses 2.39, 19.92. Then at
+256K with the configuration of record (q8_0 cache, reserve 1700, Engram in RAM):
+
+| | expert layers in VRAM | prompt steps | prompt tok/s | tokens a round | generation tok/s |
+|---|---|---|---|---|---|
+| MTP | 28 | 1024 | 453.1 | 1.71 | 19.58 |
+| DFly2, 2 guesses | 27 | 256 | 211.8 | 2.27 | 20.38 |
+| DFly2, reserve 2400 | 26 | 512 | 290.5 | 2.25 | 20.20 |
+| DFly2, reserve 3100 | 25 | 512 | 282.3 | 2.27 | 20.08 |
+
+The drafter's ~1 GB on the last card (it must sit beside trunk layers 25-41, whose cache it reads) leaves no room for
+the 1024-token prompt steps' buffers there, and giving it room moves expert layers to RAM, which takes back what the
+longer guesses win. At 256K DFly2 gains 3-4% of generation for 36-53% of the prompt, so the configuration keeps MTP.
+

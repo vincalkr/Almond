@@ -1470,6 +1470,7 @@ struct Hy4Engine::Impl {
         in.tok = input(c, GGML_TYPE_I32, nt, 1, "inp_tok");
         in.pos = input(c, GGML_TYPE_I32, nt, 1, "inp_pos");
         in.kidx = input(c, GGML_TYPE_I64, nt, 1, "inp_kidx");
+        if (o.kv_q8) in.kv_all = input(c, GGML_TYPE_I32, n_kv, 1, "inp_kv_all");
         const int64_t col = (first - 1) % 8;
         const bool picks = dm_pos[col] == first - 1;
         dfly_picks = picks;
@@ -1496,8 +1497,15 @@ struct Hy4Engine::Impl {
             kp = rope(c, ggml_reshape_3d(c, kp, R, 1, nt), in.pos, nullptr, base);
             ggml_tensor * cache = ggml_set_rows(c, kv[(size_t) T], ggml_concat(c, lat, ggml_reshape_2d(c, kp, R, nt), 0), in.kidx);
             ggml_build_forward_expand(gf, cache);
-            ggml_tensor * K = ggml_view_3d(c, cache, KR + R, n_kv, 1, cache->nb[1], cache->nb[1] * n_kv, 0);
-            ggml_tensor * V = ggml_view_3d(c, cache, KR, n_kv, 1, cache->nb[1], cache->nb[1] * n_kv, 0);
+            ggml_tensor * K = nullptr, * V = nullptr;
+            if (cache->type == GGML_TYPE_Q8_0) {   // --kv-q8: the rows 0..n_kv as F16, as the trunk's mask path does
+                ggml_tensor * rows = ggml_get_rows_type(c, cache, in.kv_all, GGML_TYPE_F16);
+                K = ggml_reshape_3d(c, rows, KR + R, n_kv, 1);
+                V = ggml_view_3d(c, rows, KR, n_kv, 1, rows->nb[1], rows->nb[1] * n_kv, 0);
+            } else {
+                K = ggml_view_3d(c, cache, KR + R, n_kv, 1, cache->nb[1], cache->nb[1] * n_kv, 0);
+                V = ggml_view_3d(c, cache, KR, n_kv, 1, cache->nb[1], cache->nb[1] * n_kv, 0);
+            }
             // the context: the trunk's mask row for first - 1 (0 / -inf per row), then the block (0) and what is past
             // it (-inf); without a saved row (a restored session) the host's row sees every context position
             ggml_tensor * mrow = in.dtail;
@@ -2137,7 +2145,6 @@ bool Hy4Engine::load(const std::string & gguf, const Hy4EngineOptions & o, std::
     P.cpu = ggml_backend_cpu_init();
     const int th = o.threads > 0 ? o.threads : std::max(1u, std::thread::hardware_concurrency() / 2);
     ggml_backend_cpu_set_n_threads(P.cpu, th);
-    if (!o.dfly.empty() && o.kv_q8) { err = "--dfly reads the cache as F16: not with --kv-q8"; return false; }
     if (!o.dfly.empty()) {
         if (P.n_alloc <= P.n_trunk) { err = "--dfly needs --mtp (the trunk's final states)"; return false; }
         try { P.dmodel = std::make_unique<GgufModel>(GgufModel::open(o.dfly)); }
