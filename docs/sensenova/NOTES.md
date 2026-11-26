@@ -75,3 +75,14 @@ Checked against the BF16 safetensors (layer 4, Q8_0 dequantized): `attn_qkv_gate
 heads in llama.cpp's qwen35 order (HF head k*2 + j at GGUF j*16 + k, the same reorder in qkv's v part, z, beta,
 alpha, dt, A and conv1d) - the convention the qwen35 path already reads. `hc_*_fn` are the HF `mhc_*` weights
 exactly (F32, same row order).
+
+## DFlash2 drafter
+
+`sensenova/SenseNova-Loop-9B-DFlash2` reads `target_layer_ids` [3, 27, 51, 54], the outputs of those *executions*
+(LightLLM's `LayerHiddenCollector.add(layer_index=i, hidden=<layer i's output>)` over the 56 execution layers), then
+`final_postnorm`, the last hidden after the model's output norm. 27 and 51 are the mHC exits, whose output is already
+the mean of the two streams, so every feature is 4096 wide (fc: 20480 -> 4096). In the GGUF `dflash.target_layers` is
+[4, 28, 52, 55] (llama.cpp's convention: the layer whose input it is); the engine's trunk loop runs over executions, so
+these index it directly. The config's `layer_types` mark the fifth layer `full_attention`, but LightLLM's DFlash2 layer
+uses `sliding_window` for every layer, as the engine does.
+

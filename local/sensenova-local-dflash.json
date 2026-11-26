@@ -1,0 +1,41 @@
+{
+  "exe": "build-hip-fused/almond-engine",
+  "args": [
+    "--qwen35",
+    "-m",
+    "models/sensenova-loop-9b/SenseNova-Loop-9B-Q8_0.gguf",
+    "--gpus",
+    "0",
+    "--max-context",
+    "262144",
+    "--kv",
+    "q8_0",
+    "--mtp",
+    "3",
+    "--dflash",
+    "models/sensenova-loop-9b/SenseNova-Loop-9B-DFlash2-Q8_0.gguf",
+    "--dflash-n",
+    "5",
+    "--spec",
+    "auto"
+  ],
+  "env": {
+    "GGML_CUDA_FA_Q8_SPLITK": "1"
+  },
+  "cwd": ".",
+  "tokenizer": "models/sensenova-loop-9b/tokenizer",
+  "model_name": "sensenova-loop-9b-dflash",
+  "log": "local/serve-sensenova-dflash-engine.log",
+  "port": 8150,
+  "backend": "hip",
+  "gpu": 0,
+  "sampling": {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20
+  },
+  "loop_guard": true,
+  "fit_max_tokens": true,
+  "conversation_dir": "local/sensenova-dflash-slots",
+  "conversation_dir_gib": 16
+}

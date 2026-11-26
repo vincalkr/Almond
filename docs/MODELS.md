@@ -17,6 +17,7 @@ IQ3_S ones, `qwen27-local-256k`, the DSpine ones, `hy4-local-fast`, `inkling-dsp
 | Qwen3.8-27B | `qwen27` | `local/qwen27-local.json` (`-vision`), IQ3_S, MTP 3 | 1 | 192K |
 | | `qwen27-q8` | `local/qwen27-q8-local.json`, Q8_0, `--tp` | 2 | 256K |
 | SenseNova-Loop-9B | `sensenova-loop-9b` | `local/sensenova-local.json`, Q8_0, MTP 3 | 1 | 256K |
+| | `sensenova-loop-9b-dflash` | `local/sensenova-local-dflash.json`, DFlash2 5 + MTP 3, `--spec auto` | 1 | 256K |
 | Hy4-flash | `hy4` | `local/hy4-local.json` (`-vision`) | 2 | 256K |
 | Inkling 2 Mini | `inkling` | `local/inkling-local.json` (`-vision`) | 1 | 256K |
 | | `inkling-1m` | `local/inkling-1m-local.json`, DSpark, K/V on card 1 | 2 | 1M |
@@ -780,7 +781,7 @@ docs/sensenova/NOTES.md. It runs on the dense path `src/qwen35`, which switches 
 (other GGUFs are read as before): repeated runs share the weight tensors and get their own state; the routers'
 coefficients (sigmoids and the 20 Sinkhorn iterations, not converged, so not replaced by the closed form) are one
 ggml op, `ggml_loop_mhc_coef` (`tools/v41/ggml/loop-mhc.patch`), the mixing DeepSeek's `hc_pre` / `hc_post` ops.
-One card; no `--tp`, `--dflash` or images yet. Files: `local/fetch.sh sensenova` (the official
+One card; no `--tp` or images yet (the DFlash2 drafter: below). Files: `local/fetch.sh sensenova` (the official
 `sensenova/SenseNova-Loop-9B-GGUF` Q8_0, 9.8 GB, and its tokenizer exported to `models/sensenova-loop-9b/tokenizer`);
 `./almond -m sensenova-loop-9b` or the router entry `local/sensenova-local.json` (card 0, 256K, q8_0 KV, MTP 3).
 The server shim is Qwen's: its thinking levels low / medium are passed to a template that only knows thinking on or
@@ -813,6 +814,49 @@ Speed, card 0, q8_0 KV, `GGML_CUDA_FA_Q8_SPLITK=1`, `--bench 256 --prompt-ids` t
 A 32,768-token prompt (the 768 ids repeated) read at 1401 tok/s (Q8_0, 256K context). Weights 9.12 GiB, KV and state
 at 256K 8.65 GiB. Through the server (`serve_qwen.py` with this configuration) a short coding question answered
 with thinking and a correct function.
+
+### DFlash2 drafter (opt-in, 2026-11-26)
+
+`sensenova/SenseNova-Loop-9B-DFlash2` (967M parameters, BF16): the DFlash2 frame the engine already runs for
+`--dflash` (5 layers, block 8, conv kernels, a top-16 selector, a 2048 window) trained on this model. It reads the
+outputs of the target's *executions* 3, 27, 51 and 54 (zero-based over the 56 runs: the plain layer before the loop,
+the end of each pass, where the two streams are already averaged back to one, and the third of the last four layers)
+and, as a fifth feature, the final hidden after the output norm (`final_postnorm`, what LightLLM's integration
+appends; fc reads 5 x 4096). The engine takes the fifth feature from fc's width, so the 27B's drafters read as
+before. The last drafter layer is `full_attention` in the config, but LightLLM's DFlash2 layer applies the 2048 window
+to every layer, as the engine does. `local/fetch.sh sensenova-dflash` downloads it and converts it with
+`tools/sensenova/dflash2_gguf.py` (Q8_0, 1.03 GB; tensors and keys byte for byte those of llama.cpp's DFlash
+converter, which needs a target architecture it knows). `./almond -m sensenova-loop-9b-dflash`
+(`local/sensenova-local-dflash.json`: MTP 3 and DFlash2 5 drafts with `--spec auto`, which keeps per round the drafter
+whose recent drafts paid more). Greedy output with DFlash2 is the same token for token as without (256 tokens).
+
+Card 0, 256K context, q8_0 KV, greedy, `--bench 512`, prompts (chat template, thinking off): a Python ISO-8601 parser
+with tests (52 tokens) / Gated DeltaNet against softmax attention (46) / a 400-word story in Italian (42); tok/s and
+drafts accepted:
+
+| | code | technical | story | mean (harmonic) |
+| --- | --- | --- | --- | --- |
+| no drafts | 40.5 | 40.4 | 40.4 | 40.4 |
+| MTP 3 (the default) | 74.5 (319/579) | 66.7 (297/648) | 39.6 (146/1098) | 55.9 |
+| DFlash2, 3 drafts | 89.9 (346/495) | 71.2 (305/627) | 34.9 (81/1290) | 55.7 |
+| DFlash2, 5 drafts | 106.2 (385/655) | 61.1 (284/1150) | 33.0 (83/2140) | 53.5 |
+| DFlash2, 7 drafts | 103.6 (389/854) | 58.6 (294/1526) | 29.9 (83/3003) | 49.9 |
+| MTP 3 + DFlash2 5, `--spec auto` | 89.9 | 65.9 | 39.1 | 57.9 |
+| MTP 3 + DFlash2 3, `--spec auto` | 86.7 | 66.0 | 39.2 | 57.5 |
+
+(`--spec auto` rounds, 5 drafts: code 13 MTP / 134 DFlash2, technical and story all MTP.) On the 512 mixed ids of
+the accuracy check: MTP 3 72.6, DFlash2 5 96.5, DFlash2 7 99.4 tok/s.
+
+Through the server at the configuration's sampling (temperature 1.0, top_p 0.95, top_k 20), the same three prompts,
+up to 768 tokens, two requests each, decode tok/s after the first token:
+
+| | code | technical | story |
+| --- | --- | --- | --- |
+| `sensenova-local.json` (MTP 3) | 74.0, 72.8 | 49.0, 64.2 | 39.6, 40.5 |
+| `sensenova-local-dflash.json` | 85.4, 77.1 | 57.2, 52.9 | 39.3, 39.5 |
+
+DFlash2 is ahead on code and level elsewhere; the story in Italian gains nothing from any drafter (MTP accepts 13% of
+its drafts). MTP 3 stays the default configuration; the DFlash2 one is a second router entry.
 
 ## Hy4-flash (IQ2-AH, AngelSlim, `--hy4`, 2026-11-18)
 

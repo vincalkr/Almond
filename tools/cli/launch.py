@@ -246,6 +246,7 @@ def missing(cfg: str) -> list:
     model, pack = val("-m"), val("--glm-pack")
     qwen = [val(f) for f in ("--pack", "--native", "--ple-gguf", "--mtp") if "--qwen" in a and f in a]
     qwen += [val("--dspark")] if "--inkling" in a and "--dspark" in a else []   # Inkling's DSpark drafter
+    qwen += [val("--dflash")] if "--qwen35" in a and "--dflash" in a else []    # a dense model's DFlash2 drafter
     engram = val("--engram").split(":") if "--engram" in a else []
     env = c.get("env") or {}
     meta = env.get("DS41_META")               # the geometry overlay a foreign pack reads

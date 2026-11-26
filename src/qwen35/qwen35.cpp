@@ -155,6 +155,7 @@ struct Drafter {
     int ring = 4096;          // the KV ring's cells, by position: at least the window + a block + a verify window
     bool dspine = false;      // DSpine (code bridge, causal block) rather than DFlash2 (convolutions, selector)
     bool causal = false;
+    bool final_norm = false;  // the fc also reads the trunk's final normed hidden (h_nextn) after the layers
     int sp_code = 0, sp_rank = 0;
     ggml_tensor *sp_codebook = nullptr, *sp_gate = nullptr, *sp_gate_b = nullptr, *sp_pred_gate = nullptr,
                 *sp_prev = nullptr;
@@ -343,7 +344,6 @@ void load(Model& m) {
         const int n_phys = h.n_layer - (h.loop_end - h.loop_start) * (h.loop_count - 1);
         if (h.loop_end > n_phys) die("loop.end past the physical layers");
         if (m.o.tp || m.o.gpus.size() != 1) die("SenseNova-Loop runs on one card (--gpu N)");
-        if (!m.o.dflash.empty()) die("--dflash is not supported with SenseNova-Loop");
     }
     {
         int64_t id = gguf_find_key(m.gguf, K("rope.scaling.type").c_str());
@@ -633,6 +633,11 @@ void load_drafter(Model& m) {
         return x;
     };
     d->fc = P("fc.weight");
+    {   // SenseNova-Loop's DFlash2 reads the target layers and then the final post-norm hidden ("final_postnorm")
+        const int64_t nt = (int64_t) d->target_layers.size(), w = d->fc->ne[0];
+        if (w == (nt + 1) * d->n_embd) d->final_norm = true;
+        else if (w != nt * d->n_embd) die("the drafter's fc width matches neither its target layers nor them + the final norm");
+    }
     d->enc_norm = P("enc.output_norm.weight");
     d->out_norm = P("output_norm.weight");
     if (d->dspine) {
@@ -707,6 +712,7 @@ void load_drafter(Model& m) {
                          "layers", d->dspine ? "DSpine" : "DFlash2", d->n_layer, d->block, m.o.dflash_n, d->top_k,
                  d->dspine ? "lattice" : "selector", d->swa, d->ring);
     for (int t : d->target_layers) std::fprintf(stderr, " %d", t);
+    if (d->final_norm) std::fprintf(stderr, " + the final norm");
     std::fprintf(stderr, "; %.2f GiB\n", total / 1073741824.0);
     m.df = std::move(d);
     if (!m.o.spec_auto) m.o.mtp = 0;   // one drafter at a time, unless --spec auto keeps both
@@ -1000,11 +1006,14 @@ Built& trunk_graph(Model& m, Graphs& G, int n, int64_t pos0, int m_rows, int ksn
         x = ggml_add(c, cur, x);
         x = ggml_add(c, ffn(c, l, rms(c, x, l.post_norm, h.eps)), x);
     }
+    ggml_tensor* hn = rms(c, x, m.out_norm, h.eps);   // h_nextn: what the MTP block reads
     if (inject) {
-        // the drafter's context: fc(the five layers' inputs) -> norm -> each layer's K / V at the rows' ring cells
+        // the drafter's context: fc(the target layers' inputs [, h_nextn]) -> norm -> each layer's K / V at the rows'
+        // ring cells
         const Drafter& d = *m.df;
         ggml_tensor* f = feats[0];
         for (size_t k = 1; k < feats.size(); ++k) f = ggml_concat(c, f, feats[k], 0);
+        if (d.final_norm) f = ggml_concat(c, f, hn, 0);
         ggml_tensor* g = rms(c, ggml_mul_mat(c, d.fc, f), d.enc_norm, d.eps);
         int sec[4] = {d.head_dim / 2, 0, 0, 0};
         for (const DfLayer& dl : d.L) {
@@ -1017,7 +1026,6 @@ Built& trunk_graph(Model& m, Graphs& G, int n, int64_t pos0, int m_rows, int ksn
             ggml_build_forward_expand(gf, ggml_set_rows(c, dl.v_ring, v, in.ring_idx));
         }
     }
-    ggml_tensor* hn = rms(c, x, m.out_norm, h.eps);   // h_nextn: what the MTP block reads
     if (m.o.mtp > 0 && !want_ppl)
         ggml_build_forward_expand(gf, ggml_cpy(c, hn, ggml_view_2d(c, m.hbuf, h.n_embd, n, m.hbuf->nb[1], 0)));
     ggml_tensor* rows = m_rows == n ? hn : ggml_get_rows(c, hn, in.out_ids);
