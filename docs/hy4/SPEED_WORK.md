@@ -692,3 +692,12 @@ written and measured on the `hy4` profile through the server, five requests at t
 
 The gains are on the answers that repeat themselves (all four flagged as looping by the tail check), the summary
 is ~10% slower, and the edits, where a copy should help, show nothing measurable. The code was removed.
+
+### OpenMP threads sleeping instead of spinning: not kept (2026-11-26)
+
+Idea from project-maya issue #1167 (its tensor-parallel sums' spinning helpers took cores from the CPU experts:
+24.8 -> 38.2 tok/s there). Here the CPU experts run in ggml's OpenMP pool, whose threads spin between graphs.
+`OMP_WAIT_POLICY=passive` against the default, the chat configuration at 256K, 16K real-text prompt, 400 tokens at
+temperature 0, alternated, 2 runs each: the same 228 rounds and the same text in all four; decode 80.4 / 81.8 ms a round
+default against 83.3 / 83.4 passive (21.83 / 21.46 against 21.06 / 21.03 tok/s), prompt 418.5 / 444.8 against 445.2 /
+445.2 tok/s. Sleeping costs the wake-up each graph; the default stays.
