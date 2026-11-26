@@ -16,6 +16,7 @@ IQ3_S ones, `qwen27-local-256k`, the DSpine ones, `hy4-local-fast`, `inkling-dsp
 | Qwen3.8-Flash-Next | `qwen` | `local/qwen-local.json`, UD-Q4_K_XL, images on | 2 | 256K |
 | Qwen3.8-27B | `qwen27` | `local/qwen27-local.json` (`-vision`), IQ3_S, MTP 3 | 1 | 192K |
 | | `qwen27-q8` | `local/qwen27-q8-local.json`, Q8_0, `--tp` | 2 | 256K |
+| SenseNova-Loop-9B | `sensenova-loop-9b` | `local/sensenova-local.json`, Q8_0, MTP 3 | 1 | 256K |
 | Hy4-flash | `hy4` | `local/hy4-local.json` (`-vision`) | 2 | 256K |
 | Inkling 2 Mini | `inkling` | `local/inkling-local.json` (`-vision`) | 1 | 256K |
 | | `inkling-1m` | `local/inkling-1m-local.json`, DSpark, K/V on card 1 | 2 | 1M |
@@ -769,6 +770,49 @@ shard holding the PLE table.
 
 Published against BF16, not measured here: mean KLD 0.047, top-1 92.3% (Unsloth's Dynamic 3.1 release). Speed and
 KL against the IQ3_S on this machine: not measured yet.
+
+## SenseNova-Loop-9B (Q8_0, `--qwen35`, 2026-11-26)
+
+SenseNova's looped dense model (GGUF architecture `sensenova_loop`): a Qwen3.5 body of 32 layers whose layers 4-27
+run twice (56 layer runs a token), each run with its own KV rows or DeltaNet state, two residual streams mixed by
+Sinkhorn routers (mHC) inside the loop, YaRN x2 RoPE; the architecture and how the GGUF lays it out in
+docs/sensenova/NOTES.md. It runs on the dense path `src/qwen35`, which switches to it from the GGUF's architecture
+(other GGUFs are read as before): repeated runs share the weight tensors and get their own state; the routers'
+coefficients (sigmoids and the 20 Sinkhorn iterations, not converged, so not replaced by the closed form) are one
+ggml op, `ggml_loop_mhc_coef` (`tools/v41/ggml/loop-mhc.patch`), the mixing DeepSeek's `hc_pre` / `hc_post` ops.
+One card; no `--tp`, `--dflash` or images yet. Files: `local/fetch.sh sensenova` (the official
+`sensenova/SenseNova-Loop-9B-GGUF` Q8_0, 9.8 GB, and its tokenizer exported to `models/sensenova-loop-9b/tokenizer`);
+`./almond -m sensenova-loop-9b` or the router entry `local/sensenova-local.json` (card 0, 256K, q8_0 KV, MTP 3).
+The server shim is Qwen's: its thinking levels low / medium are passed to a template that only knows thinking on or
+off.
+
+Against the reference (2026-11-26): the checkpoint's own `modeling_sensenova_loop.py` under transformers 5.18 in
+FP32 on the CPU, 768 tokens (256 each of Python code, English prose, an agent turn with tool calls in the chat
+format) read in one pass; the engine read the same ids with `--ppl FILE --ppl-ctx 768 --dump-logits` (two windows of
+512 + 256, so the second continues from the cached state), f16 KV, card 0. KL(ref || engine) per token:
+
+| GGUF | | code | prose | agent | all 768 |
+| --- | --- | --- | --- | --- | --- |
+| Q8_0 | top-1 agreement | 99.6% | 95.3% | 96.9% | 97.3% |
+| | mean KL / p99 / max | 0.0004 / 0.006 / 0.017 | 0.0024 / 0.016 / 0.035 | 0.0081 / 0.131 / 0.338 | 0.0036 / 0.076 / 0.338 |
+| Q4_K_M | top-1 agreement | 97.7% | 84.8% | 83.6% | 88.7% |
+| | mean KL / p99 / max | 0.013 / 0.18 / 0.22 | 0.101 / 0.50 / 0.63 | 0.195 / 1.96 / 6.57 | 0.103 / 1.35 / 6.57 |
+
+Perplexity of the 767 next tokens: reference 5.016, Q8_0 5.006, Q4_K_M 4.990 (a single short text: the KL is the
+measure). The Q4_K_M loses ~30x the Q8_0's KL, so the configuration is the Q8_0 and the Q4_K_M has none.
+
+Speed, card 0, q8_0 KV, `GGML_CUDA_FA_Q8_SPLITK=1`, `--bench 256 --prompt-ids` the first 512 of those ids, greedy
+(second of two runs):
+
+| GGUF | prompt 512 | decode, no MTP | decode, MTP 3 (drafts accepted) |
+| --- | --- | --- | --- |
+| Q8_0 (32K context) | 1605 tok/s | 40.4 tok/s | 72.7 tok/s (156/297) |
+| Q4_K_M (32K context) | 1475 tok/s | 50.4 tok/s | 86.9 tok/s (163/276) |
+| Q8_0, 256K context (the configuration) | 1566 tok/s | | 63.4 tok/s, 128 tokens (74/168) |
+
+A 32,768-token prompt (the 768 ids repeated) read at 1401 tok/s (Q8_0, 256K context). Weights 9.12 GiB, KV and state
+at 256K 8.65 GiB. Through the server (`serve_qwen.py` with this configuration) a short coding question answered
+with thinking and a correct function.
 
 ## Hy4-flash (IQ2-AH, AngelSlim, `--hy4`, 2026-11-18)
 

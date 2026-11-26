@@ -315,7 +315,7 @@ void load(Model& m) {
     h.eps = kv_f32(m.gguf, K("attention.layer_norm_rms_epsilon"));
     h.rope_base = kv_f32(m.gguf, K("rope.freq_base"));
     {
-        int64_t id = gguf_find_key(m.gguf, K("rope.dimension_sections"));
+        int64_t id = gguf_find_key(m.gguf, K("rope.dimension_sections").c_str());
         if (id < 0) die("the GGUF has no " + K("rope.dimension_sections"));
         const int n = (int) gguf_get_arr_n(m.gguf, id);
         const int32_t* s = (const int32_t*) gguf_get_arr_data(m.gguf, id);
