@@ -624,3 +624,17 @@ layers take it worse, not better (`ARMS=... ab-skip-miss.sh`, `local/sweep-skip-
 
 0.15 on every layer read 25.4 against 18.9 tok/s in this session and 22.6 against 21.2 in the one above: the forced
 one-shot runs vary too much between sessions to settle it; a server A/B was not run. Both stay off.
+
+### Late shared expert (measured, not kept)
+
+The shared expert's four matmuls were moved out of the cached attention graph into their own graph, launched async
+after the router's readback, so card 0 would run it while the CPU experts are computed (`ALMOND_SHEXP_LATE=1`).
+Forced-ids A/B (`local/bench-v41/ab-dense-levers.sh`, chat configuration, power-tune on, 3 rounds, 2026-11-26):
+
+| prompt | base tok/s | late tok/s |
+|---|---|---|
+| 17K context, 128 tokens | 18.72 / 15.64 / 16.37 | 19.29 / 17.74 / 14.52 |
+| Promessi Sposi, 300 tokens | 17.45 / 14.94 / 15.18 | 15.88 / 15.35 / 14.52 |
+
+Same text (diff counts 1 and 4-6 in both arms). Means 16.9 against 17.2 and 15.9 against 15.3: no gain beyond the
+run-to-run spread, which follows the NVMe reads (file time 0.8 -> 1.8 s across rounds). The code was removed.
