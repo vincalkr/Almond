@@ -12522,3 +12522,46 @@ void ggml_compute_forward_dsv41_hc_mixes(const ggml_compute_params * params, ggm
         y[i] = post ? s * 2.0f : s + eps;
     }
 }
+
+// ggml_compute_forward_loop_mhc_coef (Almond): SenseNova-Loop's mHC router coefficients, see ggml.h
+
+void ggml_compute_forward_loop_mhc_coef(const ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+    const int64_t ne0 = src0->ne[0];
+    const int S = ne0 == 8 ? 2 : 4;
+    const int n_iter = ggml_get_op_params_i32(dst, 0);
+    const int64_t nr = ggml_nrows(src0);
+    const int64_t dr = (nr + params->nth - 1) / params->nth;
+    const int64_t r0 = dr * params->ith, r1 = MIN(r0 + dr, nr);
+    for (int64_t r = r0; r < r1; ++r) {
+        const float * l = (const float *) src0->data + r * ne0;
+        float * o = (float *) dst->data + r * ne0;
+        for (int s = 0; s < S; ++s) {
+            o[s]     = 1.0f / (1.0f + expf(-l[s]));
+            o[S + s] = 2.0f / (1.0f + expf(-l[S + s]));
+        }
+        float m[16];
+        for (int i = 0; i < S * S; ++i) m[i] = l[2 * S + i];   // m[i*S + j]: row i (dst), column j (src)
+        for (int it = 0; it < n_iter; ++it) {
+            for (int i = 0; i < S; ++i) {
+                float mx = -INFINITY;
+                for (int j = 0; j < S; ++j) mx = fmaxf(mx, m[i * S + j]);
+                float sum = 0.0f;
+                for (int j = 0; j < S; ++j) sum += expf(m[i * S + j] - mx);
+                const float lse = mx + logf(sum);
+                for (int j = 0; j < S; ++j) m[i * S + j] -= lse;
+            }
+            for (int j = 0; j < S; ++j) {
+                float mx = -INFINITY;
+                for (int i = 0; i < S; ++i) mx = fmaxf(mx, m[i * S + j]);
+                float sum = 0.0f;
+                for (int i = 0; i < S; ++i) sum += expf(m[i * S + j] - mx);
+                const float lse = mx + logf(sum);
+                for (int i = 0; i < S; ++i) m[i * S + j] -= lse;
+            }
+        }
+        for (int i = 0; i < S; ++i)
+            for (int j = 0; j < S; ++j) o[2 * S + i + S * j] = expf(m[i * S + j]);
+    }
+}

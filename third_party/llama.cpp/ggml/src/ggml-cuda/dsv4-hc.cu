@@ -558,3 +558,70 @@ void ggml_cuda_op_dsv41_hc_mixes(ggml_backend_cuda_context & ctx, ggml_tensor * 
                                                    (const float *) base->data, (float *) dst->data, hc, nt, eps);
     CUDA_CHECK(cudaGetLastError());
 }
+
+
+// ---- Almond: GGML_OP_LOOP_MHC_COEF - SenseNova-Loop's mHC router coefficients, one thread per token (see ggml.h)
+template <int S>
+static __global__ void loop_mhc_coef_f32(const float * __restrict__ x, float * __restrict__ y, const int64_t nr,
+                                         const int n_iter) {
+    constexpr int NE = 2 * S + S * S;
+    const int64_t r = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= nr) {
+        return;
+    }
+    const float * l = x + r * NE;
+    float * o = y + r * NE;
+#pragma unroll
+    for (int s = 0; s < S; ++s) {
+        o[s]     = 1.0f / (1.0f + expf(-l[s]));
+        o[S + s] = 2.0f / (1.0f + expf(-l[S + s]));
+    }
+    float m[S * S];
+#pragma unroll
+    for (int i = 0; i < S * S; ++i) m[i] = l[2 * S + i];
+    for (int it = 0; it < n_iter; ++it) {
+#pragma unroll
+        for (int i = 0; i < S; ++i) {
+            float mx = -INFINITY;
+#pragma unroll
+            for (int j = 0; j < S; ++j) mx = fmaxf(mx, m[i * S + j]);
+            float sum = 0.0f;
+#pragma unroll
+            for (int j = 0; j < S; ++j) sum += expf(m[i * S + j] - mx);
+            const float lse = mx + logf(sum);
+#pragma unroll
+            for (int j = 0; j < S; ++j) m[i * S + j] -= lse;
+        }
+#pragma unroll
+        for (int j = 0; j < S; ++j) {
+            float mx = -INFINITY;
+#pragma unroll
+            for (int i = 0; i < S; ++i) mx = fmaxf(mx, m[i * S + j]);
+            float sum = 0.0f;
+#pragma unroll
+            for (int i = 0; i < S; ++i) sum += expf(m[i * S + j] - mx);
+            const float lse = mx + logf(sum);
+#pragma unroll
+            for (int i = 0; i < S; ++i) m[i * S + j] -= lse;
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < S; ++i)
+#pragma unroll
+        for (int j = 0; j < S; ++j) o[2 * S + i + S * j] = expf(m[i * S + j]);
+}
+
+void ggml_cuda_op_loop_mhc_coef(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 && ggml_is_contiguous(src0));
+    const int64_t nr = ggml_nrows(src0);
+    const int n_iter = ggml_get_op_params_i32(dst, 0);
+    const int64_t blocks = (nr + 63) / 64;
+    cudaStream_t stream = ctx.stream();
+    if (src0->ne[0] == 8) {
+        loop_mhc_coef_f32<2><<<blocks, 64, 0, stream>>>((const float *) src0->data, (float *) dst->data, nr, n_iter);
+    } else {
+        loop_mhc_coef_f32<4><<<blocks, 64, 0, stream>>>((const float *) src0->data, (float *) dst->data, nr, n_iter);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}

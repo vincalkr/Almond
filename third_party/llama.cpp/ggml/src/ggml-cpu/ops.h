@@ -109,6 +109,7 @@ void ggml_compute_forward_dsv4_hc_comb(const struct ggml_compute_params * params
 void ggml_compute_forward_dsv4_hc_pre(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_dsv4_hc_post(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_dsv41_fake_quant(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_loop_mhc_coef(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_dsv41_hc_mixes(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_map_custom1(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_map_custom2(const struct ggml_compute_params * params, struct ggml_tensor * dst);

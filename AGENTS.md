@@ -31,6 +31,11 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
 - GLM: `local/glm-local.json` (`local/glm-local-vision.json` with its encoder in `models/glm53-vision`).
 - The quantization of a model is chosen in `local/fetch.sh` (separate items, each with its configuration and router
   entry); the router leaves out an entry whose files are not downloaded.
+- SenseNova-Loop-9B (looped dense, `sensenova_loop` GGUF, on `src/qwen35` from the GGUF's architecture):
+  `local/sensenova-local.json` (`./almond serve --model sensenova`, `./almond -m sensenova`; Q8_0, one card, 256K,
+  MTP 3 + DFlash2; `local/fetch.sh sensenova`), docs/sensenova/NOTES.md and
+  docs/MODELS.md; with SenseNova's DFlash2 drafter beside MTP 3 under `--spec auto` (code 74.5 -> 89.9 tok/s
+  greedy, prose level).
 - Qwen3.8-27B (dense): `local/qwen27-local.json` (`./almond serve --model qwen27`, `src/qwen35`, `--qwen35`: one
   card, 192K, q8_0 KV, MTP 3; `-vision` with its encoder); `local/qwen27-q8-local.json` the Q8_0 on two cards, 256K (with `--tp`, tensor parallel, docs/MODELS.md) (`./almond -m qwen27-q8`). Files in `models/qwen38-27b` (docs/MODELS.md, "Qwen3.8-27B").
 - Hy4-flash: `local/hy4-local.json` (`-vision` with its encoder and `build-vision-hy4`) (`./almond serve --model hy4`, `src/hy4`, `--hy4`: cards 0 and 1, the experts that

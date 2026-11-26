@@ -66,6 +66,24 @@ struct Hp {
     int sections[4] = {0, 0, 0, 0};
     float eps = 1e-6f, rope_base = 1e7f;
     int n_vocab = 0, n_ctx_train = 0;
+    // SenseNova-Loop (GGUF architecture `sensenova_loop`, docs/sensenova/NOTES.md): physical layers [loop_start,
+    // loop_end) run loop_count times in a row; n_layer counts executions, each with its own KV / DeltaNet state.
+    // Inside physical [mhc_start, mhc_end) the residual is mhc_streams streams mixed by Sinkhorn routers.
+    bool loop = false;
+    int loop_start = 0, loop_end = 0, loop_count = 1, mhc_start = 0, mhc_end = 0, mhc_streams = 0, mhc_iter = 0;
+    float yarn_factor = 0.0f;   // > 0: YaRN with this factor over n_ctx_orig
+    int n_ctx_orig = 0;
+    int phys(int e) const {     // execution -> physical layer
+        if (!loop || e < loop_start) return e;
+        const int span = loop_end - loop_start, rep = loop_start + span * loop_count;
+        if (e < rep) return loop_start + (e - loop_start) % span;
+        return e - span * (loop_count - 1);
+    }
+    int first_exec(int e) const {   // the execution whose tensors (and GGUF name blk.N) execution e uses
+        const int p = phys(e);
+        return (!loop || p < loop_end) ? p : p + (loop_end - loop_start) * (loop_count - 1);
+    }
+    bool mhc(int e) const { return mhc_streams > 0 && e < n_layer && phys(e) >= mhc_start && phys(e) < mhc_end; }
     bool recurrent(int il) const { return il < n_layer && (il + 1) % full_every != 0; }
     int conv_ch() const { return ssm_inner + 2 * ssm_groups * ssm_state; }
     int64_t ssm_d() const { return (int64_t) ssm_state * ssm_state * ssm_vheads; }
@@ -78,6 +96,8 @@ struct Layer {
     ggml_tensor *wqkv = nullptr, *wgate = nullptr, *conv1d = nullptr, *dt = nullptr, *ssm_a = nullptr, *beta = nullptr,
                 *alpha = nullptr, *ssm_norm = nullptr, *ssm_out = nullptr;
     ggml_tensor *ffn_gate = nullptr, *ffn_up = nullptr, *ffn_down = nullptr;
+    ggml_tensor *wqkvz = nullptr, *wba = nullptr;   // sensenova_loop: qkv + z, beta + alpha in one matrix each
+    ggml_tensor *hc_attn_w = nullptr, *hc_attn_b = nullptr, *hc_ffn_w = nullptr, *hc_ffn_b = nullptr;   // mHC routers
     // nextn
     ggml_tensor *eh_proj = nullptr, *enorm = nullptr, *hnorm = nullptr, *head_norm = nullptr;
     // state
@@ -105,6 +125,7 @@ struct Opts {
     int bench = 0;
     std::string ppl_file;
     int ppl_ctx = 2048;
+    std::string dump_logits;        // --ppl with --dump-logits FILE: every position's logits as raw f32 rows
     std::string prompt_ids;         // --bench: the prompt's ids (comma list), default a fixed short one
     std::vector<int32_t> eos = {248044, 248046};
 };
@@ -134,6 +155,7 @@ struct Drafter {
     int ring = 4096;          // the KV ring's cells, by position: at least the window + a block + a verify window
     bool dspine = false;      // DSpine (code bridge, causal block) rather than DFlash2 (convolutions, selector)
     bool causal = false;
+    bool final_norm = false;  // the fc also reads the trunk's final normed hidden (h_nextn) after the layers
     int sp_code = 0, sp_rank = 0;
     ggml_tensor *sp_codebook = nullptr, *sp_gate = nullptr, *sp_gate_b = nullptr, *sp_pred_gate = nullptr,
                 *sp_prev = nullptr;
@@ -269,33 +291,67 @@ void load(Model& m) {
     {
         int64_t id = gguf_find_key(m.gguf, "general.architecture");
         std::string arch = id >= 0 ? gguf_get_val_str(m.gguf, id) : "";
-        if (arch != "qwen35") die(m.o.model + " is '" + arch + "', not qwen35 (a dense Qwen3.5/3.8 model)");
+        if (arch == "sensenova_loop") m.hp.loop = true;
+        else if (arch != "qwen35") die(m.o.model + " is '" + arch + "', not qwen35 (a dense Qwen3.5/3.8 model)");
     }
     Hp& h = m.hp;
-    const int blocks = (int) kv_u32(m.gguf, "qwen35.block_count");
-    h.n_nextn = (int) kv_u32(m.gguf, "qwen35.nextn_predict_layers", false, 0);
+    const std::string A = h.loop ? "sensenova_loop." : "qwen35.";
+    auto K = [&](const char* k) { return A + k; };
+    const int blocks = (int) kv_u32(m.gguf, K("block_count"));
+    h.n_nextn = (int) kv_u32(m.gguf, K("nextn_predict_layers"), false, 0);
     h.n_layer = blocks - h.n_nextn;
-    h.n_embd = (int) kv_u32(m.gguf, "qwen35.embedding_length");
-    h.n_ff = (int) kv_u32(m.gguf, "qwen35.feed_forward_length");
-    h.n_head = (int) kv_u32(m.gguf, "qwen35.attention.head_count");
-    h.n_head_kv = (int) kv_u32(m.gguf, "qwen35.attention.head_count_kv");
-    h.head_dim = (int) kv_u32(m.gguf, "qwen35.attention.key_length");
-    h.n_rot = (int) kv_u32(m.gguf, "qwen35.rope.dimension_count");
-    h.ssm_conv = (int) kv_u32(m.gguf, "qwen35.ssm.conv_kernel");
-    h.ssm_state = (int) kv_u32(m.gguf, "qwen35.ssm.state_size");
-    h.ssm_groups = (int) kv_u32(m.gguf, "qwen35.ssm.group_count");
-    h.ssm_vheads = (int) kv_u32(m.gguf, "qwen35.ssm.time_step_rank");
-    h.ssm_inner = (int) kv_u32(m.gguf, "qwen35.ssm.inner_size");
-    h.full_every = (int) kv_u32(m.gguf, "qwen35.full_attention_interval", false, 4);
-    h.n_ctx_train = (int) kv_u32(m.gguf, "qwen35.context_length");
-    h.eps = kv_f32(m.gguf, "qwen35.attention.layer_norm_rms_epsilon");
-    h.rope_base = kv_f32(m.gguf, "qwen35.rope.freq_base");
+    h.n_embd = (int) kv_u32(m.gguf, K("embedding_length"));
+    h.n_ff = (int) kv_u32(m.gguf, K("feed_forward_length"));
+    h.n_head = (int) kv_u32(m.gguf, K("attention.head_count"));
+    h.n_head_kv = (int) kv_u32(m.gguf, K("attention.head_count_kv"));
+    h.head_dim = (int) kv_u32(m.gguf, K("attention.key_length"));
+    h.n_rot = (int) kv_u32(m.gguf, K("rope.dimension_count"));
+    h.ssm_conv = (int) kv_u32(m.gguf, K("ssm.conv_kernel"));
+    h.ssm_state = (int) kv_u32(m.gguf, K("ssm.state_size"));
+    h.ssm_groups = (int) kv_u32(m.gguf, K("ssm.group_count"));
+    h.ssm_vheads = (int) kv_u32(m.gguf, K("ssm.time_step_rank"));
+    h.ssm_inner = (int) kv_u32(m.gguf, K("ssm.inner_size"));
+    h.full_every = (int) kv_u32(m.gguf, K("full_attention_interval"), false, 4);
+    h.n_ctx_train = (int) kv_u32(m.gguf, K("context_length"));
+    h.eps = kv_f32(m.gguf, K("attention.layer_norm_rms_epsilon"));
+    h.rope_base = kv_f32(m.gguf, K("rope.freq_base"));
     {
-        int64_t id = gguf_find_key(m.gguf, "qwen35.rope.dimension_sections");
-        if (id < 0) die("the GGUF has no qwen35.rope.dimension_sections");
+        int64_t id = gguf_find_key(m.gguf, K("rope.dimension_sections").c_str());
+        if (id < 0) die("the GGUF has no " + K("rope.dimension_sections"));
         const int n = (int) gguf_get_arr_n(m.gguf, id);
         const int32_t* s = (const int32_t*) gguf_get_arr_data(m.gguf, id);
         for (int i = 0; i < 4 && i < n; ++i) h.sections[i] = s[i];
+    }
+    if (h.loop) {
+        auto b = [&](const char* k) {
+            int64_t id = gguf_find_key(m.gguf, K(k).c_str());
+            if (id < 0) die("the GGUF has no " + K(k));
+            return gguf_get_val_bool(m.gguf, id);
+        };
+        h.loop_start = (int) kv_u32(m.gguf, K("loop.start"));
+        h.loop_end = (int) kv_u32(m.gguf, K("loop.end"));
+        h.loop_count = (int) kv_u32(m.gguf, K("loop.count"));
+        h.mhc_start = (int) kv_u32(m.gguf, K("mhc.start"));
+        h.mhc_end = (int) kv_u32(m.gguf, K("mhc.end"));
+        h.mhc_streams = (int) kv_u32(m.gguf, K("mhc.streams"));
+        h.mhc_iter = (int) kv_u32(m.gguf, K("mhc.iterations"));
+        if (b("mhc.fixed_identity")) die("mHC with fixed_identity is not supported here");
+        if (kv_f32(m.gguf, K("mhc.pre_scale")) != 1.0f) die("mHC pre_scale other than 1 is not supported here");
+        if (h.mhc_streams != 2) die("mHC with " + std::to_string(h.mhc_streams) + " streams (this path does 2)");
+        if (!(h.loop_start < h.loop_end && h.loop_count >= 1 && h.mhc_start >= h.loop_start && h.mhc_end <= h.loop_end &&
+              h.mhc_start < h.mhc_end && (h.loop_end - h.loop_start) % h.full_every == 0 && h.loop_start % h.full_every == 0))
+            die("unexpected loop / mHC ranges");
+        const int n_phys = h.n_layer - (h.loop_end - h.loop_start) * (h.loop_count - 1);
+        if (h.loop_end > n_phys) die("loop.end past the physical layers");
+        if (m.o.tp || m.o.gpus.size() != 1) die("SenseNova-Loop runs on one card (--gpu N)");
+    }
+    {
+        int64_t id = gguf_find_key(m.gguf, K("rope.scaling.type").c_str());
+        if (id >= 0 && std::string(gguf_get_val_str(m.gguf, id)) == "yarn") {
+            h.yarn_factor = kv_f32(m.gguf, K("rope.scaling.factor"));
+            h.n_ctx_orig = (int) kv_u32(m.gguf, K("rope.scaling.original_context_length"));
+        } else if (id >= 0 && std::string(gguf_get_val_str(m.gguf, id)) != "none")
+            die("rope scaling '" + std::string(gguf_get_val_str(m.gguf, id)) + "' is not supported here");
     }
     if (h.ssm_conv != 4) die("conv kernel " + std::to_string(h.ssm_conv) + " (this path is written for 4)");
     if (h.ssm_inner != h.ssm_state * h.ssm_vheads) die("ssm.inner_size is not state_size x time_step_rank");
@@ -375,6 +431,12 @@ void load(Model& m) {
     for (int il = 0; il < (int) m.L.size(); ++il) {
         Layer& l = m.L[il];
         const int d = l.dev;
+        if (il < h.n_layer && h.first_exec(il) != il) {   // a repeated loop execution: the same weights, own state
+            const int f = h.first_exec(il);
+            if (m.L[f].dev != d) die("a looped layer's executions on two cards");
+            l = m.L[f];
+            continue;
+        }
         auto P = [&](const char* suf, bool req = true) {
             return place("blk." + std::to_string(il) + "." + suf, d, req);
         };
@@ -388,13 +450,18 @@ void load(Model& m) {
             l.q_norm = P("attn_q_norm.weight");
             l.k_norm = P("attn_k_norm.weight");
         } else {
+            if (h.loop) {
+                l.wqkvz = P("attn_qkv_gate.weight");
+                l.wba = P("ssm_beta_alpha.weight");
+            } else {
             l.wqkv = P("attn_qkv.weight");
             l.wgate = P("attn_gate.weight");
+            l.beta = P("ssm_beta.weight");
+            l.alpha = P("ssm_alpha.weight");
+            }
             l.conv1d = P("ssm_conv1d.weight");
             l.dt = P("ssm_dt.bias");
             l.ssm_a = P("ssm_a");
-            l.beta = P("ssm_beta.weight");
-            l.alpha = P("ssm_alpha.weight");
             l.ssm_norm = P("ssm_norm.weight");
             l.ssm_out = P("ssm_out.weight");
         }
@@ -406,6 +473,12 @@ void load(Model& m) {
         l.ffn_gate = P("ffn_gate.weight");
         l.ffn_up = P("ffn_up.weight");
         l.ffn_down = P("ffn_down.weight");
+        if (h.mhc(il)) {
+            l.hc_attn_w = P("hc_attn_fn.weight");
+            l.hc_attn_b = P("hc_attn_fn.bias");
+            l.hc_ffn_w = P("hc_ffn_fn.weight");
+            l.hc_ffn_b = P("hc_ffn_fn.bias");
+        }
         lctx = nullptr;
         if (il >= h.n_layer) {
             l.eh_proj = P("nextn.eh_proj.weight");
@@ -560,6 +633,11 @@ void load_drafter(Model& m) {
         return x;
     };
     d->fc = P("fc.weight");
+    {   // SenseNova-Loop's DFlash2 reads the target layers and then the final post-norm hidden ("final_postnorm")
+        const int64_t nt = (int64_t) d->target_layers.size(), w = d->fc->ne[0];
+        if (w == (nt + 1) * d->n_embd) d->final_norm = true;
+        else if (w != nt * d->n_embd) die("the drafter's fc width matches neither its target layers nor them + the final norm");
+    }
     d->enc_norm = P("enc.output_norm.weight");
     d->out_norm = P("output_norm.weight");
     if (d->dspine) {
@@ -634,6 +712,7 @@ void load_drafter(Model& m) {
                          "layers", d->dspine ? "DSpine" : "DFlash2", d->n_layer, d->block, m.o.dflash_n, d->top_k,
                  d->dspine ? "lattice" : "selector", d->swa, d->ring);
     for (int t : d->target_layers) std::fprintf(stderr, " %d", t);
+    if (d->final_norm) std::fprintf(stderr, " + the final norm");
     std::fprintf(stderr, "; %.2f GiB\n", total / 1073741824.0);
     m.df = std::move(d);
     if (!m.o.spec_auto) m.o.mtp = 0;   // one drafter at a time, unless --spec auto keeps both
@@ -670,10 +749,15 @@ ggml_tensor* attn_block(Model& m, ggml_context* c, ggml_cgraph* gf, Layer& l, gg
     k = rms(c, k, l.k_norm, h.eps);
     ggml_tensor* v = ggml_reshape_3d(c, ggml_mul_mat(c, l.wv, x), D, h.n_head_kv, n);
     int sec[4] = {h.sections[0], h.sections[1], h.sections[2], h.sections[3]};
-    q = ggml_rope_multi(c, q, in.pos, nullptr, h.n_rot, sec, GGML_ROPE_TYPE_IMROPE, h.n_ctx_train, h.rope_base, 1.0f,
-                        0.0f, 1.0f, 32.0f, 1.0f);
-    k = ggml_rope_multi(c, k, in.pos, nullptr, h.n_rot, sec, GGML_ROPE_TYPE_IMROPE, h.n_ctx_train, h.rope_base, 1.0f,
-                        0.0f, 1.0f, 32.0f, 1.0f);
+    // YaRN (sensenova_loop): freq_scale 1/factor, ext_factor 1 over n_ctx_orig; ggml scales the rotated dims by
+    // 1 + 0.1 ln(factor) itself, as HF's attention_factor does
+    const bool yarn = h.yarn_factor > 0.0f;
+    const int n_orig = yarn ? h.n_ctx_orig : h.n_ctx_train;
+    const float fs = yarn ? 1.0f / h.yarn_factor : 1.0f, ext = yarn ? 1.0f : 0.0f;
+    q = ggml_rope_multi(c, q, in.pos, nullptr, h.n_rot, sec, GGML_ROPE_TYPE_IMROPE, n_orig, h.rope_base, fs,
+                        ext, 1.0f, 32.0f, 1.0f);
+    k = ggml_rope_multi(c, k, in.pos, nullptr, h.n_rot, sec, GGML_ROPE_TYPE_IMROPE, n_orig, h.rope_base, fs,
+                        ext, 1.0f, 32.0f, 1.0f);
     ggml_build_forward_expand(gf, ggml_set_rows(c, l.k_cache, ggml_reshape_2d(c, k, h.kv_dim(), n), in.kv_idx));
     ggml_build_forward_expand(gf, ggml_set_rows(c, l.v_cache, ggml_reshape_2d(c, v, h.kv_dim(), n), in.kv_idx));
     const size_t row = ggml_row_size(m.o.kv_type, h.kv_dim()), hrow = ggml_row_size(m.o.kv_type, D);
@@ -701,11 +785,21 @@ ggml_tensor* gdn_block(Model& m, ggml_context* c, ggml_cgraph* gf, Layer& l, ggm
     const Hp& h = m.hp;
     const int S = h.ssm_state, Hk = h.ssm_groups, Hv = h.ssm_vheads, C = h.conv_ch();
     const int64_t Dst = h.ssm_d();
-    ggml_tensor* qkv = ggml_mul_mat(c, l.wqkv, x);                  // [C, n]
-    ggml_tensor* z = ggml_mul_mat(c, l.wgate, x);                   // [inner, n]
-    ggml_tensor* beta = ggml_sigmoid(c, ggml_mul_mat(c, l.beta, x));
+    ggml_tensor *qkv, *z, *beta, *g;
+    if (l.wqkvz) {   // sensenova_loop: [qkv; z] and [beta; alpha] in one matrix each
+        ggml_tensor* qz = ggml_mul_mat(c, l.wqkvz, x);                          // [C + inner, n]
+        qkv = ggml_view_2d(c, qz, C, n, qz->nb[1], 0);
+        z = ggml_cont(c, ggml_view_2d(c, qz, h.ssm_inner, n, qz->nb[1], (size_t) C * ggml_element_size(qz)));
+        ggml_tensor* ba = ggml_mul_mat(c, l.wba, x);                            // [2 Hv, n]
+        beta = ggml_sigmoid(c, ggml_view_2d(c, ba, Hv, n, ba->nb[1], 0));
+        g = ggml_cont(c, ggml_view_2d(c, ba, Hv, n, ba->nb[1], (size_t) Hv * ggml_element_size(ba)));
+    } else {
+    qkv = ggml_mul_mat(c, l.wqkv, x);                  // [C, n]
+    z = ggml_mul_mat(c, l.wgate, x);                   // [inner, n]
+    beta = ggml_sigmoid(c, ggml_mul_mat(c, l.beta, x));
+    g = ggml_mul_mat(c, l.alpha, x);                   // [Hv, n]
+    }
     beta = ggml_reshape_4d(c, beta, 1, Hv, n, 1);
-    ggml_tensor* g = ggml_mul_mat(c, l.alpha, x);                   // [Hv, n]
     g = ggml_mul(c, ggml_softplus(c, ggml_add(c, g, l.dt)), l.ssm_a);
     g = ggml_reshape_4d(c, g, 1, Hv, n, 1);
 
@@ -880,16 +974,46 @@ Built& trunk_graph(Model& m, Graphs& G, int n, int64_t pos0, int m_rows, int ksn
         Layer& l = m.L[il];
         for (size_t k = 0; k < feats.size(); ++k)
             if (m.df->target_layers[k] == il) feats[k] = x;   // the residual stream entering layer il
+        if (h.mhc(il)) {   // sensenova_loop: two residual streams R [E, 2, n] around attention and FFN
+            const int E = h.n_embd, S = h.mhc_streams, pl = h.phys(il);
+            ggml_tensor* R = pl == h.mhc_start ? ggml_concat(c, x, x, 0) : x;   // enter: both streams = h
+            R = ggml_reshape_3d(c, R, E, S, n);
+            auto mixer = [&](ggml_tensor* w, ggml_tensor* b, auto&& branch_fn) {
+                ggml_tensor* lg = ggml_mul_mat(c, w, ggml_rms_norm(c, ggml_reshape_2d(c, R, (int64_t) E * S, n), 1e-6f));
+                ggml_tensor* cf = ggml_loop_mhc_coef(c, ggml_add(c, lg, b), h.mhc_iter);   // [2S + S*S, n]
+                const size_t f = sizeof(float);
+                ggml_tensor* pre = ggml_view_2d(c, cf, S, n, cf->nb[1], 0);
+                ggml_tensor* post = ggml_view_2d(c, cf, S, n, cf->nb[1], S * f);
+                ggml_tensor* comb = ggml_view_3d(c, cf, S, S, n, S * f, cf->nb[1], 2 * S * f);
+                ggml_tensor* br = branch_fn(ggml_dsv4_hc_pre(c, R, pre));            // [E, n]
+                R = ggml_dsv4_hc_post(c, br, R, post, comb);                         // [E, S, n]
+            };
+            mixer(l.hc_attn_w, l.hc_attn_b, [&](ggml_tensor* t) {
+                t = rms(c, t, l.attn_norm, h.eps);
+                return h.recurrent(il) ? gdn_block(m, c, gf, l, t, in, n, ksnap) : attn_block(m, c, gf, l, t, in, n, n_kv);
+            });
+            mixer(l.hc_ffn_w, l.hc_ffn_b, [&](ggml_tensor* t) { return ffn(c, l, rms(c, t, l.post_norm, h.eps)); });
+            if (pl == h.mhc_end - 1) {   // leave: the mean of the streams
+                ggml_tensor* r0 = ggml_view_2d(c, R, E, n, R->nb[2], 0);
+                ggml_tensor* r1 = ggml_view_2d(c, R, E, n, R->nb[2], R->nb[1]);
+                x = ggml_scale(c, ggml_add(c, r0, r1), 0.5f);
+            } else
+                x = ggml_reshape_2d(c, R, (int64_t) E * S, n);
+            continue;
+        }
         ggml_tensor* cur = rms(c, x, l.attn_norm, h.eps);
         cur = h.recurrent(il) ? gdn_block(m, c, gf, l, cur, in, n, ksnap) : attn_block(m, c, gf, l, cur, in, n, n_kv);
         x = ggml_add(c, cur, x);
         x = ggml_add(c, ffn(c, l, rms(c, x, l.post_norm, h.eps)), x);
     }
+    ggml_tensor* hn = rms(c, x, m.out_norm, h.eps);   // h_nextn: what the MTP block reads
     if (inject) {
-        // the drafter's context: fc(the five layers' inputs) -> norm -> each layer's K / V at the rows' ring cells
+        // the drafter's context: fc(the target layers' inputs [, h_nextn]) -> norm -> each layer's K / V at the rows'
+        // ring cells
         const Drafter& d = *m.df;
         ggml_tensor* f = feats[0];
         for (size_t k = 1; k < feats.size(); ++k) f = ggml_concat(c, f, feats[k], 0);
+        if (d.final_norm) f = ggml_concat(c, f, hn, 0);
         ggml_tensor* g = rms(c, ggml_mul_mat(c, d.fc, f), d.enc_norm, d.eps);
         int sec[4] = {d.head_dim / 2, 0, 0, 0};
         for (const DfLayer& dl : d.L) {
@@ -902,11 +1026,11 @@ Built& trunk_graph(Model& m, Graphs& G, int n, int64_t pos0, int m_rows, int ksn
             ggml_build_forward_expand(gf, ggml_set_rows(c, dl.v_ring, v, in.ring_idx));
         }
     }
-    ggml_tensor* hn = rms(c, x, m.out_norm, h.eps);   // h_nextn: what the MTP block reads
     if (m.o.mtp > 0 && !want_ppl)
         ggml_build_forward_expand(gf, ggml_cpy(c, hn, ggml_view_2d(c, m.hbuf, h.n_embd, n, m.hbuf->nb[1], 0)));
     ggml_tensor* rows = m_rows == n ? hn : ggml_get_rows(c, hn, in.out_ids);
     head_outputs(c, gf, b, ggml_mul_mat(c, m.output, rows), m_rows, want_logits, want_ppl);
+    if (want_ppl && !m.o.dump_logits.empty()) ggml_set_output(b.logits);
     G.alloc(0, &b);
     return b;
 }
@@ -2458,7 +2582,9 @@ int ppl(Engine& E) {
     const int ub = std::min(m.o.ubatch, 512);   // the probabilities of a window are ub x vocab floats
     double nll = 0;
     int64_t count = 0;
-    std::vector<float> probs;
+    std::vector<float> probs, lg;
+    FILE* dump = m.o.dump_logits.empty() ? nullptr : std::fopen(m.o.dump_logits.c_str(), "wb");
+    if (!m.o.dump_logits.empty() && !dump) die("cannot write " + m.o.dump_logits);
     const auto t0 = Clock::now();
     for (int ch = 0; ch < n_chunks; ++ch) {
         E.clear();
@@ -2471,6 +2597,11 @@ int ppl(Engine& E) {
             if (ggml_backend_sched_graph_compute(b.sched, b.gf) != GGML_STATUS_SUCCESS) die("the trunk graph failed");
             probs.resize((size_t) n * V);
             ggml_backend_tensor_get(b.probs, probs.data(), 0, probs.size() * 4);
+            if (dump) {
+                lg.resize((size_t) n * V);
+                ggml_backend_tensor_get(b.logits, lg.data(), 0, lg.size() * 4);
+                std::fwrite(lg.data(), 4, lg.size(), dump);
+            }
             E.cache.insert(E.cache.end(), tok + at, tok + at + n);
             m.ssm_slot = 0;
             m.conv_off = CONV_W - 3;
@@ -2485,6 +2616,7 @@ int ppl(Engine& E) {
         }
         std::fprintf(stderr, "[%d] %.4f\n", ch + 1, std::exp(nll / count));
     }
+    if (dump) std::fclose(dump);
     std::printf("PPL %.4f over %lld tokens (%d chunks of %d) in %.1f s\n", std::exp(nll / count), (long long) count,
                 n_chunks, n_ctx, ms_since(t0) / 1000);
     return 0;
@@ -2589,6 +2721,7 @@ int qwen35_main(int argc, char** argv) {
         else if (a == "--prompt-ids") o.prompt_ids = next();
         else if (a == "--ppl") o.ppl_file = next();
         else if (a == "--ppl-ctx") o.ppl_ctx = std::atoi(next().c_str());
+        else if (a == "--dump-logits") o.dump_logits = next();
         else if (a == "--eos-ids") {
             std::vector<int32_t> e;
             if (!parse_ids(next(), e)) die("bad --eos-ids");

@@ -14,6 +14,8 @@
   ./almond serve --model qwen27  the dense Qwen3.8-27B (GSQ-RCO IQ3_S + its MTP block) on src/qwen35 (--qwen35):
                                  local/qwen27-local.json (-vision with its encoder), tools/qwen/serve/serve_qwen.py;
                                  --config local/qwen27-q8-local.json the Q8_0 on two cards
+  ./almond serve --model sensenova  SenseNova-Loop-9B (looped dense, Q8_0, MTP 3 + DFlash2) on src/qwen35, one card:
+                                 local/sensenova-local.json, tools/qwen/serve/serve_qwen.py
   ./almond serve --ctx 1m        the context window (tokens, or 128k / 256k / 1m), in a copy of the configuration
                                  (ALMOND_CTX the same; the router's models inherit it)
 
@@ -55,6 +57,7 @@ def logo():
 
 SHIMS = {"ds41": "tools/v41/serve/serve_ds41.py", "glm": "tools/glm/serve/serve_glm.py",
          "qwen": "tools/qwen/serve/serve_qwen.py", "qwen27": "tools/qwen/serve/serve_qwen.py",
+         "sensenova": "tools/qwen/serve/serve_qwen.py",
          "hy4": "tools/hy4/serve/serve_hy4.py", "inkling": "tools/inkling/serve/serve_inkling.py"}
 SERVERS = (r"tools/(v41/serve/serve_ds41|glm/serve/serve_glm|qwen/serve/serve_qwen|hy4/serve/serve_hy4|"
            r"inkling/serve/serve_inkling|router/almond_router)[.]py")
@@ -128,7 +131,7 @@ def pick_config(o: dict) -> str:
     """The configuration run for --model / --gpu when --config does not name one."""
     m = o["model"]
     if m not in SHIMS:
-        fail(f"--model takes ds41, glm, qwen, qwen27, hy4 or inkling (got '{m}')")
+        fail(f"--model takes ds41, glm, qwen, qwen27, sensenova, hy4 or inkling (got '{m}')")
     exe = (json.load(open(ROOT / (o.get("config") or "local/inkling-local.json"))).get("exe") or "") \
         if m == "inkling" else ""
     if exe and not os.access(ROOT / exe, os.X_OK):
@@ -136,7 +139,7 @@ def pick_config(o: dict) -> str:
              "the drafter is downloaded)")
     if m not in ("ds41", "inkling") and not os.access(ROOT / "build-hip-fused/almond-engine", os.X_OK):
         fail("build-hip-fused/almond-engine is not built (./build.sh builds it)")
-    if m not in ("ds41", "qwen27", "hy4", "inkling"):   # the dense 27B has no experts; Hy4 places its experts by layer
+    if m not in ("ds41", "qwen27", "sensenova", "hy4", "inkling"):   # the dense 27B has no experts; Hy4 places its experts by layer
         # the expert profile the engine starts its VRAM pools from and saves what it learns into: its shipped one
         # until this machine has its own
         # until this machine has its own.  A configuration may name its own file (qwen-q4: the same model's experts in
@@ -176,6 +179,9 @@ def pick_config(o: dict) -> str:
         # encoder (local/fetch.sh inkling-vision) and the almond-vision built against build-inkling/llama.cpp's mtmd
         # (build.sh, build-vision-inkling): images on, read on the CPU
         return str(ROOT / ("local/inkling-local-vision.json" if ink_vision else "local/inkling-local.json"))
+    if m == "sensenova":
+        # SenseNova-Loop-9B on src/qwen35 (the GGUF's sensenova_loop architecture), one card, no images
+        return str(ROOT / "local/sensenova-local.json")
     if m == "qwen27":
         # the dense Qwen3.8-27B on src/qwen35 (--qwen35), one card; with its encoder (the mmproj in
         # models/qwen38-27b) and almond-vision built: images on, read on the CPU
@@ -246,6 +252,7 @@ def missing(cfg: str) -> list:
     model, pack = val("-m"), val("--glm-pack")
     qwen = [val(f) for f in ("--pack", "--native", "--ple-gguf", "--mtp") if "--qwen" in a and f in a]
     qwen += [val("--dspark")] if "--inkling" in a and "--dspark" in a else []   # Inkling's DSpark drafter
+    qwen += [val("--dflash")] if "--qwen35" in a and "--dflash" in a else []    # a dense model's DFlash2 drafter
     engram = val("--engram").split(":") if "--engram" in a else []
     env = c.get("env") or {}
     meta = env.get("DS41_META")               # the geometry overlay a foreign pack reads
