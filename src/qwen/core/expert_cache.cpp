@@ -1,17 +1,37 @@
 // src/core/expert_cache.cpp - R4's slot storage and residency table.  Read the header first.
 #include "almond/qwen/core/expert_cache.hpp"
 
-// #533's segmented cache uses CUDA's virtual memory management (cuMem*): not on HIP, neither the RDNA backend nor
-// the gfx906 compat build (PR #638), which compiles this file as HIP without ALMOND_USE_HIP
-#if defined(ALMOND_USE_HIP) || defined(ALMOND_HIP_GFX906) || defined(ALMOND_GPU_METAL)
+// #533's segmented cache uses the driver's virtual memory management: CUDA's cuMem*, and on the RDNA HIP backend
+// HIP's hipMem* under the same names (below; 2026-11-24, for the image encoder's loan); not the gfx906 compat build
+// (PR #638), which compiles this file as HIP without ALMOND_USE_HIP, nor Metal
+#if defined(ALMOND_HIP_GFX906) || defined(ALMOND_GPU_METAL)
 #define ALMOND_EC_NO_VMM 1
 #endif
 
 #include <thread>
 #include <mutex>
 #include <cuda_runtime.h>
-#if !defined(ALMOND_EC_NO_VMM)
+#if !defined(ALMOND_EC_NO_VMM) && !defined(ALMOND_USE_HIP)
 #include <cuda.h>   // #533: the virtual memory management types (the functions come through the runtime's entry points)
+#endif
+#if !defined(ALMOND_EC_NO_VMM) && defined(ALMOND_USE_HIP)
+// HIP's virtual memory management under the driver API's names the code below uses
+#include <cstdint>
+typedef int CUresult;
+typedef int CUdevice;
+typedef uintptr_t CUdeviceptr;
+typedef hipMemGenericAllocationHandle_t CUmemGenericAllocationHandle;
+typedef hipMemAllocationProp CUmemAllocationProp;
+typedef hipMemAccessDesc CUmemAccessDesc;
+typedef hipDeviceAttribute_t CUdevice_attribute;
+typedef hipMemAllocationGranularity_flags CUmemAllocationGranularity_flags;
+#define CUDAAPI
+#define CUDA_SUCCESS 0
+#define CU_MEM_ALLOCATION_TYPE_PINNED hipMemAllocationTypePinned
+#define CU_MEM_LOCATION_TYPE_DEVICE hipMemLocationTypeDevice
+#define CU_MEM_ACCESS_FLAGS_PROT_READWRITE hipMemAccessFlagsProtReadWrite
+#define CU_MEM_ALLOC_GRANULARITY_RECOMMENDED hipMemAllocationGranularityRecommended
+#define CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED hipDeviceAttributeVirtualMemoryManagementSupported
 #endif
 
 #include <algorithm>
@@ -322,6 +342,7 @@ struct Vmm {
     bool ok = false;
 };
 
+#if !defined(ALMOND_USE_HIP)
 template <class F> bool entry(const char* name, F& f) {
     void* p = nullptr;
     cudaDriverEntryPointQueryResult q{};
@@ -337,15 +358,53 @@ template <class F> bool entry(const char* name, F& f) {
     f = reinterpret_cast<F>(p);
     return true;
 }
+#endif
+
+#if defined(ALMOND_USE_HIP)
+namespace hipv {
+CUresult device_get(CUdevice* d, int i) { *d = i; return CUDA_SUCCESS; }
+CUresult attribute(int* v, CUdevice_attribute a, CUdevice d) { return (CUresult) hipDeviceGetAttribute(v, a, d); }
+CUresult granularity(size_t* g, const CUmemAllocationProp* p, CUmemAllocationGranularity_flags f) {
+    return (CUresult) hipMemGetAllocationGranularity(g, p, f);
+}
+CUresult reserve(CUdeviceptr* p, size_t n, size_t a, CUdeviceptr addr, unsigned long long f) {
+    void* q = nullptr;
+    const CUresult r = (CUresult) hipMemAddressReserve(&q, n, a, (void*) addr, f);
+    *p = (CUdeviceptr) q;
+    return r;
+}
+CUresult address_free(CUdeviceptr p, size_t n) { return (CUresult) hipMemAddressFree((void*) p, n); }
+CUresult create(CUmemGenericAllocationHandle* h, size_t n, const CUmemAllocationProp* p, unsigned long long f) {
+    return (CUresult) hipMemCreate(h, n, p, f);
+}
+CUresult release(CUmemGenericAllocationHandle h) { return (CUresult) hipMemRelease(h); }
+CUresult map(CUdeviceptr p, size_t n, size_t o, CUmemGenericAllocationHandle h, unsigned long long f) {
+    return (CUresult) hipMemMap((void*) p, n, o, h, f);
+}
+CUresult unmap(CUdeviceptr p, size_t n) { return (CUresult) hipMemUnmap((void*) p, n); }
+CUresult set_access(CUdeviceptr p, size_t n, const CUmemAccessDesc* d, size_t c) {
+    return (CUresult) hipMemSetAccess((void*) p, n, d, c);
+}
+}  // namespace hipv
+#endif
 
 const Vmm& vmm() {
     static const Vmm v = [] {
         Vmm x;
+#if defined(ALMOND_USE_HIP)
+        x.device_get = hipv::device_get; x.attribute = hipv::attribute; x.granularity = hipv::granularity;
+        x.reserve = hipv::reserve; x.address_free = hipv::address_free; x.create = hipv::create;
+        x.release = hipv::release; x.map = hipv::map; x.unmap = hipv::unmap; x.set_access = hipv::set_access;
+        x.ok = true;
+        return x;
+#endif
+#if !defined(ALMOND_USE_HIP)
         x.ok = entry("cuDeviceGet", x.device_get) && entry("cuDeviceGetAttribute", x.attribute) &&
                entry("cuMemGetAllocationGranularity", x.granularity) && entry("cuMemAddressReserve", x.reserve) &&
                entry("cuMemAddressFree", x.address_free) && entry("cuMemCreate", x.create) &&
                entry("cuMemRelease", x.release) && entry("cuMemMap", x.map) && entry("cuMemUnmap", x.unmap) &&
                entry("cuMemSetAccess", x.set_access);
+#endif
         return x;
     }();
     return v;

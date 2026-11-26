@@ -1,0 +1,117 @@
+// src/hy4/hy4_engine.hpp - the Hy4-flash engine on the cards: weights uploaded once, one ggml graph per step over the
+// HIP backends and the CPU (ggml_backend_sched), the KV cache in VRAM.
+//
+// Placement: the trunk is cut into contiguous layer ranges, one per card. Each card holds its layers' attention,
+// shared expert, norms, iHC and Engram weights and their KV rows; a card's first layers also keep their routed experts
+// in VRAM while they fit, and the experts of the remaining layers are read in place from the mapped GGUF and run on
+// the CPU (ggml's mul_mat_id touches only the 16 experts a token picks). The Engram table (FP8, 63 GB) stays in the
+// mapped second shard; its rows are gathered and decoded on the host for each step.
+#pragma once
+
+#include "hy4_geometry.hpp"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace almond::hy4 {
+
+struct Hy4EngineOptions {
+    std::vector<int> gpus{0, 1};
+    int64_t n_ctx = 4096;          ///< KV rows per layer (rounded up to 256)
+    int64_t n_ubatch = 512;        ///< tokens per graph during the prompt
+    int threads = 0;               ///< CPU threads for the experts in RAM; 0 = hardware threads / 2
+    int64_t reserve_mib = 2048;    ///< VRAM left free per card for the compute buffers
+    int64_t min_free_mib = 0;      ///< with the compute buffers in: least VRAM left per card, or the prompt step
+                                   ///< halves (--min-free-mib); 0 = as it was, whatever the reserve leaves
+    int expert_layers_gpu = -1;    ///< routed-expert layers in VRAM; -1 = as many as fit
+    std::string engram = "auto";  ///< the Engram table: ram, ssd (O_DIRECT rows), or auto (RAM when it fits)
+    bool dense_q8 = false;
+    bool mtp = false;
+    bool fused_hc = false;
+    bool fused_proj = false;
+    std::string ram_requant;       ///< ffn_down_exps of the layers whose experts stay in RAM, requantized at load (--ram-requant)
+    std::string down_requant;      ///< ffn_down_exps (Q4_K in the file) requantized for the cards: q3_k, iq3_s, iq3_xxs, q2_k       ///< with --dense-q8: the attention input's four projections as one product (--fused-proj)         ///< iHC through the vendored ggml's fused DeepSeek-V4 ops (--fused-hc)
+    bool pin_experts = false;      ///< the CPU's mapped weights registered as pinned memory (--pin-experts)
+    bool prefetch_experts = false; ///< stage the RAM experts in device memory ahead of their split (--prefetch-experts)
+    bool kv_q8 = false;            ///< the full layers' KV rows as Q8_0 (--kv-q8)
+    bool fused_indexer = false;    ///< the indexer's scores through ggml_lightning_indexer (--fused-indexer)
+    /// Pick the pool groups with ggml_argsort_top_k rather than ggml_top_k.  On by default since 2026-11-22:
+    /// ggml_top_k's CUDA/HIP kernel is a radix select that places the keys equal to the k-th with atomicAdd
+    /// (top-k.cu:201,204), and the indexer's pool is all ties at that boundary (every dead slot carries the same mask
+    /// value), so the picked groups - and the answer - changed between two runs of one input: KL 0.12667, top-1 88.5%.
+    /// A sorted pick makes the engine repeat exactly (KL 0.00000, the same perplexity to four digits) for +0.8% of a
+    /// round; docs/hy4/SPEED_WORK.md, "The cause is the pick, not the score kernel".  --indexer-topk buys the old
+    /// behaviour back for that 0.8%.
+    bool indexer_argsort = true;   ///< repeatable picks (since 2026-11-23: top-k with ties broken by index, then the picks sorted - not a full sort); --indexer-topk to turn off
+    bool gather_attn = false;      ///< sparse layers attend over the indexer's picked rows only (--gather-attn)
+    bool host_moe = false;
+    int pcie_share = 0;            ///< with --host-moe: up to N experts a RAM layer's step copied to card 0 and computed there (--pcie-share)         ///< the experts in RAM computed by a host thread the graph waits on (--host-moe)
+    std::string dfly;              ///< Tencent's DFly2 drafter as a GGUF (tools/hy4/dfly_convert.py), needs mtp (--dfly)
+    int mtp_n = 1;                 ///< guesses per step (--mtp-n)              ///< load the MTP block (layer 42) and draft one token ahead (--mtp)         ///< the 2-D BF16 matrices quantized to Q8_0 on load (--dense-q8)
+    /// Stop the draft chain where its own confidence says the next guess is not worth a draft step (--mtp-adaptive,
+    /// a percentage).  A drafted token costs a draft step of its own, while its verification slot is nearly free
+    /// (docs/hy4/GGUF_NOTES.md: the products of a step do not depend on how many tokens it carries, so 2, 3 and 4
+    /// cost the same) and an accepted one saves a whole step.  So a chain is worth extending while the chance of the
+    /// next guess being accepted is above (draft step) / (full step) - a ratio this box has not been measured at,
+    /// which is what the flag is there to find.  The draft model's own top-1 probability is that chance, and it is
+    /// free: the argmax is already read off the same logits.  Greedy output does not depend on the chain length at
+    /// all - a draft is kept only when the main model agrees with it - so this is a speed knob and not a quality
+    /// one.  The check of that is the KL of a run with the gate against one without: not run yet, and the gate is
+    /// off by default until it is.
+    int mtp_adaptive_pct = 0;      ///< 0 = draft the whole --mtp-n always
+    bool verbose = true;
+};
+
+class Hy4Engine {
+public:
+    Hy4Engine();
+    ~Hy4Engine();
+    Hy4Engine(const Hy4Engine &) = delete;
+    Hy4Engine & operator=(const Hy4Engine &) = delete;
+
+    /// Opens the GGUF (any shard), uploads the weights and makes the KV cache.
+    bool load(const std::string & gguf, const Hy4EngineOptions & o, std::string & err);
+
+    /// Runs `nt` tokens after the ones already in the cache and returns the last token's logits [n_vocab].
+    /// `rows` (optional, [nt]): an image embedding row [n_embd] for a position, or nullptr for a token; a position with
+    /// a row should carry a negative id (an image key: the cache compares it, the Engram treats it as no token).
+    /// `yx` (with rows, [2 nt]): each image row's (line, column) in its picture, -1 for a token; a picture starts at
+    /// (0, 0). The rows then take Tencent's 2-D positions (interleaved M-RoPE) and the text after it its offset.
+    bool decode(const int64_t * tokens, int64_t nt, std::vector<float> & logits, std::string & err,
+                const float * const * rows = nullptr, const int32_t * yx = nullptr);
+
+    /// As decode, but `logits` gets every token's row: [nt * n_vocab] (perplexity).
+    bool decode_all(const int64_t * tokens, int64_t nt, std::vector<float> & logits, std::string & err);
+
+    /// --mtp: the block's greedy guess for the token after `token`, where `token` is the next one at n_past (it
+    /// is not added to the cache; decode it, with the guess after it, to check the guess).
+    bool draft(int64_t token, int64_t & out, std::string & err);
+    /// Up to n guesses in a row, each block step fed the previous one's state and guess.
+    bool draft_chain(int64_t token, int n, std::vector<int64_t> & out, std::string & err);
+    bool has_mtp() const;
+    /// --dfly: DFly2's greedy block of up to n guesses after `token` (the next one at n_past), drafted in one pass that
+    /// reads the trunk's KV rows and indexer picks of layers 25..41; check them as with draft_chain.
+    bool dfly_draft(int64_t token, int n, std::vector<int64_t> & out, std::string & err);
+    bool has_dfly() const;
+
+    /// The conversation in the cache to a file (tokens, the caches' used rows, the MTP states) and back; `bytes` is
+    /// the file's size. restore() refuses a file of another model geometry or context layout.
+    bool save(const std::string & path, int64_t & tokens, uint64_t & bytes, std::string & err);
+    bool restore(const std::string & path, int64_t & tokens, uint64_t & bytes, std::string & err);
+
+    /// Drops the cache back to `n` tokens (0 = empty); the next decode continues from there.
+    void truncate(int64_t n);
+
+    int64_t n_past() const;
+    int64_t n_ctx() const;
+    const Hy4Geometry & geometry() const;
+    const std::vector<int64_t> & history() const;   ///< the tokens in the cache, in order
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> p_;
+};
+
+}  // namespace almond::hy4

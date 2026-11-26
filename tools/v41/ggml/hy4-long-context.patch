@@ -1,0 +1,397 @@
+diff --git a/ggml/include/ggml-cuda.h b/ggml/include/ggml-cuda.h
+index 1cd81ee..73e282a 100644
+--- a/ggml/include/ggml-cuda.h
++++ b/ggml/include/ggml-cuda.h
+@@ -38,6 +38,10 @@ GGML_BACKEND_API void ggml_backend_cuda_get_device_description(int device, char
+ GGML_BACKEND_API void ggml_backend_cuda_get_device_memory(int device, size_t * free, size_t * total);
+ 
+ GGML_BACKEND_API bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size);
++
++// Almond: mapped pinned memory (one address for the host and every device), for ggml_host_moe's bell
++GGML_BACKEND_API void * ggml_backend_cuda_alloc_mapped(size_t size);
++GGML_BACKEND_API void   ggml_backend_cuda_free_mapped(void * ptr);
+ GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
+ 
+ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
+diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index 03b5a89..cf835b5 100644
+--- a/ggml/include/ggml.h
++++ b/ggml/include/ggml.h
+@@ -587,6 +587,7 @@ extern "C" {
+         GGML_OP_DSV4_HC_POST,
+         GGML_OP_DSV41_FAKE_QUANT,
+         GGML_OP_DSV41_HC_MIXES,
++        GGML_OP_HOST_MOE,
+ 
+         GGML_OP_UNARY,
+ 
+@@ -1730,6 +1731,13 @@ extern "C" {
+             struct ggml_tensor  * a,  // data
+             struct ggml_tensor  * b); // row indices
+ 
++    // Almond: as ggml_get_rows, the result in `type` (F32, F16 or BF16 on CUDA/HIP)
++    GGML_API struct ggml_tensor * ggml_get_rows_type(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * a,
++            struct ggml_tensor  * b,
++            enum ggml_type        type);
++
+     GGML_API struct ggml_tensor * ggml_get_rows_back(
+             struct ggml_context * ctx,
+             struct ggml_tensor  * a,  // gradients of ggml_get_rows result
+@@ -2744,6 +2752,26 @@ extern "C" {
+     //   mixes: F32 [2*hc, n_tokens] contiguous   scale: F32 [2]   base: F32 [2*hc]   result: F32 [hc, 2*n_tokens]
+     //   result[h, t]        = sigmoid(mixes[h,      t]*scale[0] + base[h])      * 1 + eps   (the pre mix)
+     //   result[h, nt + t]   = sigmoid(mixes[hc + h, t]*scale[1] + base[hc + h]) * 2 + 0     (the post mix)
++    // Almond: routed experts computed by the host during a GPU graph. The op publishes x [n, nt], ids [k, nt] (I32)
++    // and w [k, nt] to mapped pinned memory, rings bell->seq, waits until the host writes that value to bell->flag,
++    // and copies bell->out [n, nt] into the result. All pointers are the device's view of mapped pinned memory.
++    struct ggml_host_moe_bell {
++        float    * x;
++        int32_t  * ids;
++        float    * w;
++        float    * out;
++        int32_t  * meta;   // [tag, nt]
++        uint32_t * seq;
++        uint32_t * flag;
++    };
++    GGML_API struct ggml_tensor * ggml_host_moe(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * x,
++            struct ggml_tensor  * ids,
++            struct ggml_tensor  * w,
++            const struct ggml_host_moe_bell * bell,
++            int32_t               tag);
++
+     GGML_API struct ggml_tensor * ggml_dsv41_hc_mixes(
+             struct ggml_context * ctx,
+             struct ggml_tensor  * mixes,
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index 4e34370..db8c385 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -2113,6 +2113,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+             {
+                 ggml_compute_forward_dsv41_hc_mixes(params, tensor);
+             } break;
++        case GGML_OP_HOST_MOE:
++            {
++                GGML_ABORT("host_moe runs on the GPU only");
++            }
+         case GGML_OP_MAP_CUSTOM1:
+             {
+                 ggml_compute_forward_map_custom1(params, tensor);
+@@ -2301,6 +2305,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+             {
+                 n_tasks = n_threads;
+             } break;
++        case GGML_OP_HOST_MOE:
++            {
++                n_tasks = 1;
++            } break;
+         case GGML_OP_REPEAT:
+         case GGML_OP_REPEAT_BACK:
+         case GGML_OP_LEAKY_RELU:
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.cpp b/ggml/src/ggml-cpu/ggml-cpu.cpp
+index 81ff5d7..b29ee1a 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.cpp
++++ b/ggml/src/ggml-cpu/ggml-cpu.cpp
+@@ -440,6 +440,8 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
+     }
+ 
+     switch (op->op) {
++        case GGML_OP_HOST_MOE:
++            return false;
+         case GGML_OP_CPY:
+         case GGML_OP_SET_ROWS:
+             return
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index f0ee1b8..16b4fe8 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -8,6 +8,7 @@
+ #include "ggml-cuda/add-id.cuh"
+ #include "ggml-cuda/arange.cuh"
+ #include "ggml-cuda/argmax.cuh"
++#include "ggml-cuda/host-moe.cuh"
+ #include "ggml-cuda/argsort.cuh"
+ #include "ggml-cuda/binbcast.cuh"
+ #include "ggml-cuda/clamp.cuh"
+@@ -2483,6 +2484,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+         case GGML_OP_DSV41_HC_MIXES:
+             ggml_cuda_op_dsv41_hc_mixes(ctx, dst);
+             break;
++        case GGML_OP_HOST_MOE:
++            ggml_cuda_op_host_moe(ctx, dst);
++            break;
+         case GGML_OP_RWKV_WKV7:
+             ggml_cuda_op_rwkv_wkv7(ctx, dst);
+             break;
+@@ -5849,6 +5853,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+                 op->type == GGML_TYPE_F32;
+         case GGML_OP_DSV41_FAKE_QUANT:
+             return op->src[0]->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]) && op->type == GGML_TYPE_F32;
++        case GGML_OP_HOST_MOE:
++            return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_I32 && op->src[2]->type == GGML_TYPE_F32;
+         case GGML_OP_DSV41_HC_MIXES:
+             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
+                 op->src[2]->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]) && op->type == GGML_TYPE_F32;
+diff --git a/ggml/src/ggml-cuda/host-moe.cu b/ggml/src/ggml-cuda/host-moe.cu
+new file mode 100644
+index 0000000..758f08f
+--- /dev/null
++++ b/ggml/src/ggml-cuda/host-moe.cu
+@@ -0,0 +1,54 @@
++// Almond: ggml_host_moe - routed experts the host computes while the GPU graph waits on a mapped flag, with no
++// return to the host's launch loop (the doorbell of src/glm, measured there at 0.05 ms a handoff).
++#include "host-moe.cuh"
++#include "ggml-cuda.h"
++
++static __global__ void host_moe_publish(const float * __restrict__ x, const int32_t * __restrict__ ids,
++                                        const float * __restrict__ w, int nx, int nk, int tag, int nt,
++                                        float * hx, int32_t * hids, float * hw, int32_t * meta, uint32_t * seq) {
++    for (int i = threadIdx.x; i < nx; i += blockDim.x) hx[i] = x[i];
++    for (int i = threadIdx.x; i < nk; i += blockDim.x) { hids[i] = ids[i]; hw[i] = w[i]; }
++    if (threadIdx.x == 0) { meta[0] = tag; meta[1] = nt; }
++    __threadfence_system();
++    __syncthreads();
++    if (threadIdx.x == 0) {
++        *(volatile uint32_t *) seq = *(volatile uint32_t *) seq + 1u;
++        __threadfence_system();
++    }
++}
++
++static __global__ void host_moe_wait_copy(const volatile uint32_t * flag, const volatile uint32_t * seq,
++                                          const volatile float * out, float * dst, int n) {
++    __shared__ int ok;
++    if (threadIdx.x == 0) {
++        const uint32_t want = *seq;
++        while (*flag != want) __builtin_amdgcn_s_sleep(2);
++        __threadfence_system();
++        ok = 1;
++    }
++    __syncthreads();
++    for (int i = threadIdx.x; i < n; i += blockDim.x) dst[i] = out[i];
++}
++
++void ggml_cuda_op_host_moe(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * x = dst->src[0], * ids = dst->src[1], * w = dst->src[2];
++    const ggml_host_moe_bell * bell;
++    memcpy(&bell, dst->op_params, sizeof(bell));
++    const int tag = ((const int32_t *) dst->op_params)[2];
++    const int nx = (int) ggml_nelements(x), nk = (int) ggml_nelements(ids), nt = (int) dst->ne[1];
++    cudaStream_t stream = ctx.stream();
++    host_moe_publish<<<1, 1024, 0, stream>>>((const float *) x->data, (const int32_t *) ids->data, (const float *) w->data,
++                                             nx, nk, tag, nt, bell->x, bell->ids, bell->w, bell->meta, bell->seq);
++    host_moe_wait_copy<<<1, 1024, 0, stream>>>(bell->flag, bell->seq, bell->out, (float *) dst->data, nx);
++}
++
++void * ggml_backend_cuda_alloc_mapped(size_t size) {
++    void * p = nullptr;
++    if (cudaHostAlloc(&p, size, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) return nullptr;
++    memset(p, 0, size);
++    return p;
++}
++
++void ggml_backend_cuda_free_mapped(void * ptr) {
++    if (ptr) cudaFreeHost(ptr);
++}
+diff --git a/ggml/src/ggml-cuda/host-moe.cuh b/ggml/src/ggml-cuda/host-moe.cuh
+new file mode 100644
+index 0000000..b33ab74
+--- /dev/null
++++ b/ggml/src/ggml-cuda/host-moe.cuh
+@@ -0,0 +1,4 @@
++#pragma once
++#include "common.cuh"
++
++void ggml_cuda_op_host_moe(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/lightning-indexer.cu b/ggml/src/ggml-cuda/lightning-indexer.cu
+index 429d2e2..0697d33 100644
+--- a/ggml/src/ggml-cuda/lightning-indexer.cu
++++ b/ggml/src/ggml-cuda/lightning-indexer.cu
+@@ -697,6 +697,33 @@ void ggml_cuda_lightning_indexer(ggml_backend_cuda_context & ctx, ggml_tensor *
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 32, k, GGML_TYPE_F32)
+             GGML_ABORT("fatal error");
+         }
++    } else if (n_embd == 128 && n_head == 16 && n_batch >= LIGHTNING_INDEXER_TILE_TOKENS) {
++        // Almond (Hy4-flash: 16 indexer heads): the tile kernel, 4 heads a pass
++        constexpr int WARPS_PER_BLOCK = 8;
++        constexpr int K_VECS_PER_BLOCK = 64;
++
++        dim3 block(32, WARPS_PER_BLOCK);
++        int num_kv_blocks = (n_kv + (K_VECS_PER_BLOCK) - 1) / (K_VECS_PER_BLOCK);
++        int num_batch_blocks = (n_batch + LIGHTNING_INDEXER_TILE_TOKENS - 1) / LIGHTNING_INDEXER_TILE_TOKENS;
++        dim3 grid(num_kv_blocks, num_batch_blocks, n_stream);
++
++        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_tile, 128, 16, k, GGML_TYPE_F16)
++        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_tile, 128, 16, k, GGML_TYPE_BF16)
++        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_tile, 128, 16, k, GGML_TYPE_F32)
++        GGML_ABORT("fatal error");
++    } else if (n_embd == 128 && n_head == 16) {
++        constexpr int K_VECS_PER_WARP = 8;
++        constexpr int WARPS_PER_BLOCK = 8;
++        constexpr int K_VECS_PER_BLOCK = K_VECS_PER_WARP * WARPS_PER_BLOCK;
++
++        dim3 block(32, WARPS_PER_BLOCK);
++        int num_kv_blocks = (n_kv + (K_VECS_PER_BLOCK) - 1) / (K_VECS_PER_BLOCK);
++        dim3 grid(num_kv_blocks, n_batch, n_stream);
++
++        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 16, k, GGML_TYPE_F16)
++        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 16, k, GGML_TYPE_BF16)
++        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 16, k, GGML_TYPE_F32)
++        GGML_ABORT("fatal error");
+     } else if (n_embd == 128 && n_head == 4 && n_batch >= LIGHTNING_INDEXER_TILE_TOKENS) {
+         // too few heads for a wmma tile, the tile kernel shares the keys across the tokens
+         constexpr int WARPS_PER_BLOCK = 8;
+@@ -763,7 +790,7 @@ bool ggml_cuda_lightning_indexer_supported(int device, const ggml_tensor * dst)
+         return false;
+     }
+ 
+-    if (neq1 != 64 && neq1 != 32 && neq1 != 4) {
++    if (neq1 != 64 && neq1 != 32 && neq1 != 16 && neq1 != 4) {
+         return false;
+     }
+ 
+diff --git a/ggml/src/ggml-cuda/mmvf.cu b/ggml/src/ggml-cuda/mmvf.cu
+index d0763ad..8c9d66a 100644
+--- a/ggml/src/ggml-cuda/mmvf.cu
++++ b/ggml/src/ggml-cuda/mmvf.cu
+@@ -421,9 +421,9 @@ static void mul_mat_vec_f_switch_fusion(
+ // attn_k_b, 192 columns, and attn_v_b, 512) ran one block of 96-256 threads per row, most of them idle or waiting in
+ // the block reduction. Here one wave of 32 lanes takes a row and a block 8 rows; each lane reads 8 BF16 (16 bytes) at a
+ // time and the wave reduces with shuffles. For up to 8 columns of y, no ids, no fusion.
+-template <int ncols_dst>
++template <typename T, int ncols_dst>
+ static __global__ void mul_mat_vec_bf16_rows(
+-        const nv_bfloat16 * __restrict__ x, const float * __restrict__ y, float * __restrict__ dst,
++        const T * __restrict__ x, const float * __restrict__ y, float * __restrict__ dst,
+         const int ncols, const int nrows, const int stride_row, const int stride_col_y, const int stride_col_dst,
+         const uint3 channel_ratio, const int64_t stride_channel_x, const int64_t stride_channel_y, const int64_t stride_channel_dst,
+         const uint3 sample_ratio, const int64_t stride_sample_x, const int64_t stride_sample_y, const int64_t stride_sample_dst) {
+@@ -445,8 +445,14 @@ static __global__ void mul_mat_vec_bf16_rows(
+         float xf[8];
+ #pragma unroll
+         for (int k = 0; k < 4; ++k) {
+-            xf[2*k + 0] = __uint_as_float(w[k] << 16);
+-            xf[2*k + 1] = __uint_as_float(w[k] & 0xFFFF0000u);
++            if constexpr (std::is_same_v<T, half>) {
++                const half2 h = *(const half2 *) &w[k];
++                xf[2*k + 0] = __low2float(h);
++                xf[2*k + 1] = __high2float(h);
++            } else {
++                xf[2*k + 0] = __uint_as_float(w[k] << 16);
++                xf[2*k + 1] = __uint_as_float(w[k] & 0xFFFF0000u);
++            }
+         }
+ #pragma unroll
+         for (int j = 0; j < ncols_dst; ++j) {
+@@ -514,13 +520,13 @@ void launch_mul_mat_vec_f_cuda(
+ 
+     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
+     static const bool almond_rows = [] { const char * e = getenv("ALMOND_MMVF_ROWS"); return e && e[0] == '1'; }();
+-    if constexpr (std::is_same_v<T, nv_bfloat16> && !is_multi_token_id) {
++    if constexpr ((std::is_same_v<T, nv_bfloat16> || std::is_same_v<T, half>) && !is_multi_token_id) {
+         if (almond_rows && !ids && !has_fusion && ncols <= 2048 && ncols % 8 == 0 && stride_row % 8 == 0 &&
+                 stride_col_y % 4 == 0 && stride_channel_x % 8 == 0 && stride_sample_x % 8 == 0 &&
+                 stride_channel_y % 4 == 0 && stride_sample_y % 4 == 0 &&
+                 (uintptr_t) x % 16 == 0 && (uintptr_t) y % 16 == 0 && warp_size == 32) {
+             const dim3 nb((nrows + 7)/8, nchannels_dst, nsamples_or_ntokens);
+-            mul_mat_vec_bf16_rows<ncols_dst><<<nb, 256, 0, stream>>>(x, y, dst, ncols, nrows, stride_row, stride_col_y,
++            mul_mat_vec_bf16_rows<T, ncols_dst><<<nb, 256, 0, stream>>>(x, y, dst, ncols, nrows, stride_row, stride_col_y,
+                 stride_col_dst, channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst, sample_ratio_fd,
+                 stride_sample_x, stride_sample_y, stride_sample_dst);
+             return;
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index a6fe6cf..c58c1fa 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -1086,6 +1086,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+     "DSV4_HC_POST",
+     "DSV41_FAKE_QUANT",
+     "DSV41_HC_MIXES",
++    "HOST_MOE",
+ 
+     "UNARY",
+ 
+@@ -1103,7 +1104,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+     "GLU",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
++static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
+ 
+ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "none",
+@@ -1203,6 +1204,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "dsv4_hc_post(x, residual, post, comb)",
+     "dsv41_fake_quant(x)",
+     "dsv41_hc_mixes(mixes, scale, base)",
++    "host_moe(x, ids, w)",
+ 
+     "unary(x)",
+ 
+@@ -1220,7 +1222,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "glu(x)",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
++static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
+ 
+ static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
+ 
+@@ -3988,6 +3990,23 @@ struct ggml_tensor * ggml_get_rows(
+     return result;
+ }
+ 
++// Almond: ggml_get_rows with the result's type chosen (the CUDA/HIP kernel writes F16 and BF16 as well)
++struct ggml_tensor * ggml_get_rows_type(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * a,
++        struct ggml_tensor  * b,
++        enum ggml_type        type) {
++    struct ggml_tensor * result = ggml_get_rows(ctx, a, b);
++    if (type != result->type) {
++        struct ggml_tensor * r = ggml_new_tensor_4d(ctx, type, result->ne[0], result->ne[1], result->ne[2], result->ne[3]);
++        r->op     = GGML_OP_GET_ROWS;
++        r->src[0] = a;
++        r->src[1] = b;
++        return r;
++    }
++    return result;
++}
++
+ // ggml_get_rows_back
+ 
+ struct ggml_tensor * ggml_get_rows_back(
+@@ -6636,6 +6655,30 @@ struct ggml_tensor * ggml_dsv4_hc_pre_gated(
+     return ggml_dsv4_hc_pre_impl(ctx, x, gate, scale, true);
+ }
+ 
++// ggml_host_moe
++
++struct ggml_tensor * ggml_host_moe(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * x,
++        struct ggml_tensor  * ids,
++        struct ggml_tensor  * w,
++        const struct ggml_host_moe_bell * bell,
++        int32_t               tag) {
++    GGML_ASSERT(x->type == GGML_TYPE_F32 && ids->type == GGML_TYPE_I32 && w->type == GGML_TYPE_F32);
++    GGML_ASSERT(ggml_is_contiguous(x) && ggml_is_contiguous(ids) && ggml_is_contiguous(w));
++    GGML_ASSERT(ggml_nelements(ids) == ggml_nelements(w));
++    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, x->ne[0], ggml_nelements(x) / x->ne[0]);
++    int32_t params[3];
++    memcpy(params, &bell, sizeof(bell));
++    params[2] = tag;
++    ggml_set_op_params(result, params, sizeof(params));
++    result->op     = GGML_OP_HOST_MOE;
++    result->src[0] = x;
++    result->src[1] = ids;
++    result->src[2] = w;
++    return result;
++}
++
+ // ggml_dsv4_hc_post
+ 
+ struct ggml_tensor * ggml_dsv4_hc_post(

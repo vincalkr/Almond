@@ -1953,6 +1953,11 @@ class PeerDevice(unittest.TestCase):
         self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1]}), args)
         self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1], "split_skip_if_fits": True}), args)
 
+    def test_no_split_with_kv_gpu(self):
+        """Inkling's --kv-gpu: the second card holds the full attention K/V; that engine has no --layer-split."""
+        args = ["--inkling", "-m", "x", "--gpu", "0", "--kv-gpu", "1"]
+        self.assertEqual(engine_args({"args": list(args), "gpu": "0,1"}), args)
+
     def test_both_cards_visible(self):
         from serve.server import child_env
         env = child_env({"args": ["--peer-device", "1"], "gpu": [0, 1]})
@@ -4565,6 +4570,14 @@ class VisionArgs(unittest.TestCase):
         self.assertNotIn("--min-tokens", base)
         self.assertEqual(self.args_for({"max_tokens": 1024, "min_tokens": 768})[-4:],
                          ["--max-tokens", "1024", "--min-tokens", "768"])
+
+    def test_f32_matmul_is_passed_only_when_set(self):
+        self.assertNotIn("--f32-matmul", self.args_for({"gpu": True}))
+        self.assertIn("--f32-matmul", self.args_for({"gpu": True, "no_flash_attn": True, "f32_matmul": True}))
+
+    def test_the_lending_engines(self):
+        import serve.server as server
+        self.assertEqual(server.LENDERS, {"--glm-pack", "--inkling", "--qwen35", "--qwen"})
 
 
 class VisionCacheEviction(unittest.TestCase):

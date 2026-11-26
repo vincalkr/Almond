@@ -2113,6 +2113,11 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_dsv41_hc_mixes(params, tensor);
             } break;
+        case GGML_OP_HOST_MOE:
+        case GGML_OP_HOST_MOE_PUBLISH:
+            {
+                GGML_ABORT("host_moe runs on the GPU only");
+            }
         case GGML_OP_LOOP_MHC_COEF:
             {
                 ggml_compute_forward_loop_mhc_coef(params, tensor);
@@ -2305,6 +2310,11 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_LOOP_MHC_COEF:
             {
                 n_tasks = n_threads;
+            } break;
+        case GGML_OP_HOST_MOE:
+        case GGML_OP_HOST_MOE_PUBLISH:
+            {
+                n_tasks = 1;
             } break;
         case GGML_OP_REPEAT:
         case GGML_OP_REPEAT_BACK:

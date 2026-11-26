@@ -4,6 +4,22 @@ What each model gets, where it comes from, and what was measured.  Everything be
 shipped configurations (`local/ds41-local*.json`, `local/glm-local.json`, `local/qwen-local.json`); a client sees the levels in `/health`,
 `/v1/models` (the router) and `./almond`'s `/models`.  Reviewed 2026-10-29.
 
+## The configurations now (2026-11-25)
+
+One or two per model; the sections below keep the measurements of configurations since removed (the Qwen3.8-Flash
+IQ3_S ones, `qwen27-local-256k`, the DSpine ones, `hy4-local-fast`, `inkling-dspark`), named as they were then.
+
+| model | router name | configuration | cards | context |
+| --- | --- | --- | --- | --- |
+| DeepSeek-V4.1-Flash | `ds41` | `local/ds41-local.json` (`-1gpu` with `--gpu 0`, `-vision` twins) | 2 | 256K |
+| GLM-5.3-Flash | `glm` | `local/glm-local.json` (`-vision`) | 2 | 256K |
+| Qwen3.8-Flash-Next | `qwen` | `local/qwen-local.json`, UD-Q4_K_XL, images on | 2 | 256K |
+| Qwen3.8-27B | `qwen27` | `local/qwen27-local.json` (`-vision`), IQ3_S, MTP 3 | 1 | 192K |
+| | `qwen27-q8` | `local/qwen27-q8-local.json`, Q8_0, `--tp` | 2 | 256K |
+| Hy4-flash | `hy4` | `local/hy4-local.json` (`-vision`) | 2 | 256K |
+| Inkling 2 Mini | `inkling` | `local/inkling-local.json` (`-vision`) | 1 | 256K |
+| | `inkling-1m` | `local/inkling-1m-local.json`, DSpark, K/V on card 1 | 2 | 1M |
+
 ## DeepSeek-V4.1-Flash-1017 (GSQ-RCO IQ2_XXS, `ds41_generate`)
 
 Source: DeepSeek's cloud API reference (api-docs.deepseek.com, create-chat-completion, `deepseek-flash`) and the
@@ -111,6 +127,13 @@ Both are on in `local/glm-local*.json`; DeepSeek's configurations keep theirs.
   after (`local/glm-local-vision.json`, which `./almond serve --model glm` picks when the encoder is there). Text
   decode, one
   run each: 29.2, 32.2 before, 29.8, 33.3 after the first picture, 29.2 after the second (cached: no encoder start).
+- Qwen3.8-Flash-Next: the encoder (Qwen's mmproj BF16, GPU, `f32_matmul`, `no_flash_attn`) on card 0 only while a
+  request's pictures are encoded (`local/qwen-local-vision.json`, `--vram-elastic`, now built on HIP: the expert cache
+  through HIP's virtual memory). `VLEND` shrinks the expert cache by the encoder's need + 256 MB, `VRECLAIM` grows it
+  back (measured 2026-11-24 on the engine: 3.8 GB lent in 60 ms, back in 149 ms). Precision against an F32 reference:
+  the CPU BF16 encoder used before min cosine 0.563, the GPU in F32 0.995-0.9999. Through the server: the encoder
+  needs 1.59 GB at 300 image tokens; three pictures answered right (shapes, a bar chart, a house), a 297-token picture
+  prompt first token 2.06 s; card 0 used 25.41 GB at start, 25.48 GB after the pictures.
 
 ## Sessions on disk
 
@@ -510,6 +533,12 @@ the same text as MTP's on all four; DSpine alone the same on three (the story pa
 do). Configurations: `local/qwen27-local-dspine.json` (`./almond -m qwen27-dspine`, 131072) and
 `local/qwen27-q8-local-dspine.json` (`./almond -m qwen27-q8-dspine`, two cards); the defaults keep MTP.
 
+**Removed on 2026-11-25** (both configurations, the router entries and the download item; the engine keeps `--dflash`
+and `--spec auto`). Through the server on card 0, temperature 0, the IQ3_S at 192K with DSpine against MTP 3, two runs
+each: a Python module with tests (1500 tokens) 96.1 / 96.6 against 92.6 / 92.8 tok/s (+4%), a 500-word story (894
+tokens) 53.3 / 53.4 against 54.5 / 54.5, a 182,638-token prompt read at 477 tok/s by both and answered at 33.0 against
+33.7. DSpine fits at 192K, but +4% on code and -2% elsewhere did not earn a profile.
+
 ### Every configuration through the server, short and ~123K context (2026-11-15)
 
 Each configuration started with `./almond serve --config local/<name>.json --port 8161` on 127.0.0.1 and was sent,
@@ -719,30 +748,72 @@ including the prompt; streamed at temperature 1.0 (the configuration's sampling)
 (HTTP, detokenizer, streaming) costs ~3%, and sampling at temperature 1.0 ~8% through MTP accepting fewer drafts;
 nothing to fix in the server.
 
-## Qwen3.8-Flash-Next Q8_0 (unsloth, 2026-11-11)
+Qwen3.8-Flash-Next's resident expert arena is checked against the RAM before it is pinned (2026-11-11): pinning an
+arena of 119.5 GiB with 88.9 GiB available stalled the whole machine (the unsloth Q8_0, since removed). The engine
+refuses an arena that does not leave `ALMOND_ARENA_HEADROOM_GIB` (default 8) free and names a `--mmap-experts
+--resident-budget-gib` that fits; `ALMOND_ARENA_FORCE=1` loads it anyway. The IQ3_S (a 46 GiB arena) loads as before.
 
-`unsloth/Qwen3.8-Flash-Next-GGUF` Q8_0 (six shards, 188 GB; experts 128.3 GB, 5.2 MB each; the PLE table, 54 GB, in
-shard 3), `local/fetch.sh qwen-q8` (its pack with `--compat-bf16`: the hyper-connection projections are Q8_0 in this
-GGUF and the engine reads them as BF16), `local/qwen-q8-local.json`, `./almond -m qwen-q8` (router name
-`qwen3.8-flash-next-q8`): card 0 with 3291 expert slots (16 GiB), card 1 as the peer expert tier, the MTP block of
-`models/qwen38-mtp`.
+## Qwen3.8-Flash-Next UD-Q4_K_XL (Unsloth Dynamic 3.1, 2026-11-23)
 
-The resident arena does not fit this machine: the engine asked for 119.5 GiB of RAM with 88.9 available, only warns
-about it and goes on, and pinning that much stalled the whole machine. Since then the engine refuses an arena that does not fit with
-`ALMOND_ARENA_HEADROOM_GIB` (default 8) left over, and names a `--mmap-experts --resident-budget-gib` that does (the
-available RAM less the headroom and 16 GiB: a budget of N used about N + 7-10 GiB here); `ALMOND_ARENA_FORCE=1`
-loads it anyway. Checked: the Q8_0 without the budget stops at once with 92.8 GiB available; the IQ3_S (a 46 GiB
-arena) loads and generates as before. The configuration reads the experts through
-the page cache instead and keeps the most used in RAM (`--mmap-experts --resident-budget-gib 56`). Between these two
-cards a peer copy arrives wrong (a host bridge, no real P2P), so the second card's rows take the host route.
+`unsloth/Qwen3.8-Flash-Next-GGUF` UD-Q4_K_XL (four shards, 111.3 GB; experts 63.47 GiB, the figure the engine
+printed on an RX 6900 XT 16 GB), `local/fetch.sh qwen-q4` (its pack with `--compat-bf16`: the routers, SSM gates and
+injections are F32 and the hyper-connection projections Q8_0 in this GGUF; the engine reads them as BF16),
+(Since 2026-11-25 this is the only Qwen3.8-Flash configuration, `local/qwen-local.json`, `./almond -m qwen`; the IQ3_S
+configurations of the sections above were removed. First run through the server: a 68-token prompt, 85 tokens at
+42.8 tok/s, 51 of 65 drafts accepted, the expert cache 84.6% hit.)
 
-Greedy, thinking off, the server's four prompts, power-tune on (tok/s; the share of routed experts found in VRAM):
+`local/qwen-q4-local.json`, `./almond -m qwen-q4` (router name `qwen3.8-flash-next-q4`): card 0's expert slots, card 1
+as the peer expert tier, the rest read through the page cache with up to 56 GiB kept in RAM (`--mmap-experts
+--resident-budget-gib 56`), the MTP block of `models/qwen38-mtp`. `--ple-gguf` is left to the engine, which finds the
+shard holding the PLE table.
 
-| | Python function | technical | story (Italian) | bash script | mean |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `--resident-budget-gib 56` | 17.9 (76.1%) | 20.2 (76.9%) | 14.0 (85.0%) | 13.6 (71.3%) | 16.4 |
-| `--resident-budget-gib 66` | 17.6 (81.7%) | 15.6 (78.2%) | 13.4 (85.6%) | 15.9 (72.3%) | 15.4 |
+Published against BF16, not measured here: mean KLD 0.047, top-1 92.3% (Unsloth's Dynamic 3.1 release). Speed and
+KL against the IQ3_S on this machine: not measured yet.
 
-10 GiB more in RAM bought nothing measurable and left 21 GiB of the machine's RAM available instead of 29: 56 stays.
-The IQ3_S on card 0 runs the same prompts at 50-78 tok/s; the Q8_0 is for the closest answers to the original
-weights at about a quarter of the speed.
+## Hy4-flash (IQ2-AH, AngelSlim, `--hy4`, 2026-11-18)
+
+Tencent's Hy4-flash (GGUF architecture `hy_v4_flash`: 42 trunk layers, MLA with sinks, 30 sliding-window layers and
+12 sparse layers with a k-pool indexer, LatentMoE with 512 experts and 16 per token, four Engram modules, iHC with 4
+streams) from `AngelSlim/Hy4-flash-GGUF`: routed experts IQ2_XXS / Q4_K, the Engram table FP8 (59 GiB, the second
+shard). `local/fetch.sh hy4`, `./almond serve --model hy4` (`local/hy4-local.json`: cards 0 and 1, 64K context;
+`local/hy4-local-vision.json`, which `./almond serve` picks when the encoder and `build-vision-hy4` are there). The
+engine is `src/hy4/hy4_engine.cpp`; how it was built and checked against llama.cpp PR #32517, and every number, in
+docs/hy4/GGUF_NOTES.md. Measured on 2026-11-18: 14.9 tok/s generating with a short prompt (the PR: 10.4 on the same
+machine), 11.8 tok/s after a 15,000-token prompt read at 237 tok/s; perplexity within the PR's own run-to-run spread
+(27.93 against 28.46 on `local/glm-ref/doc.txt`, 512-token chunks). With the configuration's `--mtp --fused-hc
+--dense-q8 --reserve-mib 1400 --fused-proj` (2026-11-19): 21.4-23.0 tok/s greedy and 21.3-21.7 at temperature 0.9 on
+chat prompts. Images through its encoder
+(`local/fetch.sh hy4-vision`, `build-vision-hy4`), conversations on disk (`local/hy4-slots`).
+
+## Inkling 2 Mini (Unsloth UD-Q4_K_XL, `almond-inkling`, 2026-11-23)
+
+Since 2026-11-24 the default configuration runs Almond's own engine (`almond-inkling-native`, docs/inkling/ENGINE.md,
+"Step 4"): F16 KV, prefill about 3x and decode about 2x the numbers below through the server, KL from Q8_0 0.00557
+against 0.00573. What follows is the llama.cpp path, whose configuration was removed on 2026-11-24 as slower.
+
+Card 0 alone, 128K context, q8_0 KV. It runs on llama.cpp's own `inkling2_loop` graph behind the engine's serve
+protocol (`src/inkling`, built into `build-inkling/`). Quality against ggml-org's Q8_0 on 43,709 tokens of this
+repository's docs: KL 0.00728, same top token 95.90%, PPL +0.13%. ggml-org's IQ4_NL of the same size: KL 0.01416,
+94.31%. Speed (llama-bench): decode 30.6 tok/s at depth 0 and 29.0 at 32K; prefill 1,396 tok/s (512 tokens) and
+388 at 32K depth. Through the server, a 21,725-token prompt prefilled at 444.7 tok/s and decoded at 29.3. The decode
+is bound by ~7,400 small kernels a token, not by bytes. Details, memory and what is open: docs/inkling/NOTES.md.
+
+DSpark (opt-in, `local/inkling-dspark-local.json`, `./almond -m inkling-dspark`): Unsloth's drafter, 3 greedy drafts
+checked by the request's own sampler, on `almond-inkling-dspark` (llama.cpp PR #32218). Through the server, card 0,
+600-token answers, reasoning off: 41.4-46.3 tok/s at temperature 0 and 1.0 against 29.2-29.4 without it.
+
+### Qwen3.8-27B images on the card in lent memory (2026-11-24)
+
+The one-card configurations (`local/qwen27-local-vision.json`, `local/qwen27-local-dspine.json`) run the image
+encoder on card 0 only while a request's pictures are encoded, in memory the engine lends it (`VLEND` /
+`VRECLAIM`, as GLM and Inkling): each layer's FFN weights sit in their own buffer, the last layers' buffers are freed
+for the encoder (2.1 GB in 1 ms when 6 GB were asked) and allocated again and read back from the GGUF afterwards
+(183 ms); generations before and after are identical, decode speed the same (300 tokens in 2,992-2,996 ms either
+way). `QWEN35_NO_LEND=1` keeps one buffer. The encoder runs with `f32_matmul` and `no_flash_attn`: against a
+reference made from the same mmproj converted to F32 and run on the CPU without flash attention, the CPU encoder
+these configurations used (BF16 weights, which ggml's CPU path also multiplies in BF16) ended at cosine 0.970 -
+0.993, the GPU at its defaults at 0.994 - 0.998, the GPU with both settings at 0.99999 (three pictures). A picture
+now takes about 0.1 s to encode instead of 2.6 s; through the server the first token of a 321-token picture prompt
+came after 1.34 s. At 300 image tokens the encoder needs 1.70 GB, which card 0 has free, so nothing is lent unless
+the card is fuller; card 0 settles at the same use after every request. The two-card configurations (`--tp`) keep
+the CPU encoder: the split weights are not lendable yet.

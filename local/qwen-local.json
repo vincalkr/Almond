@@ -3,15 +3,13 @@
   "args": [
     "--qwen",
     "--pack",
-    "models/qwen38-iq3s-pack",
+    "models/qwen38-q4-pack",
     "--native",
-    "models/qwen38-iq3s/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
-    "--ple-gguf",
-    "models/qwen38-iq3s/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf",
+    "models/qwen38-q4/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
     "--expert-profile",
-    "local/qwen-expert-profile.bin",
+    "local/qwen-q4-expert-profile.bin",
     "--expert-profile-save",
-    "local/qwen-expert-profile.bin",
+    "local/qwen-q4-expert-profile.bin",
     "--expert-cache",
     "auto",
     "--prefill",
@@ -37,7 +35,13 @@
     "--adapt-swaps",
     "80",
     "--adapt-decay",
-    "0.97"
+    "0.97",
+    "--peer-device",
+    "1",
+    "--mmap-experts",
+    "--resident-budget-gib",
+    "56",
+    "--vision"
   ],
   "env": {
     "ALMOND_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-qwen-hipblaslt-100401-local.txt",
@@ -45,12 +49,15 @@
     "ALMOND_PF_SWITCH_MIN_T": "4096"
   },
   "cwd": ".",
-  "tokenizer": "models/qwen38-iq3s-pack/tokenizer",
-  "model_name": "qwen3.8-flash-next",
-  "log": "local/serve-qwen-engine.log",
+  "tokenizer": "models/qwen38-q4-pack/tokenizer",
+  "model_name": "qwen3.8-flash-next-q4",
+  "log": "local/serve-qwen-q4-engine.log",
   "port": 8150,
   "backend": "hip",
-  "gpu": 0,
+  "gpu": [
+    0,
+    1
+  ],
   "sampling": {
     "temperature": 1.0,
     "top_p": 0.95,
@@ -58,6 +65,14 @@
   },
   "loop_guard": true,
   "fit_max_tokens": true,
-  "conversation_dir": "local/qwen-slots",
-  "conversation_dir_gib": 16
+  "conversation_dir": "local/qwen-q4-slots",
+  "conversation_dir_gib": 16,
+  "vision": {
+    "exe": "build-vision/build/bin/almond-vision",
+    "mmproj": "models/qwen38-q4/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+    "model": "models/qwen38-q4/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+    "gpu": false,
+    "max_tokens": 300,
+    "threads": 12
+  }
 }

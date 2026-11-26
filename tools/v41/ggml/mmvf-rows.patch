@@ -1,0 +1,93 @@
+--- a/ggml/src/ggml-cuda/mmvf.cu
++++ b/ggml/src/ggml-cuda/mmvf.cu
+@@ -1,3 +1,4 @@
++#include <type_traits>
+ #include "ggml.h"
+ #include "common.cuh"
+ #include "unary.cuh"
+@@ -396,6 +397,7 @@
+     const ggml_cuda_kernel_launch_params launch_params = {block_nums, block_dims, nbytes_shared, stream};
+ 
+     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
++
+     if constexpr (ncols_dst == 1) {
+         if (has_fusion) {
+             ggml_cuda_kernel_launch(mul_mat_vec_f<T, type_acc, ncols_dst, block_size, true, is_multi_token_id>, launch_params,
+@@ -415,6 +417,57 @@
+ 
+ }
+ 
++// Almond (tools/v41/ggml/mmvf-rows.patch), opt-in ALMOND_MMVF_ROWS=1: BF16 products with short rows (Hy4's per-head
++// attn_k_b, 192 columns, and attn_v_b, 512) ran one block of 96-256 threads per row, most of them idle or waiting in
++// the block reduction. Here one wave of 32 lanes takes a row and a block 8 rows; each lane reads 8 BF16 (16 bytes) at a
++// time and the wave reduces with shuffles. For up to 8 columns of y, no ids, no fusion.
++template <int ncols_dst>
++static __global__ void mul_mat_vec_bf16_rows(
++        const nv_bfloat16 * __restrict__ x, const float * __restrict__ y, float * __restrict__ dst,
++        const int ncols, const int nrows, const int stride_row, const int stride_col_y, const int stride_col_dst,
++        const uint3 channel_ratio, const int64_t stride_channel_x, const int64_t stride_channel_y, const int64_t stride_channel_dst,
++        const uint3 sample_ratio, const int64_t stride_sample_x, const int64_t stride_sample_y, const int64_t stride_sample_dst) {
++    const int lane = threadIdx.x & 31;
++    const int row  = blockIdx.x*8 + (threadIdx.x >> 5);
++    if (row >= nrows) {
++        return;
++    }
++    const int channel_dst = blockIdx.y, sample_dst = blockIdx.z;
++    const int channel_x = fastdiv((uint32_t) channel_dst, channel_ratio);
++    const int sample_x  = fastdiv((uint32_t) sample_dst, sample_ratio);
++    x   += sample_x*stride_sample_x + channel_x*stride_channel_x + (int64_t) row*stride_row;
++    y   += sample_dst*stride_sample_y + channel_dst*stride_channel_y;
++    dst += sample_dst*stride_sample_dst + channel_dst*stride_channel_dst;
++    float acc[ncols_dst] = { 0.0f };
++    for (int i = lane*8; i < ncols; i += 32*8) {
++        const uint4 v = *(const uint4 *) (x + i);
++        const uint32_t w[4] = { v.x, v.y, v.z, v.w };
++        float xf[8];
++#pragma unroll
++        for (int k = 0; k < 4; ++k) {
++            xf[2*k + 0] = __uint_as_float(w[k] << 16);
++            xf[2*k + 1] = __uint_as_float(w[k] & 0xFFFF0000u);
++        }
++#pragma unroll
++        for (int j = 0; j < ncols_dst; ++j) {
++            const float4 a = *(const float4 *) (y + j*stride_col_y + i);
++            const float4 b = *(const float4 *) (y + j*stride_col_y + i + 4);
++            acc[j] += xf[0]*a.x + xf[1]*a.y + xf[2]*a.z + xf[3]*a.w + xf[4]*b.x + xf[5]*b.y + xf[6]*b.z + xf[7]*b.w;
++        }
++    }
++#pragma unroll
++    for (int j = 0; j < ncols_dst; ++j) {
++        float s = acc[j];
++#pragma unroll
++        for (int off = 16; off > 0; off >>= 1) {
++            s += __shfl_xor(s, off, 32);
++        }
++        if (lane == 0) {
++            dst[j*stride_col_dst + row] = s;
++        }
++    }
++}
++
+ template <typename T, typename type_acc, int ncols_dst, bool is_multi_token_id = false>
+ void launch_mul_mat_vec_f_cuda(
+         const T * x, const float * y, const int32_t * ids, const ggml_cuda_mm_fusion_args_device fusion, float * dst,
+@@ -460,6 +513,19 @@
+     }
+ 
+     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
++    static const bool almond_rows = [] { const char * e = getenv("ALMOND_MMVF_ROWS"); return e && e[0] == '1'; }();
++    if constexpr (std::is_same_v<T, nv_bfloat16> && !is_multi_token_id) {
++        if (almond_rows && !ids && !has_fusion && ncols <= 2048 && ncols % 8 == 0 && stride_row % 8 == 0 &&
++                stride_col_y % 4 == 0 && stride_channel_x % 8 == 0 && stride_sample_x % 8 == 0 &&
++                stride_channel_y % 4 == 0 && stride_sample_y % 4 == 0 &&
++                (uintptr_t) x % 16 == 0 && (uintptr_t) y % 16 == 0 && warp_size == 32) {
++            const dim3 nb((nrows + 7)/8, nchannels_dst, nsamples_or_ntokens);
++            mul_mat_vec_bf16_rows<ncols_dst><<<nb, 256, 0, stream>>>(x, y, dst, ncols, nrows, stride_row, stride_col_y,
++                stride_col_dst, channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst, sample_ratio_fd,
++                stride_sample_x, stride_sample_y, stride_sample_dst);
++            return;
++        }
++    }
+ 
+     const int nbytes_shared = warp_size*sizeof(float) + (has_fusion ? warp_size*sizeof(float) : 0);
+     const dim3 block_nums(nrows, nchannels_dst, nsamples_or_ntokens);

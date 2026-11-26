@@ -5,7 +5,11 @@
 // rows at the image's pad tokens and gives them their 2-D M-RoPE positions (see --serve GENI in generate.cpp).
 //
 //   almond-vision --mmproj <mmproj.gguf> --model <text model .gguf, first split> [--gpu] [--threads N]
-//                 [--max-tokens N] [--no-flash-attn] [--no-warmup] [--measure]
+//                 [--max-tokens N] [--no-flash-attn] [--f32-matmul] [--no-warmup] [--measure]
+//
+// --f32-matmul: the HIP/CUDA backend's hipBLAS products in F32 (GGML_CUDA_CUBLAS_COMPUTE_TYPE=f32 for this process
+// only). ggml otherwise picks F16 for an F32 encoder's large products on RDNA3: Inkling's ended at cosine 0.95-0.98
+// against the CPU; with this and --no-flash-attn at 0.9999998 (docs/inkling/ENGINE.md, step 10).
 //
 // --measure: load, warm up at the largest picture, print "MEM <bytes> <base> <total>" and end - the GPU memory this
 // encoder needs on this machine (its weights and work buffers; <base> is what the device had in use once this
@@ -26,6 +30,7 @@
 #include "mtmd-helper.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,6 +41,20 @@
 
 namespace {
 
+// ALMOND_VISION_DUMP=<dir> (debugging): every named F32 tensor of the encoder's graph written to <dir>/<name>.bin
+bool dump_cb(struct ggml_tensor* t, bool ask, void* ud) {
+    const char* name = ggml_get_name(t);
+    const bool want = t->type == GGML_TYPE_F32 && name && name[0] && std::strncmp(name, "node_", 5) != 0 &&
+                      std::strstr(name, " (") == nullptr && ggml_is_contiguous(t);
+    if (ask) return want;
+    if (!want) return true;
+    std::vector<float> v((size_t) ggml_nelements(t));
+    ggml_backend_tensor_get(t, v.data(), 0, v.size() * 4);
+    std::string fn = std::string((const char*) ud) + "/" + name + ".bin";
+    for (size_t i = std::string((const char*) ud).size() + 1; i < fn.size(); ++i) if (fn[i] == '/') fn[i] = '_';
+    if (FILE* f = std::fopen(fn.c_str(), "wb")) { std::fwrite(v.data(), 4, v.size(), f); std::fclose(f); }
+    return true;
+}
 void quiet_log(ggml_log_level level, const char* text, void*) {
     if (level >= GGML_LOG_LEVEL_WARN) std::fputs(text, stderr);
 }
@@ -65,6 +84,8 @@ int main(int argc, char** argv) {
     bool no_fa = false;   // the attention in full precision (flash attention keeps K/V in F16)
     bool warm = true;     // --no-warmup: started on demand into memory set aside for it (serve/server.py)
     bool measure = false;
+    // --hy4-rows (or ALMOND_VISION_HY4_ROWS=1 in the environment): Hy4-flash's row layout in the record's grid
+    bool hy4_rows = std::getenv("ALMOND_VISION_HY4_ROWS") != nullptr;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string {
@@ -78,7 +99,9 @@ int main(int argc, char** argv) {
         else if (a == "--max-tokens") max_tokens = std::atoi(next().c_str());
         else if (a == "--no-flash-attn") no_fa = true;
         else if (a == "--no-warmup") warm = false;
+        else if (a == "--hy4-rows") hy4_rows = true;
         else if (a == "--measure") measure = true;
+        else if (a == "--f32-matmul") setenv("GGML_CUDA_CUBLAS_COMPUTE_TYPE", "f32", 1);   // before the backends start
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
     }
     if (mmproj.empty() || model.empty()) {
@@ -106,6 +129,7 @@ int main(int argc, char** argv) {
     if (!text) { std::printf("ERR cannot open the text model %s\n", model.c_str()); std::fflush(stdout); return 1; }
 
     mtmd_context_params cp = mtmd_context_params_default();
+    if (const char* d = std::getenv("ALMOND_VISION_DUMP")) { cp.cb_eval = dump_cb; cp.cb_eval_user_data = (void*) d; }
     cp.use_gpu = gpu;
     cp.print_timings = false;
     cp.warmup = false;
@@ -197,6 +221,7 @@ int main(int argc, char** argv) {
         const std::string prompt = mtmd_default_marker();
         mtmd_input_text txt{prompt.c_str(), prompt.size(), false, true};
         const mtmd_bitmap* bm[1] = {bw.bitmap};
+        const int img_w = (int) mtmd_bitmap_get_nx(bw.bitmap), img_h = (int) mtmd_bitmap_get_ny(bw.bitmap);
         std::string err;
         if (mtmd_tokenize(ctx, chunks, &txt, bm, 1) != 0)
             err = vid ? "the video could not be decoded" : "the image could not be preprocessed";
@@ -222,6 +247,18 @@ int main(int argc, char** argv) {
             const mtmd_decoder_pos last = mtmd_image_tokens_get_decoder_pos(it, 0, (size_t) n - 1);
             nx = grid ? (int) last.x + 1 : n;
             ny = grid ? (int) last.y + 1 : 1;
+            if (!grid && hy4_rows && n > 1) {
+                // --hy4-rows (Hy4-flash, llama.cpp PR #32517: mtmd gives no grid for it): the rows are H lines of W
+                // patches plus a newline token each, n = H * (W + 1); of the factorizations the one whose H / W is
+                // nearest the picture's own height / width is taken, and the record says W + 1 by H
+                double best = 1e30;
+                for (int h = 1; h <= n; ++h) {
+                    if (n % h || n / h < 2) continue;
+                    const int w = n / h - 1;
+                    const double d = std::fabs(std::log((double) h / w) - std::log((double) img_h / img_w));
+                    if (d < best) { best = d; nx = w + 1; ny = h; }
+                }
+            }
             if (nx * ny != n) { err = "the image grid is not rectangular (" + std::to_string(n) + " tokens)"; break; }
             const float* embd = mtmd_get_output_embd(ctx);
             const int32_t hdr[5] = {0x31455653, n, nx, ny, n_embd};

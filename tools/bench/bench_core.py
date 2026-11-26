@@ -66,8 +66,10 @@ PROMPTS = {
 
 
 # ---------------------------------------------------------------- client
-def chat(url, model, messages, tools=None, max_tokens=2048, temperature=0.0, api_key=None, timeout=1800):
+def chat(url, model, messages, tools=None, max_tokens=2048, temperature=0.0, api_key=None, timeout=1800, reasoning=None):
     body = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}
+    if reasoning:  # none / low / medium / high; unset: the server's default (Almond's: high)
+        body["reasoning_effort"] = reasoning
     if tools:
         body["tools"] = tools
     req = urllib.request.Request(url.rstrip("/") + "/chat/completions", data=json.dumps(body).encode(),
@@ -78,7 +80,14 @@ def chat(url, model, messages, tools=None, max_tokens=2048, temperature=0.0, api
         out = json.load(r)
     msg = out["choices"][0]["message"]
     return msg, {"seconds": time.time() - t0, "completion_tokens": out.get("usage", {}).get("completion_tokens", 0),
-                 "truncated": out["choices"][0].get("finish_reason") == "length"}
+                 "truncated": out["choices"][0].get("finish_reason") == "length",
+                 "reasoning": msg.get("reasoning_content") or ""}
+
+
+def loop_score(text):
+    """how much of the text's last part is lines it already wrote: near 1 a model repeating itself"""
+    lines = [l.strip() for l in text[-6000:].splitlines() if len(l.strip()) > 20]
+    return 1 - len(set(lines)) / len(lines) if len(lines) >= 8 else 0.0
 
 
 def list_models(url, api_key=None):
@@ -286,6 +295,7 @@ class Run:
     started: str
     preset: str = "quick"
     judge: str | None = None
+    reasoning: str | None = None  # the reasoning_effort sent; None: the server's default
     results: list = field(default_factory=list)
     path: str | None = None
     data: dict = field(default_factory=ds.versions)  # suite -> sha256 of its file (datasets.py manifest)
@@ -311,7 +321,7 @@ class Run:
             self.path = os.path.join(RUNS, f"{self.started.replace(':', '')}-{re.sub(r'[^\w.-]', '_', self.model)}-{self.preset}.json")
         tmp = self.path + ".part"
         json.dump({"model": self.model, "url": self.url, "started": self.started, "preset": self.preset,
-                   "judge": self.judge, "data": self.data, "summary": self.summary(), "results": [asdict(r) for r in self.results]},
+                   "judge": self.judge, "reasoning": self.reasoning, "data": self.data, "summary": self.summary(), "results": [asdict(r) for r in self.results]},
                   open(tmp, "w"), indent=1, ensure_ascii=False)
         os.replace(tmp, self.path)
         return self.path
@@ -319,7 +329,7 @@ class Run:
     @staticmethod
     def load(path):
         d = json.load(open(path))
-        r = Run(d["model"], d["url"], d["started"], d.get("preset", "quick"), d.get("judge"), path=path, data=d.get("data") or {})
+        r = Run(d["model"], d["url"], d["started"], d.get("preset", "quick"), d.get("judge"), path=path, data=d.get("data") or {}, reasoning=d.get("reasoning"))
         r.results = [Result(**x) for x in d["results"]]
         return r
 
@@ -347,7 +357,8 @@ def run_task(suite, task, opts):
     extra = {}
     try:
         if kind == "bfcl":
-            msg, st = chat(url, model, task["messages"], tools=bfcl.tools(task), max_tokens=max_tok, api_key=key)
+            msg, st = chat(url, model, task["messages"], tools=bfcl.tools(task), max_tokens=max_tok, api_key=key,
+                           reasoning=opts.get("reasoning"))
             calls = []
             for c in msg.get("tool_calls") or []:
                 try:
@@ -360,7 +371,7 @@ def run_task(suite, task, opts):
         else:
             tmpl = PROMPTS.get(suite) or PROMPTS.get(kind) or "{prompt}"
             msg, st = chat(url, model, [{"role": "user", "content": tmpl.format(prompt=task["prompt"])}],
-                           max_tokens=max_tok, api_key=key)
+                           max_tokens=max_tok, api_key=key, reasoning=opts.get("reasoning"))
             text = strip_think(msg.get("content"))
             if kind == "choice":
                 score, note = grade_choice(task, text)
@@ -375,8 +386,10 @@ def run_task(suite, task, opts):
     except Exception as ex:  # noqa: BLE001
         return Result(suite, task["id"], task.get("category", suite), 0.0, f"error: {ex}", "", 0, 0)
     if st.get("truncated"):  # the reasoning ran into max_tokens: a 0 here says nothing about the answer
-        note = f"TRUNCATED at max_tokens ({max_tok}) | {note}"
-        extra["truncated"] = True
+        think = st.get("reasoning") or (msg.get("content") or "")
+        loop = loop_score(think)
+        note = f"TRUNCATED at max_tokens ({max_tok}){', looping' if loop > 0.5 else ''} | {note}"
+        extra.update(truncated=True, loop=round(loop, 2), reasoning_tail=think[-3000:])
     return Result(suite, task["id"], task.get("category", suite), score, note, text, st["seconds"],
                   st["completion_tokens"], extra)
 
@@ -406,13 +419,16 @@ def main():
     ap.add_argument("--judge-url")
     ap.add_argument("--api-key")
     ap.add_argument("--max-tokens", type=int, help="override every suite's own limit")
+    ap.add_argument("--reasoning", choices=["none", "low", "medium", "high"],
+                    help="the thinking level sent as reasoning_effort (default: the server's, Almond's is high)")
     ap.add_argument("--resume", help="a run file to continue")
     a = ap.parse_args()
     have = available_suites()
     pick = [s for s in a.suites.split(",") if s in have] if a.suites else [s for s in have if s != "arena-hard"]
     opts = {"url": a.url, "model": a.model, "judge_model": a.judge_model, "judge_url": a.judge_url,
-            "api_key": a.api_key, "max_tokens": a.max_tokens}
-    run = Run.load(a.resume) if a.resume else Run(a.model, a.url, time.strftime("%Y-%m-%dT%H:%M:%S"), a.preset, a.judge_model)
+            "api_key": a.api_key, "max_tokens": a.max_tokens, "reasoning": a.reasoning}
+    run = Run.load(a.resume) if a.resume else Run(a.model, a.url, time.strftime("%Y-%m-%dT%H:%M:%S"), a.preset, a.judge_model, a.reasoning)
+    opts["reasoning"] = run.reasoning  # a resumed run keeps its own level
 
     def show(i, n, r):
         print(f"[{i}/{n}] {r.suite:10} {r.id:28} {'-' if r.score is None else f'{r.score:.2f}':>5}  {r.note[:70]}", flush=True)

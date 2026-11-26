@@ -178,6 +178,10 @@ struct Model {
     ggml_backend_t cpu = nullptr;
     std::vector<ggml_context*> wctx;         // per device (+ CPU last)
     std::vector<ggml_backend_buffer_t> bufs;
+    // the FFN weights of each layer on card 0 in their own buffer (one card, no --tp), lendable to the on-demand image
+    // encoder: VLEND frees the last layers' buffers, VRECLAIM allocates them again and reads them back from the GGUF
+    struct Lend { int il; ggml_context* ctx; ggml_backend_buffer_t buf; };
+    std::vector<Lend> lend;
     ggml_tensor *tok_embd = nullptr, *out_norm = nullptr, *output = nullptr;
     std::vector<Layer> L;                     // n_layer + n_nextn
     // persistent tensors on the last card
@@ -408,10 +412,15 @@ void load(Model& m) {
         ggml_init_params ip = {ggml_tensor_overhead() * 2048, nullptr, true};
         c = ggml_init(ip);
     }
+    const bool lendable = ng == 1 && !m.o.tp && !std::getenv("QWEN35_NO_LEND");
+    ggml_context* lctx = nullptr;   // the layer being placed's FFN context (lendable)
     auto place = [&](const std::string& name, int dev, bool req = true) -> ggml_tensor* {
         ggml_tensor* t = need(m, name, req);
         if (!t) return nullptr;
-        ggml_tensor* d = ggml_dup_tensor(m.wctx[dev < 0 ? ng : dev], t);
+        const bool ffn = lctx && dev == 0 && (name.find(".ffn_gate.weight") != std::string::npos ||
+                                              name.find(".ffn_up.weight") != std::string::npos ||
+                                              name.find(".ffn_down.weight") != std::string::npos);
+        ggml_tensor* d = ggml_dup_tensor(ffn ? lctx : m.wctx[dev < 0 ? ng : dev], t);
         ggml_set_name(d, name.c_str());
         return d;
     };
@@ -456,6 +465,11 @@ void load(Model& m) {
             l.ssm_norm = P("ssm_norm.weight");
             l.ssm_out = P("ssm_out.weight");
         }
+        if (lendable && il < h.n_layer && d == 0) {
+            ggml_init_params ip = {ggml_tensor_overhead() * 4, nullptr, true};
+            lctx = ggml_init(ip);
+            m.lend.push_back({il, lctx, nullptr});
+        }
         l.ffn_gate = P("ffn_gate.weight");
         l.ffn_up = P("ffn_up.weight");
         l.ffn_down = P("ffn_down.weight");
@@ -465,6 +479,7 @@ void load(Model& m) {
             l.hc_ffn_w = P("hc_ffn_fn.weight");
             l.hc_ffn_b = P("hc_ffn_fn.bias");
         }
+        lctx = nullptr;
         if (il >= h.n_layer) {
             l.eh_proj = P("nextn.eh_proj.weight");
             l.enorm = P("nextn.enorm.weight");
@@ -483,13 +498,20 @@ void load(Model& m) {
         ggml_backend_buffer_set_usage(b, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
         m.bufs.push_back(b);
     }
+    for (Model::Lend& L : m.lend) {
+        L.buf = ggml_backend_alloc_ctx_tensors_from_buft(L.ctx, ggml_backend_get_default_buffer_type(m.gpu[0]));
+        if (!L.buf) die("cannot allocate the FFN weights of layer " + std::to_string(L.il));
+        ggml_backend_buffer_set_usage(L.buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+    }
     const int fd = ::open(m.o.model.c_str(), O_RDONLY);
     if (fd < 0) die("cannot open " + m.o.model);
     const size_t data_off = gguf_get_data_offset(m.gguf);
     std::vector<uint8_t> stage(64u << 20);
     size_t total = 0;
-    for (int d = 0; d <= ng; ++d)
-        for (ggml_tensor* t = ggml_get_first_tensor(m.wctx[d]); t; t = ggml_get_next_tensor(m.wctx[d], t)) {
+    std::vector<ggml_context*> all(m.wctx.begin(), m.wctx.end());
+    for (const Model::Lend& L : m.lend) all.push_back(L.ctx);
+    for (ggml_context* wc : all)
+        for (ggml_tensor* t = ggml_get_first_tensor(wc); t; t = ggml_get_next_tensor(wc, t)) {
             const int64_t id = gguf_find_tensor(m.gguf, ggml_get_name(t));
             const size_t off = data_off + gguf_get_tensor_offset(m.gguf, id), n = ggml_nbytes(t);
             if (m.o.tp && stage.size() < n) stage.resize(n);   // the meta backend sets a split tensor whole
@@ -2353,6 +2375,51 @@ bool image_request(Engine& E, const std::string& file, const std::vector<std::st
     return true;
 }
 
+// VLEND: free the last layers' FFN buffers until `want` bytes are free on card 0 -> the bytes freed (0: nothing
+// lendable or already free); VRECLAIM: allocate them again and read the weights back from the GGUF (false while the
+// memory is still taken: then nothing more is done).  The weights come back byte for byte; the graphs read them
+// through their tensors, so the new addresses are picked up (ggml's HIP graphs see the change and capture again).
+size_t lend_out(Model& m, size_t want) {
+    if (m.lend.empty()) return 0;
+    ggml_backend_synchronize(m.gpu[0]);
+    size_t got = 0;
+    for (size_t i = m.lend.size(); i-- > 0 && free_vram(m.o.gpus[0]) < want;) {
+        Model::Lend& L = m.lend[i];
+        if (!L.buf) continue;
+        got += ggml_backend_buffer_get_size(L.buf);
+        ggml_backend_buffer_free(L.buf);
+        L.buf = nullptr;
+        for (ggml_tensor* t = ggml_get_first_tensor(L.ctx); t; t = ggml_get_next_tensor(L.ctx, t)) { t->data = nullptr; t->buffer = nullptr; }
+    }
+    return got;
+}
+bool lend_owed(const Model& m) { for (const Model::Lend& L : m.lend) if (!L.buf) return true; return false; }
+bool lend_back(Model& m) {
+    const int fd = ::open(m.o.model.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    const size_t data_off = gguf_get_data_offset(m.gguf);
+    std::vector<uint8_t> stage(64u << 20);
+    bool ok = true;
+    for (Model::Lend& L : m.lend) {
+        if (L.buf) continue;
+        L.buf = ggml_backend_alloc_ctx_tensors_from_buft(L.ctx, ggml_backend_get_default_buffer_type(m.gpu[0]));
+        if (!L.buf) { ok = false; break; }
+        ggml_backend_buffer_set_usage(L.buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        for (ggml_tensor* t = ggml_get_first_tensor(L.ctx); t; t = ggml_get_next_tensor(L.ctx, t)) {
+            const int64_t id = gguf_find_tensor(m.gguf, ggml_get_name(t));
+            const size_t off = data_off + gguf_get_tensor_offset(m.gguf, id), n = ggml_nbytes(t);
+            for (size_t done = 0; done < n;) {
+                const size_t c = std::min(stage.size(), n - done);
+                if (::pread(fd, stage.data(), c, (off_t) (off + done)) != (ssize_t) c) die("short read of " + std::string(ggml_get_name(t)));
+                ggml_backend_tensor_set(t, stage.data(), done, c);
+                done += c;
+            }
+        }
+    }
+    ::close(fd);
+    return ok;
+}
+
 int serve(Engine& E) {
     LineQueue lq;
     E.stop = &lq.stop;
@@ -2375,6 +2442,27 @@ int serve(Engine& E) {
         if (line == "CONVCLEAR") {
             E.clear();
             std::printf("CLEARED\n");
+            std::fflush(stdout);
+            continue;
+        }
+        // VLEND / VRECLAIM (between requests, as the GLM engine): the on-demand image encoder starts on card 0 in the
+        // FFN memory of the last layers ("VLENT <bytes>") and has ended ("VRECLAIMED", or ERR: the server asks again)
+        Model& mm = const_cast<Model&>(E.m);
+        if (line == "VLEND") {
+            const char* e = std::getenv("ALMOND_VISION_LEND_MB");
+            if (!e) e = std::getenv("ALMOND_GLM_VISION_LEND_MB");
+            if (mm.lend.empty()) std::printf("ERR nothing to lend (two cards or --tp: the FFN weights are not lendable)\n");
+            else std::printf("VLENT %zu\n", lend_out(mm, (size_t) ((e ? std::atof(e) : 1024.0) * 1048576) + (256u << 20)));
+            std::fflush(stdout);
+            continue;
+        }
+        if (line == "VRECLAIM") {
+            std::printf(lend_back(mm) ? "VRECLAIMED\n" : "ERR the lent memory is not free yet\n");
+            std::fflush(stdout);
+            continue;
+        }
+        if (lend_owed(mm) && !lend_back(mm)) {
+            std::printf("ERR the FFN memory lent to the image encoder is not back yet\n");
             std::fflush(stdout);
             continue;
         }

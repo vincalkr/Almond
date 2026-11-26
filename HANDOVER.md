@@ -57,8 +57,73 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 - Streams send events while a long prompt is read or a call written inside the thinking is held; dsh's own idle
   timeout (300 s, pi-ai) must still be raised for a local provider (`streamIdleTimeoutMs`).
 - `fit_max_tokens` on: a client's max_tokens beside a long prompt gets the room left, not a 400.
+- **Hy4-flash dying at the last MiB of the cards** (segfaults on 2026-11-21 inside `libamdhip64`, at one non-temporal
+  copy with a null destination; the kernel says `*ERROR* Not enough memory for command submission!` on card 0 before
+  them): hy4's graph is unstable - 1,548 of its 1,874 trunk nodes change their `data` pointer between two computes -
+  so ggml re-captured it thousands of times a session, and each ROCm capture/instantiation keeps ~2 MiB on the card.
+  Two ceilings now, in the three hy4 configurations: `GGML_CUDA_GRAPH_RECAPTURE_MAX=16` per graph and
+  `GGML_CUDA_GRAPH_CAPTURE_MAX=128` for the process (vendored ggml, `tools/v41/ggml/graph-recapture-guard.patch`).
+  Measured: the captures stop at 82 and the free room stops moving (`card 0 1628 / card 1 1834 MiB` from step 512 to
+  1408, where it used to fall 100 -> 0 in 448); decode 24.54 tok/s (was 22.8-23.3 without the ceilings);
+  `--reserve-mib 2400` was tried for it and put back to 1400: with the ceilings a resumed session read prompts up to
+  **171,646 tokens** - past the 140K where it had died - without one `ROCm pool[0] ... flushing` line, and 2400 would
+  cost two expert layers (27 of 42 instead of 29) and 7% of the prompt (434.3 against 469 tok/s) for 1 GiB of slack.
+  A 2.99 GiB block seen on the cards after a death was the hung process, not a driver leak: `VM memory stats ... is
+  non-zero when fini` when it finally exited. Measurements: docs/hy4/GGUF_NOTES.md, "The seven deaths of 2026-11-21".
+  Making the graph stable instead (bucketing the indexer's pool) was tried the same evening and **measured worthless**:
+  the graph counters do not move and the speed neither, with the graphs off entirely the run is as fast - the churn is
+  `data` pointers, not shapes. Left open: how far a *single* generation (not a prompt) goes, and the 64K case where the
+  prefetch turns itself off, not measured.
 
 ## Open
+
+- Hy4-flash speed work: state, measurements and what is being tried in `docs/hy4/SPEED_WORK.md` (2026-11-22).
+- **The Q8_0 short-row matvec, closed (2026-11-22)**: `mul_mat_vec_q8_0_rows` is bit-identical to ggml's kernel and
+  worth **+10.1%** of decode at one token a step (16.34 -> 17.99 tok/s), nothing at the 2-4 tokens of a verify batch.
+  Measured on the products themselves (`build-hip-fused/bench_hy4_q8`, `local/hy4-q8-bench.sh`, six weights per shape
+  so L2 doesn't flatter it): at 2-4 tokens **both kernels are at the memory roof** (45,1 MB in ~64 us, ~700 GB/s), so
+  there is no kernel prize there at all - the dense Q8_0 a step moves is ~85 MB a layer, ~3,7 GB a step, 6-7 ms of an
+  ~87 ms round, and only fewer bytes would move it. At one token ours wins 18-40% on four of six shapes and loses on
+  the wide one; the code now chooses **one wave a row** (it beat 2 and 4 waves everywhere but that), `ALMOND_MMVQ_WPR`
+  forces the others. The flag stays off. `docs/hy4/GGUF_NOTES.md`, "The same for Q8_0 rows".
+- **The host -> card copy path, measured and closed (2026-11-22)**: `build-hip-fused/bench_hy4_copy <dev> <MiB>
+  [mapped]` - `hipMemcpyAsync` gives 28.0-28.7 GB/s to card 0 and 3.3 GB/s to card 1 (its x2 uplink), on the legacy
+  stream and on a non-blocking stream of its own alike, at 4..128 MiB, so the expert staging of `--prefetch-experts`
+  (~27 GB/s in the engine) is at the link's roof and Avalon's "take it off the legacy stream" buys nothing here.  The
+  other half of Avalon's trick - a copy kernel reading registered host memory - does not work on this machine: it
+  launches, times at 12.5-12.9 / 102-111 GB/s, and its bytes are wrong under a per-arm content check; the host
+  pointer instead of the `hipHostGetDevicePointer` alias faults the process (139). That check is in the bench because
+  an earlier version of it scored 107 GB/s for a kernel that moved nothing. `docs/hy4/SPEED_WORK.md`.
+- The other engines and forks for our models, swept 2026-11-22 (Avalon, Strata and its EXL3 AMD fork, project-maya,
+  Xolotl, exllamav3-rocm(-moe), elpis, the RDNA3 INT4 tree, llama.cpp's two-month delta against our vendored ggml):
+  what each carries that we do not, their numbers as they print them, and the six things worth taking, in `docs/ENGINES_WATCH.md`.
+- `--ipool-f16` (the indexer's pooled keys as F16): tried 2026-11-21 and not shipped - 434.3 -> 46.6 prompt tok/s at
+  256K because the F16 pool leaves the fused indexer and casts the pool to F32 inside the graph, for 80/120 MiB and no
+  expert layer, and KL 0.00000 / top-1 100.00% against the F32 pool (docs/hy4/GGUF_NOTES.md). Its 275 lines are
+  parked in `local/ipool-f16-wip.patch` (not tracked) for whoever teaches `ggml_lightning_indexer` to read F16 pool
+  keys; that same staged diff also carried the prefetch staging into `place()`'s budget, which is committed.
+- Hy4 `--host-moe`, publish / wait split (2026-11-22, committed): one ggml op more (`GGML_OP_HOST_MOE_PUBLISH`, a
+  ticket tensor, `GGML_OP_COUNT` 105) so a RAM layer's shared expert runs while the host computes its routed experts.
+  Measured on the configuration of record, two alternate pairs: prompt +3.4%, decode round -2.8% (~2,5 ms where 3,5 ms
+  was the ceiling), decode tok/s unchanged; on `hy4-local-fast.json` (16 host layers) the same pair goes the other way,
+  +2.3% a round. **Re-measured the same day against a reference that repeats: the path is bit-identical (KL 0.00000,
+  graphs on and off) and its speed is inside the machine's ~2% jitter** (557 rounds, 443 accepted, the same text twice:
+  89.8 and 87.7 ms a round, against 88.9 shipped) - so the +3.4% / -2.8% above was the pick's drift, not the flag. Stays
+  off, for the better reason. `tools/v41/ggml/host-moe-publish.patch`, `local/hy4-host-moe-check.sh`,
+  `local/hy4-host-moe-quality-check.sh`.
+- **The hy4 engine did not repeat run to run; the cause is the pool pick `ggml_top_k`** (2026-11-22,
+  `local/hy4-determinism-check.sh` → `local/hy4-drift-hunt.sh` → `local/hy4-indexer-sort-check.sh`): two runs of one
+  configuration scored **KL 0.12 - 0.14 / top-1 ~88%** over 8,190 teacher-forced rows; with `--fused-indexer` taken out
+  the same pair is **KL 0.00000 / 100.00%**. `--fused-indexer` picks the pool groups with `ggml_top_k`, whose CUDA/HIP
+  kernel is a radix select placing the keys tied with the k-th by `atomicAdd` (`ggml-cuda/top-k.cu:201,204`) - and the
+  dead pool slots all carry the same mask value, so the boundary of the top-k is a pile of ties. The new
+  `--indexer-argsort` keeps the fused score kernel and sorts for the picks: **KL 0.00000, top-1 100.00%, the same ppl
+  to four digits**, for **+0.8% of a round** (prompt unchanged, 471.0 -> 470.3). **That is the default now** (the user's
+  go-ahead, 2026-11-22): `--indexer-topk` buys the old pick back for that 0.8%, `--indexer-argsort` is kept as a no-op.
+  Verified with the shipped flags and no indexer flag at all: ppl 35.5641 twice, KL 0.00000, top-1 100.00%. The drift
+  is a long-pool effect: the KL tables of `docs/hy4/GGUF_NOTES.md` at 2,048-4,096-token windows repeat exactly and
+  stand; `--ram-requant q3_k` re-measured at the long window is KL 0.02874 / top-1 92.81% / ppl 35.5641 -> 35.4973. Engram placement
+  (ram/ssd), `--fused-hc`, the graphs and the expert prefetch were all excluded.
 
 - **Qwen3.8-27B:** images (CPU encoder, 300 image tokens: a large screenshot's small text is not legible, as on
   Flash-Next) and conversations on disk work; measured on a few pictures and one restart, not in long agent sessions. The 4-token verify window costs 1.4 decode tokens (ggml's MMVQ is
@@ -89,6 +154,7 @@ Where Almond stands and what is open. How it runs and every measured number: [RE
 
 - Never expose a server beyond `127.0.0.1` without `--api-key`.
 - A new feature is opt-in; a default changes only where it measured better, with the numbers written down.
-- The engine is not bit-reproducible run to run: compare quality with PPL on fixed documents, Lucebox or repeated
-  runs, not with a diff.
+- Reproducibility: a hy4 run **repeats exactly** since 2026-11-22 (the indexer's pool pick sorts; `--indexer-topk` for
+  the old way). The other engines do not - an expert's kernel depends on where it is served from, which depends on
+  timing. Compare quality with PPL on fixed documents, Lucebox or repeated runs, not with a diff.
 - Commit messages in English.

@@ -38,6 +38,10 @@ GGML_BACKEND_API void ggml_backend_cuda_get_device_description(int device, char 
 GGML_BACKEND_API void ggml_backend_cuda_get_device_memory(int device, size_t * free, size_t * total);
 
 GGML_BACKEND_API bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size);
+
+// Almond: mapped pinned memory (one address for the host and every device), for ggml_host_moe's bell
+GGML_BACKEND_API void * ggml_backend_cuda_alloc_mapped(size_t size);
+GGML_BACKEND_API void   ggml_backend_cuda_free_mapped(void * ptr);
 GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
 
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);

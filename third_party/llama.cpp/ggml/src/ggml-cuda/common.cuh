@@ -1274,6 +1274,13 @@ struct ggml_cuda_graph {
     size_t num_nodes = 0;
     std::vector<cudaGraphNode_t> nodes;
     bool disable_due_to_gpu_arch = false;
+    // Almond (GGML_CUDA_GRAPH_RECAPTURE_MAX / GGML_CUDA_GRAPH_CAPTURE_MAX): a graph whose node properties change on
+    // most computes is captured again on most computes. hy4 at 256K: 1,624 captures over 8,192 graph computes in one
+    // session, and every capture and instantiation keeps room on the card (~2 MiB, and hipGraphDestroy does not give
+    // it back) - that is what ran the cards to empty and died inside libamdhip64 (tools/hy4/graph-vram.hip,
+    // docs/hy4/GGUF_NOTES.md "The seven deaths of 2026-11-21"). Counting them is what makes it stoppable.
+    bool disable_due_to_churn = false;
+    int64_t n_computes = 0, n_recaptures = 0;
     bool warmup_complete = false;
     uint64_t uid = 0;
     int64_t last_used_time = 0;
@@ -1287,7 +1294,7 @@ struct ggml_cuda_graph {
 
     bool is_enabled() const {
         static const bool disable_cuda_graphs_due_to_env = (getenv("GGML_CUDA_DISABLE_GRAPHS") != nullptr);
-        return !(disable_due_to_gpu_arch || disable_cuda_graphs_due_to_env);
+        return !(disable_due_to_gpu_arch || disable_cuda_graphs_due_to_env || disable_due_to_churn);
     }
 #endif
 };

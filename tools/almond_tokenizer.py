@@ -97,14 +97,29 @@ GLM4_PATTERN = (
     r"|\s+"
 )
 
+# Inkling 2 Mini (`inkling2`): llama.cpp's LLAMA_VOCAB_PRE_TYPE_GPT4O (src/llama-vocab.cpp, the o200k split: a word's
+# case run, digits in threes, punctuation with a trailing slash), with ignore_merges (llama-vocab.cpp's `inkling2`).
+# The active pattern is llama.cpp's, which spells the tokenizer.json lookarounds as the `regex` module reads them.
+GPT4O_PATTERN = (
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
+    r"|\p{N}{1,3}"
+    r"| ?[^\s\p{L}\p{N}]+[\r\n/]*"
+    r"|\s*[\r\n]+"
+    r"|\s+(?!\S)"
+    r"|\s+"
+)
+
 # pre type -> the pattern list llama.cpp applies, in order.  The `pre` string in GGUF metadata selects it.
 PRE_PATTERNS = {
     "qwen35": [QWEN35_PATTERN],
     "joyai-llm": JOYAI_LLM_PATTERNS,
+    "hy_v4": JOYAI_LLM_PATTERNS,     # Hy4-flash: llama.cpp PR #32517 groups LLAMA_VOCAB_PRE_TYPE_HY_V4 with JOYAI_LLM
     "glm4": [GLM4_PATTERN],
     "glm5": [GLM4_PATTERN],
+    "inkling2": [GPT4O_PATTERN],
 }
-IGNORE_MERGES = {"glm4", "glm5"}
+IGNORE_MERGES = {"glm4", "glm5", "inkling2"}
 
 
 class Tokenizer:

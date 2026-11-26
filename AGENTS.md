@@ -2,7 +2,7 @@
 
 Almond is a multi-model engine for AMD RX 7900 XTX cards (ROCm/HIP), for MoE and dense models: the MoE models
 DeepSeek-V4.1-Flash-1017 (the published GSQ-RCO IQ2_XXS pack), GLM-5.3-Flash (GSQ-RCO 3.5bit) and Qwen3.8-Flash-Next
-(GSQ-RCO IQ3_S), their experts across card 0, a second 24 GB card, pinned RAM and NVMe, and the dense Qwen3.8-27B
+(Unsloth UD-Q4_K_XL), their experts across card 0, a second 24 GB card, pinned RAM and NVMe, and the dense Qwen3.8-27B
 (GSQ-RCO IQ3_S) on one card. One C++/HIP executable, `build-hip-fused/almond-engine` (DeepSeek's path in `src/ds41`,
 GLM's in `src/glm` when its arguments name `--glm-pack`, Qwen's in `src/qwen` when they name `--qwen`, the dense
 Qwen3.8-27B's in `src/qwen35` when they name `--qwen35`, the shared libraries in `src/` and `include/`); an OpenAI- and Anthropic-compatible server (`serve/`,
@@ -32,13 +32,38 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
 - The quantization of a model is chosen in `local/fetch.sh` (separate items, each with its configuration and router
   entry); the router leaves out an entry whose files are not downloaded.
 - Qwen3.8-27B (dense): `local/qwen27-local.json` (`./almond serve --model qwen27`, `src/qwen35`, `--qwen35`: one
-  card, 192K, q8_0 KV, MTP 3; `-vision` with its encoder); `local/qwen27-local-256k.json` on two cards; `local/qwen27-q8-local.json` the Q8_0 on two cards (the two-card ones with `--tp`, tensor parallel, docs/MODELS.md) (`./almond -m qwen27-q8`); `-dspine` configurations with Tencent's DSpine drafting inside code and MTP elsewhere (`--spec auto`, `./almond -m qwen27-dspine`). Files in `models/qwen38-27b` (docs/MODELS.md, "Qwen3.8-27B").
-- Qwen: `local/qwen-local.json` on card 0 (`local/qwen-local-vision.json` with its encoder,
-  `models/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf`, read on the CPU): the GGUF's two shards in
-  `models/qwen38-iq3s`, its pack in `models/qwen38-iq3s-pack` (`tools/qwen/iq_pack.py`), the MTP block in
-  `models/qwen38-mtp` (`tools/qwen/mtp_fetch.py`, `mtp_pack.py`, `mtp_rt.py`); `local/qwen-q8-local.json` unsloth's
-  Q8_0 on two cards with at most 56 GiB of experts in RAM (`./almond -m qwen-q8`, ~16 tok/s; a whole-RAM arena
-  stalled the machine).
+  card, 192K, q8_0 KV, MTP 3; `-vision` with its encoder); `local/qwen27-q8-local.json` the Q8_0 on two cards, 256K (with `--tp`, tensor parallel, docs/MODELS.md) (`./almond -m qwen27-q8`). Files in `models/qwen38-27b` (docs/MODELS.md, "Qwen3.8-27B").
+- Hy4-flash: `local/hy4-local.json` (`-vision` with its encoder and `build-vision-hy4`) (`./almond serve --model hy4`, `src/hy4`, `--hy4`: cards 0 and 1, the experts that
+  do not fit in VRAM read from RAM, the Engram table from the SSD or RAM, `--engram-place auto`); files in
+  `models/hy4-iq2ah` with the tokenizer extracted by `tools/almond_tokenizer.py`; images with
+  `build-vision-hy4/bin/almond-vision` (built against the PR's mtmd); docs/hy4/GGUF_NOTES.md.
+- Inkling 2 Mini: `local/inkling-local.json` (`./almond serve --model inkling`, `./almond -m inkling`): Unsloth's
+  UD-Q4_K_XL (17.6 GB) on card 0, 256K, q8_0 KV (192K with DSpark; until 2026-11-24 128K F16, the numbers below), on Almond's own engine `build-inkling/almond-inkling-native`
+  (`src/inkling/native`, HIP, no ggml; docs/inkling/ENGINE.md): through the server 1,500 tok/s prefill at 5.7K and
+  1,047 at 48K, 55-64 tok/s decode, against 553 / 337 and 29 on llama.cpp, KL from Q8_0 0.00557 against 0.00573.
+  The llama.cpp path (`build-inkling/almond-inkling`, `src/inkling`) is no longer served (removed as slower; its
+  numbers stay in docs/inkling/); files in `models/inkling2-mini` (`local/fetch.sh inkling`), measurements in `local/inkling-measure.sh`
+  and docs/inkling/.
+  Images: `local/inkling-local-vision.json` (launch.py picks it when the encoder is there): Unsloth's mmproj F32
+  (`local/fetch.sh inkling-vision`) through `build-vision-inkling/bin/almond-vision` (built by `./build.sh` against
+  `build-inkling/llama.cpp`'s mtmd), the rows read by the native engine (`GENI`); the encoder on card 0 only while a
+  request's pictures are encoded, in the experts' memory the engine lends it (`VLEND` / `VRECLAIM`, as GLM; F32
+  products and no flash attention, `f32_matmul` / `no_flash_attn`), then the model is back byte for byte; answers
+  checked against llama.cpp's server (docs/inkling/ENGINE.md, steps 9-10).
+  `local/inkling-1m-local.json` (`./almond -m inkling-1m`, 1M, q8_0, two cards, with DSpark) and `--kv-gpu 1` puts the full attention layers' K/V and attention on card 1 for
+  contexts past 128K: logits identical, needle found at 256K (one card) and 512K, decode 28 tok/s at depth 512K, KL from Q8_0 with q8_0 KV 0.00706 against 0.00714 with F16 (docs/inkling/ENGINE.md, step 11).
+  `--pf-wq8` (in every Inkling configuration since 2026-11-25, chunks of 64 tokens or more): the q8_0 cache's prompt attention on the matrix cores, prefill
+  +37% at 256K (394.5 -> 542.4 tok/s; through the server 501 -> 661 at 189K), KL from Q8_0 0.00619 against 0.00706 (docs/inkling/ENGINE.md, step 12).
+  Unsloth's DSpark drafter (`local/fetch.sh inkling-dspark`, `--dspark`, docs/inkling/ENGINE.md step 6) is in the 1M
+  configuration only (the one-card one at 256K has 0.02 GiB left with it): through the server on the 1M configuration
+  at temperature 0.6 code 91.8-100.2 tok/s against 69.6, prose 64-65 against 70, the same distribution; requests above
+  temperature 0.8 are not drafted (no gain at 1.0). The 192K one-card DSpark configurations were removed on 2026-11-25.
+- Qwen: `local/qwen-local.json`, Unsloth's UD-Q4_K_XL (Dynamic 3.1) on two cards with at most 56 GiB of experts in
+  RAM, images on (the encoder `models/qwen38-q4/mmproj-Qwen3.8-Flash-Next-BF16.gguf`): the GGUF's four shards in
+  `models/qwen38-q4`, its pack in `models/qwen38-q4-pack` (`tools/qwen/iq_pack.py`), the MTP block in
+  `models/qwen38-mtp` (`tools/qwen/mtp_fetch.py`, `mtp_pack.py`, `mtp_rt.py`); `local/fetch.sh qwen`. The GSQ-RCO
+  IQ3_S configurations (one card) were removed on 2026-11-25 to keep one Qwen3.8-Flash profile; their numbers stay in
+  docs/MODELS.md.
 - `./almond-bench`: quality benchmarks against the router (MMLU-Pro, GPQA, MATH-500, HumanEval+/MBPP+, IFEval,
   BFCL graded without a judge, Arena-Hard with a judge model, KL divergence from logit dumps), Textual UI;
   `./almond-bench fetch` downloads the missing datasets into `local/bench/data` (`--update` newer revisions; a
@@ -54,9 +79,11 @@ the terminal chat and agent (`./almond`, `tools/cli/almond_cli.py`); configurati
 - Server tests: `.venv/bin/python -m unittest discover -s serve -p "test_*.py" -t .` (no GPU or model needed).
 - How the engines work and every measured number: `docs/ds4/V41_EXACT_FAST.md`, `docs/ds4/AMD_HIP_NOTES.md`,
   `docs/MODELS.md`, `docs/ENGINE_PLAN.md`, `docs/ENGINE_REVIEW.md`; the state and what is open: `HANDOVER.md`.
-- The engine is not bit-reproducible run to run (an expert's kernel depends on where it is served from, which
-  depends on timing): compare quality with repeated runs, PPL on fixed documents or the Lucebox set in
-  `local/eval-lucebox/`, not with a diff.
+- Reproducibility: **a hy4 run repeats exactly** run to run since 2026-11-22 - the indexer's pool pick sorts instead of
+  taking `ggml_top_k`'s tied keys as they come (`docs/hy4/SPEED_WORK.md`, "The cause is the pick, not the score
+  kernel"). The other engines do not: an expert's kernel depends on where it is served from, which depends on timing,
+  and `src/ds41/ds41_dense.cpp:741,744` and `src/qwen35/qwen35.cpp:1057` still pick through `ggml_top_k`. Compare
+  quality with repeated runs, PPL on fixed documents or the Lucebox set in `local/eval-lucebox/`, not with a diff.
 - Keep the docs' style: plain words, measured numbers with what they were measured on, no claims without a
   measurement.
 - A new feature is opt-in and the default path stays as it was; change a default only where it measured better, and

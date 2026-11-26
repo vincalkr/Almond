@@ -2,7 +2,7 @@
 # almond-bench - quality benchmarks for the local models and their quantizations (tools/bench/)
 #   ./almond-bench [--url URL]                  the interface (Textual), against the router on 127.0.0.1:8150
 #   ./almond-bench fetch [--update] [SUITE...]  download the missing datasets (--update: newer revisions; --list)
-#   ./almond-bench run --model M [--preset quick|full] [--suites a,b] [--judge-model J] [--resume FILE]
+#   ./almond-bench run --model M [--preset quick|full] [--suites a,b] [--reasoning LEVEL] [--judge-model J] [--resume FILE]
 #   ./almond-bench kld REF.f32 CAND.f32 --vocab V --name Q [--ref-name R]   KL divergence from logit dumps
 R=$(cd "$(dirname "$0")" && pwd) || exit 1
 PY=${ALMOND_PY:-$R/.venv/bin/python}

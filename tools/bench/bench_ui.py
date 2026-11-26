@@ -159,6 +159,10 @@ class BenchApp(App):
                         yield Select([], id="model", prompt="m: fetch the list")
                         yield Label("Judge (arena-hard only)")
                         yield Select([], id="judge", prompt="none: arena-hard skipped")
+                        yield Label("Thinking (reasoning_effort)")
+                        yield Select([("server default (Almond: high)", "default"), ("none", "none"), ("low", "low"),
+                                      ("medium", "medium"), ("high", "high")],
+                                     value="default", allow_blank=False, id="reasoning")
                         yield Label("Preset")
                         yield Select([("quick: fixed sample per suite", "quick"), ("full: every task", "full")],
                                      value="quick", allow_blank=False, id="preset")
@@ -293,14 +297,17 @@ class BenchApp(App):
             pick = list(dict.fromkeys(r.suite for r in run.results)) or pick
             judge = run.judge or judge
         else:
-            run = bc.Run(model, url, time.strftime("%Y-%m-%dT%H:%M:%S"), self.query_one("#preset", Select).value, judge)
+            lvl = self.query_one("#reasoning", Select).value
+            run = bc.Run(model, url, time.strftime("%Y-%m-%dT%H:%M:%S"), self.query_one("#preset", Select).value, judge,
+                         None if lvl == "default" else lvl)
         self.busy = True
         self.stop_flag.clear()
         self.query_one("#start", Button).disabled = True
         self.query_one("#stop", Button).disabled = False
         self.query_one("#live", DataTable).clear()
         self.query_one(TabbedContent).active = "t-run"
-        self.bench(run, pick, {"url": run.url, "model": run.model, "judge_model": judge}, int(lim) if lim else None)
+        self.bench(run, pick, {"url": run.url, "model": run.model, "judge_model": judge, "reasoning": run.reasoning},
+                   int(lim) if lim else None)
 
     def action_delete(self):
         """the selected run (Results), or the selected KL result (Compare's KLD table focused)"""
@@ -402,7 +409,12 @@ class BenchApp(App):
             txt = Text()
             txt.append(f"{r['suite']} / {r['id']}  ", style="bold #9d8cff")
             txt.append(f"{r['note']}\n\n", style=score_color(r["score"]))
-            txt.append(r["answer"] or "(no text)")
+            txt.append(r["answer"] or "(no answer)")
+            ex = r.get("extra") or {}
+            if ex.get("reasoning_tail"):
+                txt.append(f"\n\n── end of the reasoning when max_tokens was reached (repeated lines: {ex.get('loop', 0):.0%}) ──\n",
+                           style="bold #ffb454")
+                txt.append(ex["reasoning_tail"], style="#8a93b8")
             self.query_one("#detail-text", Static).update(txt)
 
     def show_run(self, run):
@@ -410,7 +422,7 @@ class BenchApp(App):
         s = run["summary"]
         txt = Text()
         txt.append(run["model"], style="bold #73a8ff")
-        txt.append(f"   {run['started']}   {run.get('preset', '?')}   judge: {run.get('judge') or '-'}\n", style="#8a93b8")
+        txt.append(f"   {run['started']}   {run.get('preset', '?')}   thinking: {run.get('reasoning') or 'server default'}   judge: {run.get('judge') or '-'}\n", style="#8a93b8")
         cur = ds.versions()
         stale = [k for k, v in (run.get("data") or {}).items() if k in s and cur.get(k) and cur[k] != v]
         if stale:
@@ -434,7 +446,7 @@ class BenchApp(App):
         t = self.query_one("#cmp", DataTable)
         t.clear(columns=True)
         suites = [s for s in bc.SUITES if any(s in r["summary"] for r in self.runs)]
-        t.add_columns("model", "preset", "when", *suites, "overall", "tok/s")
+        t.add_columns("model", "preset", "think", "when", *suites, "overall", "tok/s")
         best = {}
         for s in suites:  # the best score in each column, to mark it
             vals = [r["summary"][s]["score"] for r in self.runs if s in r["summary"]]
@@ -449,7 +461,7 @@ class BenchApp(App):
                 if v is not None and v == best[s] and len(self.runs) > 1:
                     c.stylize("underline")
                 cells.append(c)
-            t.add_row(r["model"], r.get("preset", "?"), r["started"][5:16].replace("T", " "), *cells,
+            t.add_row(r["model"], r.get("preset", "?"), r.get("reasoning") or "default", r["started"][5:16].replace("T", " "), *cells,
                       cell(sget(r["summary"], "overall")[0]), f"{sum(x['tokens'] for x in res) / secs:.1f}")
         k = self.query_one("#kld", DataTable)
         k.clear(columns=True)

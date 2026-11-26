@@ -81,7 +81,7 @@ ram=$(awk '/MemTotal/ {printf "%d", $2 / 1048576}' /proc/meminfo)
 echo "  this machine: ${ram} GB of RAM; $(rocm-smi --showmeminfo vram 2>/dev/null | grep -c 'Total Memory (B)' || echo '?') GPU(s)"
 DS=(local/ds41-local.json local/ds41-local-1gpu.json local/ds41-local-vision.json local/ds41-local-1gpu-vision.json)
 GL=(local/glm-local.json local/glm-local-vision.json)
-QW=(local/qwen-local.json local/qwen-local-vision.json)
+QW=(local/qwen-local.json)
 cur=$(ctx_of local/ds41-local.json --ctx)
 echo "  DeepSeek-V4.1-Flash: $cur tokens now (trained for 1,048,576; KV in q8: ~the context costs little VRAM)"
 if [ "$CHECK" = 0 ]; then

@@ -188,6 +188,61 @@ class Monitor(unittest.TestCase):
             self.assertEqual(self.request(path)[0], 404, path)
 
 
+class ConversationTokens(unittest.TestCase):
+    """./almond's own counts: what this conversation asked, what the conversation cache gave back, what it wrote
+    (the status bar's item and /tokens).  The CLI module, loaded as the /stats test above does."""
+
+    def cli(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("almond_cli", Path(__file__).parents[1] / "tools/cli/almond_cli.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        return cli
+
+    def test_the_running_counts(self):
+        cli = self.cli()
+        c = cli.Chat.__new__(cli.Chat)
+        c.usage, c.ctx_used = cli.usage_new(), 191204
+        c.model = {"id": "m", "max_context": 262144}
+        self.assertEqual(c.usage_line(), "")             # nothing asked yet: the bar shows no item
+        c.count({"prompt_tokens": 6_000_100, "completion_tokens": 270_010},
+                {"cache_n": 5_900_000, "prompt_ms": 2000.0, "predicted_ms": 12_000.0})
+        c.count({"prompt_tokens": 100, "completion_tokens": 10}, {})     # a server that says nothing about the cache
+        self.assertEqual(c.usage["requests"], 2)
+        self.assertEqual((c.usage["cached"], c.usage["read"]), (5_900_000, 100_200))
+        self.assertEqual(c.usage["output"], 270_020)
+        self.assertEqual(c.usage_line(), "cache hit 98%, reused 5.9M")
+
+    def test_tokens_text(self):
+        cli = self.cli()
+        c = cli.Chat.__new__(cli.Chat)
+        c.usage, c.ctx_used, c.messages = cli.usage_new(), 191204, [{"role": "user", "content": "c"}]
+        c.model = {"id": "m", "max_context": 262144}
+        c.count({"prompt_tokens": 6_000_100, "completion_tokens": 270_010},
+                {"cache_n": 5_900_000, "prompt_ms": 2000.0, "predicted_ms": 12_000.0})
+        class Api:
+            def get(self, path, timeout=None):
+                return {"totals": {"requests": 3, "prompt_tokens": 30_000, "reused": 27_000,
+                                   "output_tokens": 1_500, "decode_ms": 75_000},
+                        "requests": [{"prompt_tokens": 97_356, "reused": 95_473, "output_tokens": 423,
+                                      "decode_tok_s": 74.4}]}
+        c.api = Api()
+        text = c.tokens_text()
+        self.assertEqual(c.usage_line(), "cache hit 98%, reused 5.9M")   # the bar: only these two
+        for want in ("requests", "prompt", "from the cache", "written",           # the table's header
+                     "this conversation", "5,900,000 (98%)", "270,010",
+                     "the last request", "97,356", "95,473 (98%)", "74.4",
+                     "the server", "27,000 (90%)", "20.0",
+                     "191,204 of 262,144 tokens in use (73%)"):
+            self.assertIn(want, text)
+
+        class Down:                                                  # the server not answering: the conversation only
+            def get(self, path, timeout=None):
+                raise OSError("no server")
+        c.api = Down()
+        self.assertNotIn("since it started", c.tokens_text())
+
+
 class ConversationCacheCard(unittest.TestCase):
     """#596: /metrics' "conversation_cache": the parked conversations from the engine's log lines, the budget and
     slots from its INFO line, and how much of the prompts the cache gave back."""

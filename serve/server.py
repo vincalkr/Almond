@@ -913,6 +913,15 @@ class AlmondEngine:
         if rc is not None and rc >= 0 and last:          # it ended by itself: its own last words say why (#215)
             return (f"The engine exited (code {rc}). Its last log line: {last} - if that does not explain it, please "
                     "report it at github.com/vincalkr/Almond/issues with the log.")
+        if rc is not None and rc < 0:                    # a signal: the kernel log says which and at what address
+            sig = {-4: "SIGILL", -6: "SIGABRT", -8: "SIGFPE", -9: "SIGKILL", -11: "SIGSEGV"}.get(rc, f"signal {-rc}")
+            if rc == -9:
+                return ("The engine was killed by the operating system (SIGKILL): the usual cause is running out of "
+                        "RAM, Linux ends the biggest program (check: sudo dmesg | grep -i -E 'killed process|out of "
+                        "memory'). Close other programs or use a smaller model (Q2_0 / IQ2_XS).")
+            return (f"The engine died on {sig} - it did not run out of RAM quietly: the kernel log has the instruction "
+                    f"(check: journalctl -k --since '-2 hours' | grep -i segfault) and its log the work it was doing "
+                    f"(last line: {last or 'nothing but its own tracing'}). Its log: {self.log_path}")
         return ("The usual cause is running out of RAM: Linux then ends the biggest program (check: sudo dmesg | "
                 "grep -i -E 'killed process|out of memory'); Windows slows down instead. Close other programs or use a "
                 "smaller model (Q2_0 / IQ2_XS).")
@@ -2041,6 +2050,8 @@ class Vision:
             args += ["--min-tokens", str(cfg["min_tokens"])]
         if cfg.get("no_flash_attn"):   # GLM-5.3's encoder on a GPU: full-precision attention (cosine 0.9997 vs 0.999)
             args.append("--no-flash-attn")
+        if cfg.get("f32_matmul"):      # hipBLAS products in F32 (Inkling's encoder on a GPU: cosine 0.95 -> 0.9999998)
+            args.append("--f32-matmul")
         self.dir = self.work_dir()
         self.spawn = (args, log, env)                   # to start it again after an unload
         self.proc = None
@@ -2334,7 +2345,8 @@ def vision_footprint(vcfg: dict, env: dict, cache_file: Path) -> tuple[int, int]
     caps = [int(vcfg["max_tokens"])] if vcfg.get("max_tokens") else [4096, 2048, 1024]
     for i, cap in enumerate(caps):
         nofa = bool(vcfg.get("no_flash_attn"))
-        key = f"{Path(vcfg['mmproj']).resolve()}|{st.st_size}|{int(st.st_mtime)}|cap{cap}" + ("|nofa" if nofa else "")
+        key = f"{Path(vcfg['mmproj']).resolve()}|{st.st_size}|{int(st.st_mtime)}|cap{cap}" + ("|nofa" if nofa else "") + \
+            ("|f32" if vcfg.get("f32_matmul") else "")
         m = cache.get(key)
         if not isinstance(m, dict) or not all(isinstance(m.get(k), int) and m[k] > 0 for k in ("bytes", "total")):
             m = None
@@ -2343,7 +2355,8 @@ def vision_footprint(vcfg: dict, env: dict, cache_file: Path) -> tuple[int, int]
             # image tokens (a screenshot needed 1.82 GiB of compute buffer beside the weights, more than the measure
             # with flash attention lent it: the encoder stopped on cudaMalloc, 2026-10-31)
             args = [vcfg["exe"], "--mmproj", vcfg["mmproj"], "--model", vcfg["model"], "--gpu", "--max-tokens",
-                    str(cap), "--measure"] + (["--no-flash-attn"] if nofa else [])
+                    str(cap), "--measure"] + (["--no-flash-attn"] if nofa else []) + \
+                (["--f32-matmul"] if vcfg.get("f32_matmul") else [])
             print(f"[almond] images: measuring the vision encoder on the GPU ({cap} image tokens) ...", flush=True)
             try:
                 r = subprocess.run(args, capture_output=True, text=True, timeout=600, env=env)
@@ -2444,8 +2457,9 @@ def layer_split_value(cfg: dict) -> str:
 
 def layer_split_of(cfg: dict) -> bool:
     """Several GPUs in the config are a layer split, unless the args put the later card(s) to another use: with
-    --peer-device the second card is an expert-cache tier, and the engine refuses that beside --layer-split (#665)."""
-    return len(gpu_list(cfg)) > 1 and "--peer-device" not in cfg["args"]
+    --peer-device the second card is an expert-cache tier, and the engine refuses that beside --layer-split (#665);
+    with --kv-gpu (Inkling's native engine) it holds the full attention layers' K/V, and that engine has no --layer-split."""
+    return len(gpu_list(cfg)) > 1 and "--peer-device" not in cfg["args"] and "--kv-gpu" not in cfg["args"]
 
 
 def engine_args(cfg: dict) -> list[str]:
@@ -2460,7 +2474,9 @@ def engine_args(cfg: dict) -> list[str]:
     if isinstance(cfg.get("vision"), dict) and "--vision" not in args:
         args.append("--vision")
         note = "added --vision"
-        if cfg["vision"].get("gpu") and "--vram-reserve-mib" not in args:
+        # (an on-demand encoder of an engine that lends its memory needs no reserve: it runs in the lent memory)
+        lends = cfg["vision"].get("on_demand") is True and "--glm-pack" not in args and LENDERS & set(args)
+        if cfg["vision"].get("gpu") and "--vram-reserve-mib" not in args and not lends:
             args += ["--vram-reserve-mib", "700"]
             note += " and --vram-reserve-mib 700"
         print(f'[almond] the config has a "vision" section but no --vision in its args: {note} (run setup again with '
@@ -2694,6 +2710,9 @@ def hip_env_guard(env: dict, cfg: dict) -> list[str]:
     for line in said:
         print(f"almond serve: AMD: {line}", file=sys.stderr, flush=True)
     return said
+
+
+LENDERS = {"--glm-pack", "--inkling", "--qwen35", "--qwen"}   # the engines' flags whose engines answer VLEND / VRECLAIM
 
 
 def vision_env(cfg: dict, env: dict) -> dict:
@@ -6204,8 +6223,9 @@ def main() -> int:
                         if k in ("exe", "mmproj", "model") and isinstance(v, str) and not os.path.isabs(v) else v)
                     for k, v in cfg["vision"].items()}
             on_demand = vcfg.get("on_demand") is True
-            if on_demand and "--glm-pack" not in (cfg.get("args") or []):   # VLEND / VRECLAIM: GLM's path only
-                raise SystemExit("[almond] images: \"on_demand\" needs the GLM engine (VLEND / VRECLAIM); "
+            if on_demand and not LENDERS & set(cfg.get("args") or []):   # the engines that answer VLEND / VRECLAIM
+                raise SystemExit("[almond] images: \"on_demand\" needs an engine that lends its memory (VLEND / VRECLAIM: "
+                                 "GLM's, Inkling's, Qwen3.8-27B's on one card, Qwen3.8-Flash-Next's with --vram-elastic); "
                                  "DeepSeek's engine loads its encoder itself (--vision)")
             if on_demand:                               # the GLM engine lends the encoder its expert pool's tail
                 fp = vision_footprint(vcfg, vision_env(cfg, env),

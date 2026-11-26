@@ -50,4 +50,43 @@ python3 tools/glm/vision/glm5next_patch.py "$VL"
 cmake -S tools/glm/vision -B build-vision/build "${COMMON[@]}" -DLLAMA_DIR="$PWD/$VL" \
     -DALMOND_VISION_HIP=ON -DGGML_HIP_NO_VMM=ON
 cmake --build build-vision/build --target almond-vision -j "$JOBS"
-echo "=== done: build-hip-fused/almond-engine, build-vision/build/bin/almond-vision"
+echo "=== image encoder for Hy4-flash (the same tools/glm/vision against llama.cpp PR #32517's mtmd: its hy_v4_flash projector)"
+# llama.cpp PR #32517 at the commit the engine was checked against (a shallow fetch of the PR's ref, once)
+VH=build-vision-hy4/llama.cpp
+HY4_PR_COMMIT=0a054d0b02454c998e068381d15f3f6615bdd987
+if [ ! -d "$VH" ]; then
+    mkdir -p "$VH" && git -C "$VH" init -q && git -C "$VH" remote add origin https://github.com/ggml-org/llama.cpp &&
+        { git -C "$VH" fetch -q --depth 1 origin "$HY4_PR_COMMIT" || git -C "$VH" fetch -q origin pull/32517/head; } &&
+        git -C "$VH" checkout -q "$HY4_PR_COMMIT"
+fi
+cmake -S tools/glm/vision -B build-vision-hy4 -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR="$PWD/$VH"
+cmake --build build-vision-hy4 --target almond-vision -j "$JOBS"
+echo "=== done: build-hip-fused/almond-engine, build-vision/build/bin/almond-vision, build-vision-hy4/bin/almond-vision"
+# Inkling 2 Mini (docs/inkling/): llama.cpp's inkling2_loop graph at a pinned master commit with its own ggml, and
+# almond-inkling (src/inkling) linked to it. Built when its model is downloaded (local/fetch.sh inkling) or INKLING=1.
+if [ -d models/inkling2-mini ] || [ -n "${INKLING:-}" ]; then
+    VI=build-inkling/llama.cpp
+    INKLING_COMMIT=30ec35ae2e27f1eca486af02b9d3d53fa7a26950
+    echo "=== Inkling 2 Mini (build-inkling: llama.cpp $INKLING_COMMIT + almond-inkling)"
+    if [ ! -d "$VI" ]; then
+        mkdir -p "$VI" && git -C "$VI" init -q && git -C "$VI" remote add origin https://github.com/ggml-org/llama.cpp &&
+            git -C "$VI" fetch -q --depth 1 origin "$INKLING_COMMIT" && git -C "$VI" checkout -q FETCH_HEAD
+    fi
+    cmake -S "$VI" -B "$VI/build" "${COMMON[@]}" -DGGML_HIP=ON -DGGML_HIP_GRAPHS=ON -DGGML_HIP_NO_VMM=ON -DLLAMA_CURL=OFF
+    cmake --build "$VI/build" -j "$JOBS" --target llama llama-perplexity llama-bench llama-mtmd-cli
+    g++ -O2 -std=c++17 -DALMOND_VERSION="\"inkling-$(git rev-parse --short HEAD)\"" -I"$VI/include" -I"$VI/ggml/include" \
+        src/inkling/inkling_serve.cpp -L"$VI/build/bin" -lllama -lggml -lggml-base -Wl,-rpath,"$PWD/$VI/build/bin" \
+        -pthread -o build-inkling/almond-inkling
+    echo "=== done: build-inkling/almond-inkling"
+    # almond-inkling-native: Almond's own Inkling engine (src/inkling/native, docs/inkling/ENGINE.md), HIP only
+    "$CXX_HIP" -O2 -std=c++17 --offload-arch="$GFX" src/inkling/native/ink_native.hip -o build-inkling/almond-inkling-native
+    echo "=== done: build-inkling/almond-inkling-native"
+    # almond-vision against this llama.cpp's mtmd (its inkling2v projector), on the GPU in memory the engine lends it:
+    # images for local/inkling-local-vision.json
+    if [ -f build-inkling/llama.cpp/tools/mtmd/models/inkling2v.cpp ]; then
+        cmake -S tools/glm/vision -B build-vision-inkling "${COMMON[@]}" -DLLAMA_DIR="$PWD/build-inkling/llama.cpp" \
+            -DALMOND_VISION_HIP=ON -DGGML_HIP_NO_VMM=ON
+        cmake --build build-vision-inkling --target almond-vision -j "$JOBS"
+        echo "=== done: build-vision-inkling/bin/almond-vision"
+    fi
+fi

@@ -1086,6 +1086,72 @@ static void mul_mat_vec_q_moe_launch(
     }
 }
 
+// Almond (tools/v41/ggml/mmvq-rows.patch), opt-in ALMOND_MMVQ_ROWS=1: Q8_0 products with short rows. RDNA3's table
+// gives a Q8_0 row 8 waves (64 blocks of 32 values a pass), so rows of 1,024-3,072 values (Hy4's attn_q_b,
+// ffn_routed_up, the stacked input projections) leave a quarter to a half of the threads idle and pay the block
+// reduction. Here one wave of 32 lanes takes a row (4 lanes a block, 8 blocks a pass) and a block 8 rows; the wave
+// sums with shuffles. Up to 8 columns of y, no ids, no fusion.
+template <int ncols_dst, int wpr>
+static __global__ void mul_mat_vec_q8_0_rows(
+        const void * __restrict__ vx, const void * __restrict__ vy, float * __restrict__ dst,
+        const int blocks_per_row, const int nrows, const int stride_row_x, const int stride_col_y, const int stride_col_dst,
+        const uint3 channel_ratio, const int stride_channel_x, const int stride_channel_y, const int stride_channel_dst,
+        const uint3 sample_ratio, const int stride_sample_x, const int stride_sample_y, const int stride_sample_dst) {
+    const int lane = threadIdx.x & 31;
+    const int wave = threadIdx.x >> 5;
+    const int part = wave % wpr;               // a long row is split between wpr waves
+    const int row  = blockIdx.x*(8/wpr) + wave/wpr;
+    __shared__ float part_sum[8][ncols_dst];
+    const bool live = row < nrows;
+    const int channel_dst = blockIdx.y, sample_dst = blockIdx.z;
+    const int channel_x = fastdiv((uint32_t) channel_dst, channel_ratio);
+    const int sample_x  = fastdiv((uint32_t) sample_dst, sample_ratio);
+    const block_q8_0 * x = (const block_q8_0 *) vx + (int64_t) sample_x*stride_sample_x + (int64_t) channel_x*stride_channel_x +
+                           (int64_t) (live ? row : 0)*stride_row_x;
+    const block_q8_1 * y = (const block_q8_1 *) vy + (int64_t) sample_dst*stride_sample_y + (int64_t) channel_dst*stride_channel_y;
+    dst += (int64_t) sample_dst*stride_sample_dst + (int64_t) channel_dst*stride_channel_dst;
+    const int sub = lane & 3;
+    float acc[ncols_dst] = { 0.0f };
+    for (int b = part*8 + (lane >> 2); live && b < blocks_per_row; b += 8*wpr) {
+        const int x0 = get_int_b2(x[b].qs, 2*sub + 0);
+        const int x1 = get_int_b2(x[b].qs, 2*sub + 1);
+        const float dx = __half2float(x[b].d);
+#pragma unroll
+        for (int j = 0; j < ncols_dst; ++j) {
+            const block_q8_1 * yb = y + j*stride_col_y + b;
+            int sumi = ggml_cuda_dp4a(x0, get_int_b4(yb->qs, 2*sub + 0), 0);
+            sumi     = ggml_cuda_dp4a(x1, get_int_b4(yb->qs, 2*sub + 1), sumi);
+            acc[j] += dx * __low2float(yb->ds) * (float) sumi;
+        }
+    }
+#pragma unroll
+    for (int j = 0; j < ncols_dst; ++j) {
+        float s = acc[j];
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            s += __shfl_xor(s, off, 32);
+        }
+        if constexpr (wpr == 1) {
+            if (live && lane == 0) {
+                dst[j*stride_col_dst + row] = s;
+            }
+        } else if (lane == 0) {
+            part_sum[wave][j] = s;
+        }
+    }
+    if constexpr (wpr > 1) {
+        __syncthreads();
+        if (live && part == 0 && lane < ncols_dst) {
+            float s = 0.0f;
+#pragma unroll
+            for (int k = 0; k < wpr; ++k) {
+                s += part_sum[wave + k][lane];
+            }
+            dst[lane*stride_col_dst + row] = s;
+        }
+    }
+}
+
 template <ggml_type type>
 static void mul_mat_vec_q_switch_ncols_dst(
         const void * vx, const void * vy, const int32_t * ids, const ggml_cuda_mm_fusion_args_device fusion, float * dst,
@@ -1109,6 +1175,36 @@ static void mul_mat_vec_q_switch_ncols_dst(
     const mmvq_parameter_table_id table_id  = get_device_table_id(cc);
 
     const bool has_ids = ids != nullptr;
+
+    static const bool almond_rows = [] { const char * e = getenv("ALMOND_MMVQ_ROWS"); return e && e[0] == '1'; }();
+    if constexpr (type == GGML_TYPE_Q8_0) {
+        const bool fused = fusion.gate || fusion.x_bias || fusion.gate_bias || fusion.x_scale || fusion.gate_scale ||
+                           fusion.shared_up;
+        if (almond_rows && !has_ids && !fused && warp_size == 32 && ncols_dst <= 8) {
+            const int bpr = ncols_x / QK8_0;
+            // ALMOND_MMVQ_WPR is a probe for the multi-token case: the split below was chosen at one token a step,
+            // where it is worth +10% of decode; at the two to four tokens of an MTP verify batch it is not (docs/hy4/
+            // GGUF_NOTES.md, "The same for Q8_0 rows").  0 keeps the heuristic, 1/2/4 forces waves per row.
+            static const int wpr_env = [] { const char * e = getenv("ALMOND_MMVQ_WPR"); return e ? atoi(e) : 0; }();
+            // One wave a row, whatever the row length: measured with local/hy4-q8-bench.sh over the shapes the engine
+            // really multiplies, 1 wave beat 2 and 4 at every one of them (ffn_down at one token a step 65.1 us with 1
+            // wave, 73.9 with the split this line used to choose, 80.6 with ggml's own kernel).
+            const int wpr = wpr_env ? wpr_env : 1;   // ALMOND_MMVQ_WPR can still force 2 or 4 waves a row
+            const dim3 nb((nrows_x + 8/wpr - 1)/(8/wpr), nchannels_dst, nsamples_dst);
+#define ALMOND_Q8_ROWS_W(N, W) mul_mat_vec_q8_0_rows<N, W><<<nb, 256, 0, stream>>>(vx, vy, dst, bpr, nrows_x, \
+                stride_row_x, stride_col_y, stride_col_dst, channel_ratio_fd, stride_channel_x, stride_channel_y, \
+                stride_channel_dst, sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst)
+#define ALMOND_Q8_ROWS(N) case N: if (wpr == 4) ALMOND_Q8_ROWS_W(N, 4); else if (wpr == 2) ALMOND_Q8_ROWS_W(N, 2); \
+                else ALMOND_Q8_ROWS_W(N, 1); return;
+            switch (ncols_dst) {
+                ALMOND_Q8_ROWS(1) ALMOND_Q8_ROWS(2) ALMOND_Q8_ROWS(3) ALMOND_Q8_ROWS(4)
+                ALMOND_Q8_ROWS(5) ALMOND_Q8_ROWS(6) ALMOND_Q8_ROWS(7) ALMOND_Q8_ROWS(8)
+                default: break;
+            }
+#undef ALMOND_Q8_ROWS
+#undef ALMOND_Q8_ROWS_W
+        }
+    }
 
     // How the K loop divides up at the baseline block width, both decisions below use these.
     constexpr int qk                    = ggml_cuda_type_traits<type>::qk;

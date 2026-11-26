@@ -5,6 +5,9 @@
 #   ./local/fetch.sh glm glm-mtp   those items, no question
 #   ./local/fetch.sh qwen qwen-mtp  Qwen3.8-Flash-Next and its draft block
 #   ./local/fetch.sh qwen27-q8   the dense Qwen3.8-27B at Q8_0 (the quantization is chosen here: qwen27 or qwen27-q8)
+#   ./local/fetch.sh hy4        Hy4-flash IQ2-AH: the two GGUF shards (aria2c, 4 connections)
+#   ./local/fetch.sh hy4-vision Hy4-flash's image encoder (mmproj BF16)
+#   ./local/fetch.sh inkling inkling-dspark   Inkling 2 Mini UD-Q4_K_XL (Unsloth, one card) and its DSpark drafter
 #   ./local/fetch.sh --list     the list only
 #
 # Every file goes to models/ with aria2c (CONN=4 connections, resumable); a file counts as present when its size is
@@ -23,16 +26,21 @@ AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: Bearer $TOKEN")
 GLM_REPO=pfeifferj/GLM-5.3-Flash-GSQ-RCO-GGUF
 GLM_SRC_REPO=peasantsmith/GLM-5.3-Flash-Maya-GGUF
 QWEN_REPO=ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
-QWEN_SHARDS=$(for i in 1 2; do echo "$M/qwen38-iq3s/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-0000$i-of-00002.gguf"; done)
+QWEN_Q4_REPO=unsloth/Qwen3.8-Flash-Next-GGUF
+QWEN_Q4_SHARDS=$(for i in 1 2 3 4; do echo "$M/qwen38-q4/Qwen3.8-Flash-Next-UD-Q4_K_XL-0000$i-of-00004.gguf"; done)
 Q27_REPO=ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF
 Q27_Q8_REPO=unsloth/Qwen3.8-27B-GGUF
 Q27=$M/qwen38-27b
-QWEN_Q8_REPO=unsloth/Qwen3.8-Flash-Next-GGUF
-QWEN_Q8_SHARDS=$(for i in 1 2 3 4 5 6; do echo "$M/qwen38-q8/Qwen3.8-Flash-Next-Q8_0-0000$i-of-00006.gguf"; done)
 DS_SHARDS=$(for i in 1 2 3 4; do echo "$M/rco-iq2xxs/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-0000$i-of-00004.gguf"; done)
+HY4_REPO=AngelSlim/Hy4-flash-GGUF
+INK_REPO=ggml-org/Inkling-2-Mini-GGUF
+INK_UD_REPO=unsloth/Inkling-2-Mini-GGUF
+INK=$M/inkling2-mini
+HY4_SHARDS=$(for i in 1 2; do echo "$M/hy4-iq2ah/Hy4-flash-IQ2_AH-0000$i-of-00002.gguf"; done)
 
-ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision qwen qwen-q8 qwen-mtp qwen-vision
-       qwen27 qwen27-q8 qwen27-dspine qwen27-vision)
+ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision qwen qwen-mtp qwen-vision
+       qwen27 qwen27-q8 qwen27-vision hy4 hy4-vision
+       inkling inkling-q8 inkling-dspark inkling-vision)
 desc() {
     case $1 in
         deepseek)            echo "DeepSeek-V4.1-Flash-1017, GSQ-RCO IQ2_XXS pack + Engram IQ4_NL (ISTA-DASLab)   ~249 GB";;
@@ -41,14 +49,18 @@ desc() {
         glm)                 echo "GLM-5.3-Flash GSQ-RCO 3.5bit (pfeifferj) + its pack                           137 GB";;
         glm-mtp)             echo "GLM MTP draft block (from an IQ2_S quant's shard 3, 20.5 GB download, kept 3.6 GB)";;
         glm-vision)          echo "GLM image encoder (mmproj F16 + vocab)                                               1.1 GB";;
-        qwen)                echo "Qwen3.8-Flash-Next GSQ-RCO IQ3_S (ISTA-DASLab) + its pack                       85 GB";;
-        qwen-q8)             echo "Qwen3.8-Flash-Next Q8_0 (unsloth) + its pack: two cards, ~16 tok/s           188 GB";;
+        qwen)                echo "Qwen3.8-Flash-Next UD-Q4_K_XL (Unsloth Dynamic 3.1) + its pack: two cards      111 GB";;
         qwen-mtp)            echo "Qwen MTP draft block (the BF16 checkpoint's mtp.* tensors, 5.2 GB read, kept 0.8 GB)";;
         qwen-vision)         echo "Qwen image encoder (mmproj BF16)                                                     0.9 GB";;
         qwen27)              echo "Qwen3.8-27B dense, GSQ-RCO IQ3_S + MTP block (ISTA-DASLab), one card           12.1 GB";;
         qwen27-q8)           echo "Qwen3.8-27B dense, Q8_0 + MTP block (unsloth), two cards                       29.0 GB";;
-        qwen27-dspine)       echo "Qwen3.8-27B DSpine drafter Q4_K_M (aj9o9 of tencent): drafts inside code         1.3 GB";;
         qwen27-vision)       echo "Qwen3.8-27B image encoder (mmproj BF16)                                          0.9 GB";;
+        hy4)                 echo "Hy4-flash IQ2-AH (Tencent/AngelSlim): experts IQ2_XXS, Engram FP8 table         135 GB";;
+        hy4-vision)          echo "Hy4-flash image encoder (mmproj BF16, AngelSlim)                                 1.0 GB";;
+        inkling)             echo "Inkling 2 Mini UD-Q4_K_XL (Unsloth Dynamic): one card                         17.6 GB";;
+        inkling-q8)          echo "Inkling 2 Mini Q8_0 (ggml-org): the KL reference for measurements, no configuration 27.8 GB";;
+        inkling-dspark)      echo "Inkling 2 Mini DSpark drafter Q8_0 (Unsloth): needed by inkling-1m               0.5 GB";;
+        inkling-vision)      echo "Inkling 2 Mini image encoder (mmproj F32, Unsloth)                               1.3 GB";;
     esac
 }
 files() {   # the files that make the item present
@@ -59,14 +71,18 @@ files() {   # the files that make the item present
         glm)                 echo "$M/glm53-gsq-rco/GLM-5.3-Flash-GSQ-RCO-3.5bit.gguf"; echo "$M/glm53-gsq-rco/pack";;
         glm-mtp)             echo "$M/glm53-gsq-rco/GLM-5.3-Flash-NextN.gguf";;
         glm-vision)          echo "$M/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf"; echo "$M/glm53-vision/GLM-5.3-Flash-vocab.gguf";;
-        qwen)                echo "$QWEN_SHARDS"; echo "$M/qwen38-iq3s-pack/native_experts.txt";;
-        qwen-q8)             echo "$QWEN_Q8_SHARDS"; echo "$M/qwen38-q8-pack/native_experts.txt";;
+        qwen)                echo "$QWEN_Q4_SHARDS"; echo "$M/qwen38-q4-pack/native_experts.txt";;
         qwen-mtp)            echo "$M/qwen38-mtp/experts.bin"; echo "$M/qwen38-mtp/draft_vocab.bin";;
-        qwen-vision)         echo "$M/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf";;
+        qwen-vision)         echo "$M/qwen38-q4/mmproj-Qwen3.8-Flash-Next-BF16.gguf";;
         qwen27)              echo "$Q27/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"; echo "$Q27/tokenizer";;
         qwen27-q8)           echo "$Q27/Qwen3.8-27B-Q8_0.gguf"; echo "$Q27/tokenizer";;
-        qwen27-dspine)       echo "$Q27/Qwen3.8-27B-DSpine-b16-Q4_K_M.gguf";;
         qwen27-vision)       echo "$Q27/mmproj-Qwen3.8-27B-BF16.gguf";;
+        hy4)                 echo "$HY4_SHARDS";;
+        hy4-vision)          echo "$M/hy4-iq2ah/mmproj-Hy4-flash-bf16.gguf";;
+        inkling)             echo "$INK/Inkling-2-Mini-UD-Q4_K_XL.gguf"; echo "$INK/tokenizer";;
+        inkling-q8)          echo "$INK/Inkling-2-Mini-Q8_0.gguf";;
+        inkling-dspark)      echo "$INK/unsloth/dspark-Inkling-2-Mini-Q8_0.gguf";;
+        inkling-vision)      echo "$INK/mmproj-F32.gguf";;
     esac
 }
 state() {   # present / partial / missing (by the files being there; sizes are checked at download)
@@ -114,13 +130,9 @@ fetch() {
                              gio trash "$M/glm53-gsq-rco/src" && echo "the 20.5 GB source went to the trash";;
         glm-vision)          get $GLM_SRC_REPO vision/mmproj-GLM-5.3-Flash-F16.gguf "$M/glm53-vision/mmproj-GLM-5.3-Flash-F16.gguf"
                              get $GLM_SRC_REPO vision/GLM-5.3-Flash-vocab.gguf "$M/glm53-vision/GLM-5.3-Flash-vocab.gguf";;
-        qwen)                for f in $QWEN_SHARDS; do get $QWEN_REPO IQ3_S/$(basename "$f") "$f"; done
-                             [ "$DRY_RUN" = 1 ] || [ -s "$M/qwen38-iq3s-pack/native_experts.txt" ] ||
-                                 "$PY" "$R/tools/qwen/iq_pack.py" --gguf "$M/qwen38-iq3s/$(basename "$(echo "$QWEN_SHARDS" | head -1)")" \
-                                     --out "$M/qwen38-iq3s-pack";;
-        qwen-q8)             for f in $QWEN_Q8_SHARDS; do get $QWEN_Q8_REPO Q8_0/$(basename "$f") "$f"; done
-                             [ "$DRY_RUN" = 1 ] || [ -s "$M/qwen38-q8-pack/native_experts.txt" ] ||
-                                 "$PY" "$R/tools/qwen/iq_pack.py" --gguf "$(echo "$QWEN_Q8_SHARDS" | head -1)" --out "$M/qwen38-q8-pack" --compat-bf16;;
+        qwen)                for f in $QWEN_Q4_SHARDS; do get $QWEN_Q4_REPO UD-Q4_K_XL/$(basename "$f") "$f"; done
+                             [ "$DRY_RUN" = 1 ] || [ -s "$M/qwen38-q4-pack/native_experts.txt" ] ||
+                                 "$PY" "$R/tools/qwen/iq_pack.py" --gguf "$(echo "$QWEN_Q4_SHARDS" | head -1)" --out "$M/qwen38-q4-pack" --compat-bf16;;
         qwen-mtp)            [ -s "$M/qwen38-mtp/experts.bin" ] && { echo "have   qwen38-mtp"; return; }
                              [ "$DRY_RUN" = 1 ] && { echo "get    Qwen/Qwen3.8-Flash-Next mtp.* tensors (5.2 GB of range reads)"; return; }
                              # the checkpoint's 31 mtp.* tensors (HTTP ranges of 28 shards, SHA256-checked), packed with
@@ -130,13 +142,20 @@ fetch() {
                              "$PY" "$R/tools/qwen/mtp_rt.py" --gguf "$M/qwen38-mtp-bf16/mtp-q2_0.gguf" --out "$M/qwen38-mtp"
                              cp "$R/tools/qwen/data/draft_vocab.bin" "$M/qwen38-mtp/draft_vocab.bin"
                              gio trash "$M/qwen38-mtp-bf16" && echo "the 5.2 GB of BF16 tensors went to the trash";;
-        qwen-vision)         get $QWEN_REPO mmproj-Qwen3.8-Flash-Next-BF16.gguf "$M/qwen38-iq3s/mmproj-Qwen3.8-Flash-Next-BF16.gguf";;
+        qwen-vision)         get $QWEN_REPO mmproj-Qwen3.8-Flash-Next-BF16.gguf "$M/qwen38-q4/mmproj-Qwen3.8-Flash-Next-BF16.gguf";;
         qwen27)              get $Q27_REPO Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf "$Q27/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"
                              tok27 "$Q27/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf";;
         qwen27-q8)           get $Q27_Q8_REPO Qwen3.8-27B-Q8_0.gguf "$Q27/Qwen3.8-27B-Q8_0.gguf"
                              tok27 "$Q27/Qwen3.8-27B-Q8_0.gguf";;
-        qwen27-dspine)       get aj9o9/Qwen3.8-27B-DSpine-b16-GGUF Qwen3.8-27B-DSpine-b16-Q4_K_M.gguf "$Q27/Qwen3.8-27B-DSpine-b16-Q4_K_M.gguf";;
         qwen27-vision)       get $Q27_REPO mmproj-Qwen3.8-27B-BF16.gguf "$Q27/mmproj-Qwen3.8-27B-BF16.gguf";;
+        hy4)                 for f in $HY4_SHARDS; do get $HY4_REPO "$(basename "$f")" "$f"; done;;
+        hy4-vision)          get $HY4_REPO mmproj-Hy4-flash-bf16.gguf "$M/hy4-iq2ah/mmproj-Hy4-flash-bf16.gguf";;
+        inkling)             get $INK_UD_REPO Inkling-2-Mini-UD-Q4_K_XL.gguf "$INK/Inkling-2-Mini-UD-Q4_K_XL.gguf"
+                             [ "$DRY_RUN" = 1 ] || [ -s "$INK/tokenizer/tokenizer.json" ] ||
+                                 PYTHONPATH="$R/tools/qwen" "$PY" "$R/tools/almond_tokenizer.py" --gguf "$INK/Inkling-2-Mini-UD-Q4_K_XL.gguf" --out "$INK";;
+        inkling-q8)          get $INK_REPO Inkling-2-Mini-Q8_0.gguf "$INK/Inkling-2-Mini-Q8_0.gguf";;
+        inkling-dspark)      get $INK_UD_REPO dspark-Inkling-2-Mini-Q8_0.gguf "$INK/unsloth/dspark-Inkling-2-Mini-Q8_0.gguf";;
+        inkling-vision)      get $INK_UD_REPO mmproj-F32.gguf "$INK/mmproj-F32.gguf";;
         *) echo "fetch: no item '$1' (${ITEMS[*]})" >&2; exit 2;;
     esac
 }
@@ -157,8 +176,12 @@ fit() {   # why an item does not fit this machine, or nothing
     local cards=1 ram=0
     case $1 in
         glm)                 cards=2; ram=100;;   # the layers over both cards, the experts in pinned RAM
-        deepseek|qwen)       ram=100;;            # the 80 GiB pinned arena (README, Requirements: 128 GB class)
-        qwen27-q8|qwen-q8)   cards=2;;            # 29 GB of weights; Flash-Next Q8_0: 128 GB of experts
+        deepseek)            ram=100;;            # the 80 GiB pinned arena (README, Requirements: 128 GB class)
+        qwen27-q8)           cards=2;;            # 29 GB of weights
+        qwen)                cards=2; ram=100;;   # 63.5 GiB of experts, up to 56 GiB of them in RAM
+        hy4)                 cards=2; ram=120;;   # 126 GB of weights; the 59 GiB Engram table read from the SSD or RAM
+        hy4-vision)          cards=2; ram=120;;
+        inkling-q8)          cards=2;;            # 27.8 GB of weights
     esac
     [ "$CARDS" -lt $cards ] && { echo "needs $cards cards of 24 GB"; return; }
     [ "$RAM_GB" -lt $ram ] && { echo "needs ~128 GB of RAM"; return; }
@@ -177,15 +200,13 @@ show() {
     echo "Suggested for this machine:"
     if [ "$CARDS" -ge 2 ]; then
         echo "  Qwen3.8-27B: qwen27 (IQ3_S, one card, the fastest, 192K context) or qwen27-q8 (Q8_0, the closest to the"
-        echo "               original weights, both cards, 256K); qwen27-dspine: DSpine drafts inside code blocks and tool calls (+31%
-               on code with qwen27), MTP elsewhere"
+        echo "               original weights, both cards, 256K)"
     elif [ "$CARDS" = 1 ]; then
         echo "  Qwen3.8-27B: qwen27 (IQ3_S, fits one card with its MTP block); qwen27-q8 needs two cards"
-        echo "  GLM-5.3-Flash needs two cards; DeepSeek and Qwen3.8-Flash-Next run on one"
+        echo "  GLM-5.3-Flash, Qwen3.8-Flash-Next, Hy4-flash and inkling-1m need two cards; DeepSeek and inkling run on one"
     else
         echo "  no 24 GB card found (rocm-smi): Almond needs at least one RX 7900 XT / XTX"
     fi
-    [ "$CARDS" -ge 2 ] && echo "  Qwen3.8-Flash-Next: qwen (IQ3_S, 50-78 tok/s); qwen-q8 (Q8_0, the closest to the original weights, ~16 tok/s)"
     [ "$RAM_GB" -lt 100 ] && echo "  with $RAM_GB GB of RAM: the dense Qwen3.8-27B; the MoE models want ~128 GB"
     return 0
 }

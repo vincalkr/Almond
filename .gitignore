@@ -147,3 +147,4 @@ local/sweep-*/ref-*.ids
 
 # almond-bench: downloaded benchmark datasets (their own licences), runs and KL results
 /local/bench/
+local/inkling-measure/

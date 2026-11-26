@@ -1,6 +1,6 @@
 <h1 align="center">Almond - MoE and dense models on RX 7900 XTX</h1>
 
-<p align="center"><b>DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash and Qwen3.8-Flash-Next on one or two RX 7900 XTX, their experts across VRAM, pinned RAM and NVMe; the dense Qwen3.8-27B on one card</b><br>
+<p align="center"><b>DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash, Qwen3.8-Flash-Next, Hy4-flash and Inkling 2 Mini on one or two RX 7900 XTX, their experts across VRAM, pinned RAM and NVMe; the dense Qwen3.8-27B on one or two cards</b><br>
 Linux - ROCm/HIP - MIT</p>
 
 A C++/HIP inference engine for large MoE models and dense ones (one executable, `build-hip-fused/almond-engine`), an OpenAI- and
@@ -11,11 +11,34 @@ Anthropic-compatible server, a router that serves every model at one address, an
   GGUF carries llama.cpp metadata instead of this engine's `deepseek41.*` keys. Every expert the model routes to is
   computed (no route bias), wherever it is: card 0's VRAM, the second card, an 80 GiB pinned RAM arena, or the NVMe.
 - **GLM-5.3-Flash** as the GSQ-RCO 3.5bit pack (137 GB) with its MTP draft block (`src/glm`).
-- **Qwen3.8-Flash-Next** as the [ISTA-DASLab GSQ-RCO IQ3_S GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF)
-  (two shards, 83.6 GB) with its MTP draft block from the BF16 checkpoint (`src/qwen`).
+- **Qwen3.8-Flash-Next** as [Unsloth's UD-Q4_K_XL GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)
+  (four shards, 105 GB) on two cards with at most 56 GiB of experts in RAM, with its MTP draft block from the BF16
+  checkpoint (`src/qwen`).
 - **Qwen3.8-27B** (dense) as the [ISTA-DASLab GSQ-RCO IQ3_S GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF)
-  (11.28 GiB, its MTP block in the same file) on ggml graphs (`src/qwen35`), with images on its encoder, optionally
-  with Tencent's DSpine drafter inside code (`qwen27-dspine`).
+  (11.28 GiB, its MTP block in the same file) on ggml graphs (`src/qwen35`), with images on its encoder; or
+  [Unsloth's Q8_0](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) on two cards (`qwen27-q8`).
+- **Hy4-flash** as [AngelSlim's IQ2-AH GGUF](https://huggingface.co/AngelSlim/Hy4-flash-GGUF) (two shards, 135 GB:
+  experts IQ2_XXS, the Engram table FP8) on ggml graphs over both cards (`src/hy4`, `./almond serve --model hy4`):
+  about 21 tok/s with its MTP block, the experts that do not fit in VRAM run from RAM and the Engram table is
+  read from the SSD
+  (docs/hy4/GGUF_NOTES.md).
+- **Inkling 2 Mini** as [Unsloth's UD-Q4_K_XL GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) (17.6 GB) on
+  Almond's own engine (`src/inkling/native`, HIP, no ggml): 256K on one card, or 1M on two with Unsloth's DSpark
+  drafter (docs/inkling/ENGINE.md).
+
+The profiles, one or two per model (`./almond -m NAME`, the router's entries in `local/router.json`; a profile with an
+image encoder downloaded switches to its `-vision` twin by itself):
+
+| model | profile | cards | context | configuration |
+| --- | --- | --- | --- | --- |
+| DeepSeek-V4.1-Flash | `ds41` (default of `./almond serve`) | 2 (or 1: `--gpu 0`) | 256K | `local/ds41-local.json` |
+| GLM-5.3-Flash | `glm` (default of `./almond`) | 2 | 256K | `local/glm-local.json` |
+| Qwen3.8-Flash-Next | `qwen` | 2 | 256K | `local/qwen-local.json` |
+| Qwen3.8-27B | `qwen27` | 1 | 192K | `local/qwen27-local.json` |
+| | `qwen27-q8` | 2 | 256K | `local/qwen27-q8-local.json` |
+| Hy4-flash | `hy4` | 2 | 256K | `local/hy4-local.json` |
+| Inkling 2 Mini | `inkling` | 1 | 256K | `local/inkling-local.json` |
+| | `inkling-1m` (with DSpark) | 2 | 1M | `local/inkling-1m-local.json` |
 
 How each model is set up and measured: [docs/MODELS.md](docs/MODELS.md); the one-engine work:
 [docs/ENGINE_PLAN.md](docs/ENGINE_PLAN.md).
@@ -59,7 +82,7 @@ without drafts, 73.3 with its MTP block (96.1 / 73.0 / 57.6; llama.cpp on the sa
 | GPU | RX 7900 XT / XTX (`gfx1100`); a second 24 GB card is used as an expert tier when present |
 | RAM | 128 GB class (the engine holds ~94 GB with the 80 GiB arena) |
 | CPU | x86-64 with AVX2 (AVX-512 used when present) |
-| disk | on an NVMe for `models/`: DeepSeek ~250 GB (138 GB pack in four shards + 111 GB Engram GGUF + 0.9 GiB image encoder; the checkpoint's own FP8 Engram rows instead of that GGUF are 203 GB), GLM ~142 GB (the 3.5bit GGUF, MTP block, image encoder), Qwen ~87 GB (the IQ3_S GGUF, its 1.5 GB pack, MTP block, image encoder) |
+| disk | on an NVMe for `models/`: DeepSeek ~250 GB (138 GB pack in four shards + 111 GB Engram GGUF + 0.9 GiB image encoder; the checkpoint's own FP8 Engram rows instead of that GGUF are 203 GB), GLM ~142 GB (the 3.5bit GGUF, MTP block, image encoder), Qwen3.8-Flash ~108 GB (the UD-Q4_K_XL GGUF, its 1.4 GB pack, MTP block, image encoder), Qwen3.8-27B 13 GB (IQ3_S) or 29 GB (Q8_0), Hy4-flash ~136 GB, Inkling 2 Mini ~19 GB (with the DSpark drafter and the image encoder) |
 | tools | `cmake` >= 3.24, gcc, Python 3, curl, `aria2c` (faster downloads) |
 
 ## Quick start
@@ -81,10 +104,8 @@ local/fetch.sh                                                        # the mode
 - `./setup.sh --check` only says what is there. `local/fetch.sh` lists the models with their state in `models/` and
   asks which to download (DeepSeek's pack and FP8 Engram rows through their own scripts, GLM, its MTP block, both
   image encoders, the Qwen models); `local/fetch.sh --list` only lists. The quantization is chosen there: a model's
-  quantizations are separate items (`qwen27` IQ3_S or `qwen27-q8` Q8_0, and
-  `qwen27-dspine`, Tencent's DSpine drafter used inside code: +31% there on the IQ3_S; `qwen` IQ3_S or `qwen-q8`
-  Q8_0, two cards and ~16 tok/s), each with its
-  own configuration and name in the router (`./almond -m qwen27-q8`, `./almond -m qwen-q8`). The list starts with
+  quantizations are separate items (`qwen27` IQ3_S or `qwen27-q8` Q8_0), each with its
+  own configuration and name in the router (`./almond -m qwen27-q8`). The list starts with
   this machine's cards, RAM and free disk, marks what does not fit (`[needs 2 cards of 24 GB]`) and ends with a
   suggestion for the machine.
 - `local/fetch-rco-1017.sh` downloads the four shards and the pack's Engram IQ4_NL GGUF with `aria2c` (4 connections,
@@ -98,7 +119,8 @@ local/fetch.sh                                                        # the mode
   default configuration names the FP8 rows; where they are missing the engine uses the iq4_nl table beside the pack
   and prints that it does.
 - `./build.sh` builds the vendored ggml (`third_party/llama.cpp/ggml`) into `third_party/llama.cpp/build-hip`, the
-  engine into `build-hip-fused`, and GLM's image encoder into `build-vision`; `ROCM`, `GFX`, `JOBS`, `REBUILD_GGML=1`
+  engine into `build-hip-fused`, the image encoders into `build-vision` (GLM, Qwen) and `build-vision-hy4`, and, once
+  Inkling's model is downloaded, Inkling's engine `build-inkling/almond-inkling-native` and its encoder; `ROCM`, `GFX`, `JOBS`, `REBUILD_GGML=1`
   from the environment.
 - `./almond serve` uses cards 0 and 1; `./almond serve --gpu 0` (or `--gpu 1`) one card, `--gpu 0,1` both. The number
   of cards
@@ -114,8 +136,10 @@ Almond serves DeepSeek-V4.1-Flash (`./almond serve`, the default), GLM-5.3-Flash
 path of
 the same executable in `src/glm`, MIT: `src/glm/LICENSE`) and Qwen3.8-Flash-Next (`./almond serve --model qwen`,
 `src/qwen`,
-MIT: `src/qwen/LICENSE`), and the dense Qwen3.8-27B (`./almond serve --model qwen27`, `src/qwen35`; its files in
-`models/qwen38-27b`); `local/fetch.sh` downloads and prepares their files.
+MIT: `src/qwen/LICENSE`), the dense Qwen3.8-27B (`./almond serve --model qwen27`, `src/qwen35`; its files in
+`models/qwen38-27b`), Hy4-flash (`--model hy4`, `src/hy4`) and Inkling 2 Mini (`--model inkling`,
+`src/inkling/native`); `local/fetch.sh` downloads and prepares their files, and the table at the top lists each
+model's profiles.
 `./almond serve --router` puts every model of `local/router.json` behind one address, as llama-server's
 router mode does: `GET /v1/models` lists them with their status (loaded / loading / unloaded), context and thinking
 levels (`reasoning_levels`, `reasoning_default`); `POST /models/load` / `/models/unload {"model": NAME}`; a request that
@@ -161,11 +185,13 @@ instead.
   `--max-tokens`; `/set KEY VALUE` in the chat, `/set` alone shows them next to the model's defaults (`/props`).
 - `/stats` (or `--monitor`): `GET /metrics` as text - state, speed, context, experts in VRAM, each GPU's load, VRAM,
   temperature and power, PCIe, CPU, RAM, disk, the conversation cache, the last requests and the totals.
-  `/forget` clears the conversation cache.
+  `/tokens` shows the same counts as a table, one line each for this conversation, its last request and the server
+  since it started: requests, prompt tokens, how many the conversation cache gave back without reading them (with
+  their share), the rest read, what was written, and the two speeds. `/forget` clears the conversation cache.
 - on a terminal the last line is a status bar (a scroll region the chat scrolls above): reading the
   prompt a bar with tokens read / total and tok/s, writing the tokens, tok/s, the time and thinking or answer, idle the
-  last request's prompt / reused / output and tok/s, the context in use, the thinking level and the model (from
-  `/metrics`); `-p` and piped output have none.
+  context in use, this conversation's cache hit and reused tokens (`cache hit 97%, reused 18.9M`), the thinking level
+  and the model - one request's own numbers are in `/tokens`, so the line stays short; `-p` and piped output have none.
 - `--agent` (or `/agent on`): the model gets tools - `read_file`, `write_file`, `edit_file`, `list_dir`,
   `run_command` (bash in the working directory, the output cut to 8 KB) - and the chat runs them until an answer
   without calls (at most 50 steps; Ctrl+C stops). Reads and listings inside the working directory go ahead; a write,
@@ -320,7 +346,7 @@ CPU.
 lends it for the request and takes back after (docs/MODELS.md, "Images").
 
 **Qwen3.8-Flash-Next:** with its encoder (`local/fetch.sh qwen-vision`, 0.9 GB) and `almond-vision` built,
-`./almond serve --model qwen` picks `local/qwen-local-vision.json`; the encoder reads pictures on the CPU (12 threads,
+`./almond serve --model qwen` starts `local/qwen-local.json` (images on); the encoder reads pictures on the CPU (12 threads,
 up to
 300 image tokens a picture), the engine's card keeps its expert cache.
 
