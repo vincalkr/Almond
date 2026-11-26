@@ -109,4 +109,9 @@ turn 1's reasoning dropped (the template) 38 of 40 right, with it kept 36 of 40;
 both lost with it kept, none gained. Turn 2's prompt 482 -> 1,062 tokens on average, its answer 962 -> 1,015 tokens.
 Two pairs are within what 40 can tell apart, but nothing points to a gain: `preserve_thinking` stays off by default.
 The run planned 50 pairs; the arm without it stopped at pair 40 when the engine went silent for 300 s mid-answer
-(2,263 tokens into a reasoning, the server ended it), not looked into yet.
+(2,263 tokens into a reasoning, the server ended it). The kernel log has one shader error on that card (card 1,
+`0000:16:00.0`) at the second the silence began (`amdgpu ... sq_intr: error ... type 2`, 20:54:57, 300 s before the
+server's message); it is the only `sq_intr` in this boot and in the five before it. The same request sent again twice
+on the same card ran through (3,275 tokens, 74.5 tok/s, both times), so it is not the engine's path for that prompt.
+Both cards run LACT's profile with a -200 mV voltage offset (`/etc/lact/config.yaml`; its base entry has -100 mV for
+card 0), a likely cause of a lone shader error; not proven by a run at a smaller offset.
