@@ -156,6 +156,17 @@ long session with the demoted duplicates in the arena.
    misses, V41_EXACT_FAST.md) and asks the kernel to read those blobs into the page cache; off by default, never
    measured on this pack. (c) `ALMOND_SPEC_TOP`: O_DIRECT reads into a pinned stash, measured a wash on another
    configuration (2026-10-12: the tier 1.8 ms faster, the bigger graph and the issuing 2.8 ms slower).
+   Measured 2026-11-26 (Promessi Sposi, 300 forced tokens, chat configuration, power-tune on): a file-tier read
+   (one ~10 MB blob in 8 O_DIRECT parts) took p50 5.1, p90 56, max 162 ms in the decode, 3.5-4.1 s of the 18-20 s,
+   not ~1.2 ms. Two causes. (i) The data partition (`/run/media/vincenzo/Dati`, mounted by udisks, not in
+   /etc/fstab) was never trimmed by the weekly `fstrim.timer`: a 10 MB read with the machine idle went p50 5.3 ->
+   1.1 ms, p90 46 -> 4.9 ms after `sudo fstrim -v /run/media/vincenzo/Dati` (267.7 GiB trimmed); the 17K prompt's
+   decode went 15.6-18.7 -> 18.5-19.2 tok/s. (ii) The drive is slow while the engine runs: the same read beside
+   the decode p50 9.0, p90 78 ms; beside 12 threads copying RAM (no GPU) p50 6.3, p90 20 ms; beside 24 spinning
+   threads (no RAM traffic) unchanged. The NVMe's DMA into RAM waits on the memory the CPU experts and the cards
+   stream; the decode moves only ~100 MB/s from the drive. Tried and not changing it: `ALMOND_NVME_KEEPALIVE_US=500`,
+   `ALMOND_FILE_THREADS=2`, reading into heap memory instead of the pinned arena slot. The NVMe is in an IOMMU
+   DMA-FQ group (the cards identity); `iommu=pt` not tried.
 2. **The CPU tier at the RAM's speed.** The kernel reads 41-47 GB/s cold with 12 threads and computes at 58-65 from
    L3; the RAM streams 62. Levers: the SMT siblings (`--threads 24`: the per-thread decode has gathers and table
    lookups, where a second thread a core fills the stalls), an L3 prefetch of the next layer's predicted CPU experts
