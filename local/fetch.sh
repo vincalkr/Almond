@@ -42,7 +42,7 @@ INK=$M/inkling2-mini
 HY4_SHARDS=$(for i in 1 2; do echo "$M/hy4-iq2ah/Hy4-flash-IQ2_AH-0000$i-of-00002.gguf"; done)
 
 ITEMS=(deepseek deepseek-vision deepseek-engram-fp8 glm glm-mtp glm-vision qwen qwen-mtp qwen-vision
-       qwen27 qwen27-q8 qwen27-vision sensenova sensenova-dflash hy4 hy4-vision
+       qwen27 qwen27-q8 qwen27-vision sensenova hy4 hy4-vision
        inkling inkling-q8 inkling-dspark inkling-vision)
 desc() {
     case $1 in
@@ -58,8 +58,7 @@ desc() {
         qwen27)              echo "Qwen3.8-27B dense, GSQ-RCO IQ3_S + MTP block (ISTA-DASLab), one card           12.1 GB";;
         qwen27-q8)           echo "Qwen3.8-27B dense, Q8_0 + MTP block (unsloth), two cards                       29.0 GB";;
         qwen27-vision)       echo "Qwen3.8-27B image encoder (mmproj BF16)                                          0.9 GB";;
-        sensenova)           echo "SenseNova-Loop-9B dense looped (32 layers, 56 runs), Q8_0 + MTP (sensenova), one card 9.8 GB";;
-        sensenova-dflash)    echo "SenseNova-Loop-9B DFlash2 drafter (sensenova, BF16 1.9 GB read), kept as Q8_0     1.0 GB";;
+        sensenova)           echo "SenseNova-Loop-9B dense looped (32 layers, 56 runs), Q8_0 + MTP + DFlash2 drafter, one card  10.8 GB";;
         hy4)                 echo "Hy4-flash IQ2-AH (Tencent/AngelSlim): experts IQ2_XXS, Engram FP8 table         135 GB";;
         hy4-vision)          echo "Hy4-flash image encoder (mmproj BF16, AngelSlim)                                 1.0 GB";;
         inkling)             echo "Inkling 2 Mini UD-Q4_K_XL (Unsloth Dynamic): one card                         17.6 GB";;
@@ -82,8 +81,7 @@ files() {   # the files that make the item present
         qwen27)              echo "$Q27/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"; echo "$Q27/tokenizer";;
         qwen27-q8)           echo "$Q27/Qwen3.8-27B-Q8_0.gguf"; echo "$Q27/tokenizer";;
         qwen27-vision)       echo "$Q27/mmproj-Qwen3.8-27B-BF16.gguf";;
-        sensenova)           echo "$SN/SenseNova-Loop-9B-Q8_0.gguf"; echo "$SN/tokenizer";;
-        sensenova-dflash)    echo "$SN/SenseNova-Loop-9B-DFlash2-Q8_0.gguf";;
+        sensenova)           echo "$SN/SenseNova-Loop-9B-Q8_0.gguf"; echo "$SN/tokenizer"; echo "$SN/SenseNova-Loop-9B-DFlash2-Q8_0.gguf";;
         hy4)                 echo "$HY4_SHARDS";;
         hy4-vision)          echo "$M/hy4-iq2ah/mmproj-Hy4-flash-bf16.gguf";;
         inkling)             echo "$INK/Inkling-2-Mini-UD-Q4_K_XL.gguf"; echo "$INK/tokenizer";;
@@ -158,8 +156,8 @@ fetch() {
         sensenova)           get $SN_REPO SenseNova-Loop-9B-Q8_0.gguf "$SN/SenseNova-Loop-9B-Q8_0.gguf"
                              # the tokenizer and chat template, exported from the GGUF (the template is the official one)
                              [ "$DRY_RUN" = 1 ] || [ -s "$SN/tokenizer/vocab.json" ] ||
-                                 PYTHONPATH="$R/tools/qwen" "$PY" "$R/tools/almond_tokenizer.py" --gguf "$SN/SenseNova-Loop-9B-Q8_0.gguf" --out "$SN";;
-        sensenova-dflash)    [ -s "$SN/SenseNova-Loop-9B-DFlash2-Q8_0.gguf" ] && { echo "have   SenseNova-Loop-9B-DFlash2-Q8_0.gguf"; return; }
+                                 PYTHONPATH="$R/tools/qwen" "$PY" "$R/tools/almond_tokenizer.py" --gguf "$SN/SenseNova-Loop-9B-Q8_0.gguf" --out "$SN"
+                             [ -s "$SN/SenseNova-Loop-9B-DFlash2-Q8_0.gguf" ] && return   # the DFlash2 drafter, converted from sensenova's BF16
                              get $SN_DF_REPO config.json "$M/sensenova-loop-9b-dflash2-hf/config.json"
                              get $SN_DF_REPO model.safetensors "$M/sensenova-loop-9b-dflash2-hf/model.safetensors"
                              [ "$DRY_RUN" = 1 ] && return

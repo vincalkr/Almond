@@ -11,7 +11,13 @@
     "--kv",
     "q8_0",
     "--mtp",
-    "3"
+    "3",
+    "--dflash",
+    "models/sensenova-loop-9b/SenseNova-Loop-9B-DFlash2-Q8_0.gguf",
+    "--dflash-n",
+    "5",
+    "--spec",
+    "auto"
   ],
   "env": {
     "GGML_CUDA_FA_Q8_SPLITK": "1"
