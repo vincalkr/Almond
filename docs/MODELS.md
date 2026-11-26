@@ -782,7 +782,7 @@ coefficients (sigmoids and the 20 Sinkhorn iterations, not converged, so not rep
 ggml op, `ggml_loop_mhc_coef` (`tools/v41/ggml/loop-mhc.patch`), the mixing DeepSeek's `hc_pre` / `hc_post` ops.
 One card; no `--tp` or images yet (the DFlash2 drafter: below). Files: `local/fetch.sh sensenova` (the official
 `sensenova/SenseNova-Loop-9B-GGUF` Q8_0, 9.8 GB, and its tokenizer exported to `models/sensenova-loop-9b/tokenizer`);
-`./almond -m sensenova-loop-9b` or the router entry `local/sensenova-local.json` (card 0, 256K, q8_0 KV, MTP 3).
+`./almond serve --model sensenova`, `./almond -m sensenova` or the router entry (`local/sensenova-local.json` (card 0, 256K, q8_0 KV, MTP 3).
 The server shim is Qwen's: its thinking levels low / medium are passed to a template that only knows thinking on or
 off.
 

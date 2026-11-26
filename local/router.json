@@ -5,7 +5,7 @@
     {"model": "qwen"},
     {"model": "qwen27"},
     {"model": "qwen27", "config": "local/qwen27-q8-local.json"},
-    {"model": "qwen27", "config": "local/sensenova-local.json"},
+    {"model": "sensenova"},
     {"model": "hy4"},
     {"model": "inkling"},
     {"model": "inkling", "config": "local/inkling-1m-local.json"}
