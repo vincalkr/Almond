@@ -170,6 +170,9 @@ long session with the demoted duplicates in the arena.
    `ALMOND_SPEC_TOP` re-measured after the trim (same runs, `ALMOND_SPEC_ADAPT=1`, layers l+2..l+3): top 4 issued
    2,693-5,434 reads for 55-75 used, decode 19.20 -> 10.23 tok/s (17K) and 15.73 -> 8.45 (Promessi Sposi); top 8
    10.56 and 10.67. The reads it adds load the same drive and RAM; stopped after one round, stays off.
+   The 23 tok/s of 2026-10-26 is not the code: the engine of a813c28 (2026-10-29, built in a worktree) beside today's
+   on Promessi Sposi, alternated, 3 rounds each, same flags: 13.41 / 13.37 / 12.08 against 14.10 / 12.38 / 14.11 tok/s,
+   file-tier wait 4.3-6.5 s in both (189 reads took 0.26 s in October's runs). The machine changed, not the engine.
 2. **The CPU tier at the RAM's speed.** The kernel reads 41-47 GB/s cold with 12 threads and computes at 58-65 from
    L3; the RAM streams 62. Levers: the SMT siblings (`--threads 24`: the per-thread decode has gathers and table
    lookups, where a second thread a core fills the stalls), an L3 prefetch of the next layer's predicted CPU experts
