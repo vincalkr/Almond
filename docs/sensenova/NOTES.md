@@ -102,3 +102,11 @@ The server adds the switch to a template of this family that has none (a no-op w
 1 with the test above (8 tool steps, ~28.7K tokens, then a new query): 20.5 -> 0.79 s for the new query. Not measured:
 the answers' quality with the reasoning kept (the model was trained with it dropped) and how much faster the context
 fills.
+
+Quality, measured the same day (`local/sensenova-preserve/preserve_ab.py`, card 1, temperature 0): 40 pairs of
+MATH-500 problems, turn 1 problem A (its answer generated once and kept for both arms), turn 2 problem B graded. With
+turn 1's reasoning dropped (the template) 38 of 40 right, with it kept 36 of 40; the two that differ (pairs 4 and 18)
+both lost with it kept, none gained. Turn 2's prompt 482 -> 1,062 tokens on average, its answer 962 -> 1,015 tokens.
+Two pairs are within what 40 can tell apart, but nothing points to a gain: `preserve_thinking` stays off by default.
+The run planned 50 pairs; the arm without it stopped at pair 40 when the engine went silent for 300 s mid-answer
+(2,263 tokens into a reasoning, the server ended it), not looked into yet.
