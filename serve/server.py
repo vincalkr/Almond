@@ -6283,6 +6283,10 @@ def main() -> int:
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.min_max_tokens = int(cfg.get("min_max_tokens") or 0)    # opt-in, off by default
+    if cfg.get("preserve_thinking") is True:           # opt-in: the reasoning of earlier turns stays in the prompt
+        svc.template.defaults["preserve_thinking"] = True
+        print("[almond] preserve_thinking: earlier turns keep their reasoning (the next prompt extends the last one)",
+              flush=True)
     svc.reasoning_close_retry = cfg.get("reasoning_close_retry") is True    # #1053: opt-in, off by default
     svc.codex_thread_titles = cfg.get("codex_thread_titles") is True    # #923: opt-in, off by default
     svc.codex_compaction_cache = cfg.get("codex_compaction_cache") is True   # #924: opt-in, off by default

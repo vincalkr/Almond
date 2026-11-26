@@ -86,3 +86,19 @@ the mean of the two streams, so every feature is 4096 wide (fc: 20480 -> 4096). 
 these index it directly. The config's `layer_types` mark the fifth layer `full_attention`, but LightLLM's DFlash2 layer
 uses `sliding_window` for every layer, as the engine does.
 
+
+## The prompt read again after an agent loop, and `preserve_thinking` (2026-11-26)
+
+With the agent, a new user message after a run of tool calls read the whole conversation again (13,609 tokens in 8 s
+in a session; 28,599 tokens in 20.5 s in a test). The model's template (the Qwen3.5 one) drops the reasoning of every
+turn before the last user query, so when the next query arrives the turns of the previous tool loop are rendered
+again without it: the prompt changes right after the previous query and everything after it is computed again. The
+engine's checkpoints cannot help (a checkpoint in front of the answer to the last query was tried: it held, and saved
+267 tokens of 28,599); llama.cpp does the same with these models.
+
+`"preserve_thinking": true` in the configuration (opt-in, off in `local/sensenova-local.json`) renders the earlier
+turns with their reasoning, as Qwen3.6's template variable of the same name does: the next prompt extends the last one.
+The server adds the switch to a template of this family that has none (a no-op while it is not set). Measured on card
+1 with the test above (8 tool steps, ~28.7K tokens, then a new query): 20.5 -> 0.79 s for the new query. Not measured:
+the answers' quality with the reasoning kept (the model was trained with it dropped) and how much faster the context
+fills.

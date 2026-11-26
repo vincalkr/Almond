@@ -101,3 +101,28 @@ class ForcedCallOpening(unittest.TestCase):
         self.assertTrue(forced_call("required", one).endswith("<function=a>\n"))
         self.assertTrue(forced_call("required", two).endswith("<function="))
         self.assertIsNone(forced_call("auto", one))
+
+
+class PreserveThinking(unittest.TestCase):
+    """preserve_thinking (opt-in): a Qwen3.5-family template that drops earlier reasoning keeps it when asked, so the
+    next prompt extends the last one; without the variable it renders as before."""
+    SRC = ("{%- set ns = namespace(last_query_index=1) %}{%- for message in messages %}"
+           "{%- if message.role == 'assistant' %}{%- if loop.index0 > ns.last_query_index %}"
+           "<think>{{ message.reasoning_content }}</think>{%- endif %}{{ message.content }}"
+           "{%- else %}{{ message.content }}{%- endif %}{%- endfor %}")
+
+    def make(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        p = Path(d) / "t.jinja"
+        p.write_text(self.SRC)
+        return ChatTemplate(p)
+
+    def test_default_drops_and_switch_keeps(self):
+        t = self.make()
+        msgs = [{"role": "user", "content": "Q1"}, {"role": "assistant", "content": "A1", "reasoning_content": "R1"},
+                {"role": "user", "content": "Q2"}]
+        self.assertNotIn("R1", t.render(msgs))
+        t.defaults["preserve_thinking"] = True
+        self.assertIn("<think>R1</think>A1", t.render(msgs))
+        self.assertNotIn("R1", t.render(msgs, preserve_thinking=False))

@@ -49,6 +49,14 @@ class ChatTemplate:
         env.filters["tojson"] = tojson
         env.globals["raise_exception"] = raise_exception
         self.source = Path(path).read_text(encoding="utf-8")
+        # preserve_thinking (Qwen3.6's template variable): keep the reasoning of the turns before the last user query.
+        # Templates of the Qwen3.5 family (SenseNova-Loop) drop it with no switch; the same test gains one here, a no-op
+        # while the variable is not passed.  The server passes it only when the configuration asks (opt-in).
+        old = "{%- if loop.index0 > ns.last_query_index %}"
+        if "preserve_thinking" not in self.source and self.source.count(old) == 1:
+            self.source = self.source.replace(
+                old, "{%- if (preserve_thinking is defined and preserve_thinking) or loop.index0 > ns.last_query_index %}")
+        self.defaults: dict = {}                        # template variables every render gets unless the call sets them
         self.template = env.from_string(self.source)
         self.caps = self._detect_caps()
 
@@ -61,7 +69,7 @@ class ChatTemplate:
                                                       and not _text_of(m.get("content")).strip()
                                                       and not _has_image(m.get("content")) and not m.get("tool_calls"))]
         return self.template.render(messages=messages, tools=tools, add_generation_prompt=add_generation_prompt,
-                                    **kwargs)
+                                    **{**self.defaults, **kwargs})
 
     def _detect_caps(self) -> dict[str, bool]:
         """llama.cpp's capability names, checked at load time against this template and Almond's tool-call format.
