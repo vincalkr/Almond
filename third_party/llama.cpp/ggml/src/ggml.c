@@ -1086,6 +1086,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "DSV4_HC_POST",
     "DSV41_FAKE_QUANT",
     "DSV41_HC_MIXES",
+    "LOOP_MHC_COEF",
 
     "UNARY",
 
@@ -1103,7 +1104,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1203,6 +1204,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "dsv4_hc_post(x, residual, post, comb)",
     "dsv41_fake_quant(x)",
     "dsv41_hc_mixes(mixes, scale, base)",
+    "loop_mhc_coef(logits)",
 
     "unary(x)",
 
@@ -1220,7 +1222,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6592,6 +6594,20 @@ struct ggml_tensor * ggml_dsv41_hc_mixes(
     result->src[0] = mixes;
     result->src[1] = scale;
     result->src[2] = base;
+    return result;
+}
+
+struct ggml_tensor * ggml_loop_mhc_coef(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * logits,
+        int                   n_iter) {
+    GGML_ASSERT(logits->type == GGML_TYPE_F32 && ggml_is_contiguous(logits));
+    GGML_ASSERT(logits->ne[0] == 8 || logits->ne[0] == 24);
+    GGML_ASSERT(n_iter >= 1);
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, GGML_MAX_DIMS, logits->ne);
+    ggml_set_op_params_i32(result, 0, n_iter);
+    result->op     = GGML_OP_LOOP_MHC_COEF;
+    result->src[0] = logits;
     return result;
 }
 

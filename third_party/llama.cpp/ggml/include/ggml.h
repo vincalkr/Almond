@@ -587,6 +587,7 @@ extern "C" {
         GGML_OP_DSV4_HC_POST,
         GGML_OP_DSV41_FAKE_QUANT,
         GGML_OP_DSV41_HC_MIXES,
+        GGML_OP_LOOP_MHC_COEF,
 
         GGML_OP_UNARY,
 
@@ -2762,6 +2763,16 @@ extern "C" {
             struct ggml_tensor  * base,
             float                 rms_eps,
             float                 hc_eps,
+            int                   n_iter);
+
+    // Almond (tools/v41/ggml/loop-mhc.patch): SenseNova-Loop's mHC router coefficients from its logits.
+    //   logits: F32 [2*S + S*S, n_tokens] contiguous (S = 2 or 4 streams: pre[S], post[S], then the S x S mix row-major
+    //   [dst][src])   result: F32, the same shape: pre = sigmoid, post = 2*sigmoid, then the mix after n_iter log-space
+    //   Sinkhorn iterations (row logsumexp, then column logsumexp, then exp) stored dst-fastest: result[2S + dst + S*src]
+    //   (the comb layout of ggml_dsv4_hc_post).
+    GGML_API struct ggml_tensor * ggml_loop_mhc_coef(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * logits,
             int                   n_iter);
 
     // custom operators
