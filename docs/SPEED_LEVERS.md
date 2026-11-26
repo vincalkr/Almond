@@ -167,6 +167,9 @@ long session with the demoted duplicates in the arena.
    stream; the decode moves only ~100 MB/s from the drive. Tried and not changing it: `ALMOND_NVME_KEEPALIVE_US=500`,
    `ALMOND_FILE_THREADS=2`, reading into heap memory instead of the pinned arena slot. The NVMe is in an IOMMU
    DMA-FQ group (the cards identity); `iommu=pt` not tried.
+   `ALMOND_SPEC_TOP` re-measured after the trim (same runs, `ALMOND_SPEC_ADAPT=1`, layers l+2..l+3): top 4 issued
+   2,693-5,434 reads for 55-75 used, decode 19.20 -> 10.23 tok/s (17K) and 15.73 -> 8.45 (Promessi Sposi); top 8
+   10.56 and 10.67. The reads it adds load the same drive and RAM; stopped after one round, stays off.
 2. **The CPU tier at the RAM's speed.** The kernel reads 41-47 GB/s cold with 12 threads and computes at 58-65 from
    L3; the RAM streams 62. Levers: the SMT siblings (`--threads 24`: the per-thread decode has gathers and table
    lookups, where a second thread a core fills the stalls), an L3 prefetch of the next layer's predicted CPU experts
