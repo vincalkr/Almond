@@ -180,6 +180,11 @@ long session with the demoted duplicates in the arena.
    Ubuntu 26.10 with its kernel 7.3.0-11 (2026-11-27, `iommu=pt`, power-tune on, same script, 2 rounds): 17K
    18.07 / 18.88 tok/s, Promessi Sposi 14.73 / 16.40 tok/s (file 3.8 / 3.3 s for ~190 reads); idle read p50 1.1 ms.
    The same as on 7.0.12: the kernel is not what made the reads slow.
+   ROCm 10.2.0 (repo.radeon.com rocmradeon 26.17) against 7.14.0 pre3, same kernel 7.3, same script, 2 rounds
+   (the engine rebuilt from clean CMake caches; run with LD_LIBRARY_PATH=/opt/rocm/core-10.2/lib, as
+   /etc/ld.so.conf.d/rocm.conf still names core-7.14): 17K 19.71 / 19.03 against 18.07 / 18.88 tok/s, Promessi
+   Sposi 15.27 / 13.79 against 14.73 / 16.40, prompt 17K 448 / 410 against 415 tok/s (7.14's warm run); forced-token
+   argmax differences 1 / 5 against 1 / 7. Within the spread: no speed or quality change measured.
 2. **The CPU tier at the RAM's speed.** The kernel reads 41-47 GB/s cold with 12 threads and computes at 58-65 from
    L3; the RAM streams 62. Levers: the SMT siblings (`--threads 24`: the per-thread decode has gathers and table
    lookups, where a second thread a core fills the stalls), an L3 prefetch of the next layer's predicted CPU experts
