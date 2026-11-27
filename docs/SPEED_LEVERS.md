@@ -173,6 +173,10 @@ long session with the demoted duplicates in the arena.
    The 23 tok/s of 2026-10-26 is not the code: the engine of a813c28 (2026-10-29, built in a worktree) beside today's
    on Promessi Sposi, alternated, 3 rounds each, same flags: 13.41 / 13.37 / 12.08 against 14.10 / 12.38 / 14.11 tok/s,
    file-tier wait 4.3-6.5 s in both (189 reads took 0.26 s in October's runs). The machine changed, not the engine.
+   `iommu=pt` on the kernel line (2026-11-27, after a reboot, power-tune on, `local/bench-v41/ab-dense-levers.sh`
+   with one arm, 2 rounds): 17K 18.40 / 19.29 tok/s (file wait 0.81 / 0.58 s), Promessi Sposi 14.34 / 16.12 tok/s
+   (file 4.3 / 3.5 s for 188-191 reads, 19-23 ms a read); an idle 10 MB read p50 1.18, p90 5.9 ms. Within the
+   spread of the runs without it: the slow reads during decode are not the IOMMU's translation. Kept on (no cost seen).
 2. **The CPU tier at the RAM's speed.** The kernel reads 41-47 GB/s cold with 12 threads and computes at 58-65 from
    L3; the RAM streams 62. Levers: the SMT siblings (`--threads 24`: the per-thread decode has gathers and table
    lookups, where a second thread a core fills the stalls), an L3 prefetch of the next layer's predicted CPU experts
