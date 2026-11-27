@@ -177,6 +177,9 @@ long session with the demoted duplicates in the arena.
    with one arm, 2 rounds): 17K 18.40 / 19.29 tok/s (file wait 0.81 / 0.58 s), Promessi Sposi 14.34 / 16.12 tok/s
    (file 4.3 / 3.5 s for 188-191 reads, 19-23 ms a read); an idle 10 MB read p50 1.18, p90 5.9 ms. Within the
    spread of the runs without it: the slow reads during decode are not the IOMMU's translation. Kept on (no cost seen).
+   Ubuntu 26.10 with its kernel 7.3.0-11 (2026-11-27, `iommu=pt`, power-tune on, same script, 2 rounds): 17K
+   18.07 / 18.88 tok/s, Promessi Sposi 14.73 / 16.40 tok/s (file 3.8 / 3.3 s for ~190 reads); idle read p50 1.1 ms.
+   The same as on 7.0.12: the kernel is not what made the reads slow.
 2. **The CPU tier at the RAM's speed.** The kernel reads 41-47 GB/s cold with 12 threads and computes at 58-65 from
    L3; the RAM streams 62. Levers: the SMT siblings (`--threads 24`: the per-thread decode has gathers and table
    lookups, where a second thread a core fills the stalls), an L3 prefetch of the next layer's predicted CPU experts
