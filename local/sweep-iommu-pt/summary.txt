@@ -1,0 +1,5 @@
+pt-r1                        huge17k        diff=1    decode: 128 tokens in 6.90 s = 18.40 tok/s; experts 17267 hit / 8909 cpu / 0 pcie / 178 file (66.0% VRAM hits), cpu 1605 ms, file 812 ms; spec reads 0 issued / 0 used; pr
+pt-r1                        sposi          diff=6    decode: 300 tokens in 20.86 s = 14.34 tok/s; experts 55421 hit / 10621 cpu / 0 pcie / 191 file (83.9% VRAM hits), cpu 1867 ms, file 4319 ms; spec reads 0 issued / 0 used;
+pt-r2                        huge17k        diff=1    decode: 128 tokens in 6.58 s = 19.29 tok/s; experts 17222 hit / 8931 cpu / 0 pcie / 180 file (65.9% VRAM hits), cpu 1598 ms, file 581 ms; spec reads 0 issued / 0 used; pr
+pt-r2                        sposi          diff=6    decode: 300 tokens in 18.55 s = 16.12 tok/s; experts 55345 hit / 10611 cpu / 0 pcie / 188 file (83.9% VRAM hits), cpu 1893 ms, file 3537 ms; spec reads 0 issued / 0 used;
+ABDONE

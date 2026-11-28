@@ -1,0 +1,7 @@
+base-r1                      huge17k        diff=1    decode: 128 tokens in 6.62 s = 19.19 tok/s; experts 17295 hit / 8928 cpu / 0 pcie / 181 file (66.0% VRAM hits), cpu 1597 ms, file 508 ms; spec reads 0 issued / 0 used; pr
+base-r1                      sposi          diff=6    decode: 300 tokens in 18.23 s = 16.40 tok/s; experts 55345 hit / 10611 cpu / 0 pcie / 188 file (83.9% VRAM hits), cpu 1902 ms, file 3527 ms; spec reads 0 issued / 0 used;
+base-r2                      huge17k        diff=1    decode: 128 tokens in 6.85 s = 18.54 tok/s; experts 17189 hit / 8990 cpu / 0 pcie / 183 file (65.7% VRAM hits), cpu 1605 ms, file 773 ms; spec reads 0 issued / 0 used; pr
+base-r2                      sposi          diff=6    decode: 300 tokens in 18.70 s = 15.99 tok/s; experts 55345 hit / 10611 cpu / 0 pcie / 188 file (83.9% VRAM hits), cpu 1879 ms, file 3426 ms; spec reads 0 issued / 0 used;
+base-r3                      huge17k        diff=1    decode: 128 tokens in 6.83 s = 18.61 tok/s; experts 17292 hit / 8873 cpu / 0 pcie / 177 file (66.1% VRAM hits), cpu 1577 ms, file 778 ms; spec reads 0 issued / 0 used; pr
+base-r3                      sposi          diff=6    decode: 300 tokens in 19.65 s = 15.21 tok/s; experts 55345 hit / 10611 cpu / 0 pcie / 188 file (83.9% VRAM hits), cpu 1895 ms, file 4030 ms; spec reads 0 issued / 0 used;
+ABDONE

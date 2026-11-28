@@ -1,0 +1,5 @@
+k73-r1                       huge17k        diff=1    decode: 128 tokens in 7.03 s = 18.07 tok/s; experts 17250 hit / 8910 cpu / 0 pcie / 180 file (65.9% VRAM hits), cpu 1659 ms, file 885 ms; spec reads 0 issued / 0 used; pr
+k73-r1                       sposi          diff=7    decode: 300 tokens in 20.30 s = 14.73 tok/s; experts 55269 hit / 10594 cpu / 0 pcie / 191 file (83.9% VRAM hits), cpu 1926 ms, file 3786 ms; spec reads 0 issued / 0 used;
+k73-r2                       huge17k        diff=1    decode: 128 tokens in 6.73 s = 18.88 tok/s; experts 17279 hit / 8893 cpu / 0 pcie / 180 file (66.0% VRAM hits), cpu 1660 ms, file 462 ms; spec reads 0 issued / 0 used; pr
+k73-r2                       sposi          diff=7    decode: 300 tokens in 18.23 s = 16.40 tok/s; experts 55352 hit / 10583 cpu / 0 pcie / 195 file (83.9% VRAM hits), cpu 1943 ms, file 3331 ms; spec reads 0 issued / 0 used;
+ABDONE
