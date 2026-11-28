@@ -185,6 +185,11 @@ long session with the demoted duplicates in the arena.
    /etc/ld.so.conf.d/rocm.conf still names core-7.14): 17K 19.71 / 19.03 against 18.07 / 18.88 tok/s, Promessi
    Sposi 15.27 / 13.79 against 14.73 / 16.40, prompt 17K 448 / 410 against 415 tok/s (7.14's warm run); forced-token
    argmax differences 1 / 5 against 1 / 7. Within the spread: no speed or quality change measured.
+   hipFile (GPU-direct reads, NVMe straight into VRAM, in ROCm 10.2): `local/bench-v41/hipfile-read.cpp` fails on
+   its first read (-999) with the driver reporting version 0.0 and no NVMe support; `/opt/rocm/bin/ais-check`:
+   kernel P2PDMA True, HIP runtime True, the data volume hipFile-capable (ext4 ordered), amdgpu False. The in-tree
+   amdgpu of kernel 7.3 lacks it; it needs AMD's amdgpu-dkms (31.70 ships driver 7.2.3, built for 26.04). The
+   engine's path (O_DIRECT into pinned memory, then a copy) with the same tool, idle: median 2.07, p90 58 ms.
 2. **The CPU tier at the RAM's speed.** The kernel reads 41-47 GB/s cold with 12 threads and computes at 58-65 from
    L3; the RAM streams 62. Levers: the SMT siblings (`--threads 24`: the per-thread decode has gathers and table
    lookups, where a second thread a core fills the stalls), an L3 prefetch of the next layer's predicted CPU experts
