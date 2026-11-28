@@ -923,3 +923,15 @@ fork's patches add ~15% at pp512; stock's 1,888 at pp4096 is its pipeline parall
 flight, card 0 on the next while card 1 finishes the last), which neither Almond's engine nor the fork's default run
 has. A pipelined prompt read over the layer split is the lever (~1.6-1.75x on two cards); `--tp` trades ~30% of the
 prompt read for ~10% of decode.
+
+### Qwen3.8-Flash-Next with several requests at once (`"parallel"`, measured 2026-11-28)
+
+`local/qwen-local.json` without vision and without saving the expert profile, port 8199, `"parallel": N` (the
+engine's `--batch N`), four different short questions at temperature 0, no thinking, up to 400 tokens, after one
+warm-up request: one request 289 tokens in 3.9 s, 73.5 tok/s; two at once 18.1 and 19.1 tok/s each, 36.0 tok/s
+together; four at once 9.6-10.8 each, 33.4 together. Several requests at once are slower in total than the same
+requests one after the other: each row routes to its own experts, and with 56 GiB of them in RAM a wider batch reads
+more of them over PCIe (43-49% of the routed experts in the batched runs). Not a way to run sub-agents on this
+configuration. The engine also logs `prefill gemm: hipBLASLt version mismatch: file=100401 runtime=100500; using
+hipBLASEx` since ROCm 10.2: `local/hipblaslt/gfx1100-qwen-hipblaslt-100401-local.txt` no longer applies (prompt-read
+speed on 10.2 not measured).
