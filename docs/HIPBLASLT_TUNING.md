@@ -66,5 +66,10 @@ at N 320, and T 8192 at N 4. Every candidate hipBLASLt 100500 offered for them g
 
 Measured (2026-11-28, `local/qwen-local.json` without vision, a 20,324-token prompt through the server, 16 tokens out,
 arms alternated): with the 100401 file (refused, hipBLASEx) 31.2 / 36.1 s, with the 100500 file 23.0 / 25.4 s, the
-same answer text. `local/qwen-local.json` now names the 100500 file. GLM's configurations still name
-`gfx1100-glm-hipblaslt-100401-local.txt` and so run on hipBLASEx under ROCm 10.2 (not regenerated yet).
+same answer text. `local/qwen-local.json` now names the 100500 file.
+
+GLM's file for 100500 kept all 62 shapes of the old one. Measured the same way (`local/glm-local.json`, an
+18,920-token prompt, the conversation store moved aside with `ALMOND_GLM_SLOT_DIR` so each run reads the prompt
+again): with the 100401 file 49 / 50.2 s (383 / 386 tok/s), with the 100500 file 38 / 38.2 s (492 / 510 tok/s). The
+16-token answers differ between runs; GLM's runs do not repeat exactly (AGENTS.md), and every tuned solution matched
+hipBLAS within relative L2 1e-4. Both GLM configurations now name the 100500 file.
