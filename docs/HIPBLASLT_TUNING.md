@@ -63,3 +63,8 @@ The Qwen file for ROCm 10.2 (hipBLASLt 100500, 2026-11-28) took about 10 minutes
 old file's 43 shapes. The other 6 are bf16 with K = 10240 or N = 10240: T 128, 1024, 2048 and 6144 at N 2560, T 4096
 at N 320, and T 8192 at N 4. Every candidate hipBLASLt 100500 offered for them gave non-finite results
 (`lt_reject ... finite=false relative_l2=inf`), so those six stay on the default path.
+
+Measured (2026-11-28, `local/qwen-local.json` without vision, a 20,324-token prompt through the server, 16 tokens out,
+arms alternated): with the 100401 file (refused, hipBLASEx) 31.2 / 36.1 s, with the 100500 file 23.0 / 25.4 s, the
+same answer text. `local/qwen-local.json` now names the 100500 file. GLM's configurations still name
+`gfx1100-glm-hipblaslt-100401-local.txt` and so run on hipBLASEx under ROCm 10.2 (not regenerated yet).

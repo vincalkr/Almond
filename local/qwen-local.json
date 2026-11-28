@@ -44,7 +44,7 @@
     "--vision"
   ],
   "env": {
-    "ALMOND_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-qwen-hipblaslt-100401-local.txt",
+    "ALMOND_HIPBLASLT_TUNING": "local/hipblaslt/gfx1100-qwen-hipblaslt-100500-local.txt",
     "ALMOND_PF_GEMM": "1",
     "ALMOND_PF_SWITCH_MIN_T": "4096"
   },
