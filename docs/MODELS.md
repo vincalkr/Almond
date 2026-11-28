@@ -905,3 +905,13 @@ now takes about 0.1 s to encode instead of 2.6 s; through the server the first t
 came after 1.34 s. At 300 image tokens the encoder needs 1.70 GB, which card 0 has free, so nothing is lent unless
 the card is fuller; card 0 settles at the same use after every request. The two-card configurations (`--tp`) keep
 the CPU encoder: the split weights are not lendable yet.
+
+### llama-cpp-rdna-boosts on Qwen3.8-27B Q8_0 (measured 2026-11-28)
+
+github.com/stew675/llama-cpp-rdna-boosts r367 (all default blocks on llama.cpp 9197945), built for gfx1100 against
+ROCm 10.2, `llama-bench -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0` on the two cards (layer split), 2 repetitions: with block
+05's head-256 band (`GGML_HIP_FA_BAND_WMMA_H256=1`) pp512 1,160.5, tg128 25.23, at depth 8192 pp512 1,069.1, tg128
+24.69 tok/s; with it off 1,157.3, 25.19, 1,067.9, 24.70. The band changes nothing on gfx1100 here. Almond's engine on
+the same files (`--tp`, q8_0 KV, no MTP, `--bench 128`): decode 28.3-29.8 tok/s (faster), an 8,192-token prompt read
+from empty at 696 / 752 tok/s (slower than the fork's ~1,070-1,160 for 512 tokens at depth; not the same measure, so
+where the gap is - kernels or the stock llama.cpp it is built on - is not known yet).
