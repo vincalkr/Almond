@@ -915,3 +915,11 @@ ROCm 10.2, `llama-bench -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0` on the two cards (lay
 the same files (`--tp`, q8_0 KV, no MTP, `--bench 128`): decode 28.3-29.8 tok/s (faster), an 8,192-token prompt read
 from empty at 696 / 752 tok/s (slower than the fork's ~1,070-1,160 for 512 tokens at depth; not the same measure, so
 where the gap is - kernels or the stock llama.cpp it is built on - is not known yet).
+Where the prompt-read gap is (same day, same files): Almond's engine with the layers split over the two cards (no
+`--tp`) reads a 4,096-token prompt at 1,048 / 1,074 tok/s, decode 22.4 / 23.1 (with `--tp` 693 / 759 and 24.3 /
+25.7). Stock llama.cpp 9197945 (`llama-bench`, same flags): pp512 1,011.9, pp4096 1,888.6 with its default batch 2048
+/ ubatch 512, 1,169.3 with one 4,096-token ubatch (`-b 4096 -ub 4096`), tg128 23.62; the fork pp4096 1,128.0. The
+fork's patches add ~15% at pp512; stock's 1,888 at pp4096 is its pipeline parallelism (several 512-token ubatches in
+flight, card 0 on the next while card 1 finishes the last), which neither Almond's engine nor the fork's default run
+has. A pipelined prompt read over the layer split is the lever (~1.6-1.75x on two cards); `--tp` trades ~30% of the
+prompt read for ~10% of decode.
