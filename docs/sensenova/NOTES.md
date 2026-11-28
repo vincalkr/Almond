@@ -115,3 +115,12 @@ server's message); it is the only `sq_intr` in this boot and in the five before 
 on the same card ran through (3,275 tokens, 74.5 tok/s, both times), so it is not the engine's path for that prompt.
 Both cards run LACT's profile with a -200 mV voltage offset (`/etc/lact/config.yaml`; its base entry has -100 mV for
 card 0), a likely cause of a lone shader error; not proven by a run at a smaller offset.
+
+## Chunked DeltaNet prefill from llama-cpp-rdna-boosts (measured 2026-11-28, not kept)
+
+Block 03 of github.com/stew675/llama-cpp-rdna-boosts (MIT) ported into the vendored ggml behind an opt-in switch: its
+fp32 chunked gated-delta-net kernel and its bf16/WMMA gfx11 kernel, taken for one sequence and a batch longer than
+max(K, 16). `--bench 64` on the docs' text tokenized for SenseNova (one card, q8_0 KV, MTP 3, ROCm 10.2), prompt
+read: 8K 1,672 / 1,786 tok/s sequential, 1,593 / 1,672 fp32 chunked, 1,725 / 1,820 bf16; 32K 1,481, 1,405 and 1,507.
+The DeltaNet scan is not what the prompt read waits on here; the bf16 kernel's +2% is within the runs' spread and its
+output differs (drafts accepted 36/81 against 37/78). Removed.
